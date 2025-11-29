@@ -1,0 +1,318 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Suporte Xmenu</title>
+    <!-- CORREÇÃO: Removido 'config/' do caminho, pois o HTML e o ICO estão no mesmo diretório de destino (C:\Netcontroll\SuporteXmenuChat\Config) -->
+    <link rel="icon" href="faviconxmenu.ico" type="image/x-icon"> 
+    <link href="https://fonts.googleapis.com/css2?family=Montserrat:wght@400;700&display=swap" rel="stylesheet"> 
+    <style>
+        /* Estilos gerais */
+        body {
+            font-family: 'Montserrat', sans-serif;
+            margin: 0;
+            padding: 0;
+            background-color: #f4f8ff;
+            color: #333;
+            display: flex;
+            flex-direction: column;
+            height: 100vh;
+            line-height: 1.5;
+            -webkit-font-smoothing: antialiased;
+            -moz-osx-font-smoothing: grayscale;
+        }
+
+        *, *::before, *::after { box-sizing: border-box; }
+
+        header {
+            background: linear-gradient(135deg, #1b61a7 0%, #174d85 100%);
+            color: #fff;
+            padding: 24px 16px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 12px;
+            text-align: center;
+            box-shadow: 0 6px 14px rgba(0, 0, 0, 0.12);
+        }
+
+        header img {
+            height: clamp(40px, 32px + 2vw, 48px);
+            width: clamp(40px, 32px + 2vw, 48px);
+            object-fit: contain;
+            flex: 0 0 auto;
+            filter: drop-shadow(0 2px 2px rgba(0,0,0,0.15));
+        }
+
+        header h1 {
+            margin: 0;
+            font-size: clamp(1.4rem, 1rem + 1.2vw, 1.9rem);
+            font-weight: 700;
+            letter-spacing: 0.2px;
+        }
+
+        .content {
+            flex: 1;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            padding: 32px 16px;
+        }
+
+        .content-inner {
+            width: 100%;
+            max-width: 1100px;
+            display: grid;
+            grid-template-columns: 1fr;
+            gap: 32px;
+            align-items: center;
+        }
+
+        .modern-container {
+            background-color: #fff;
+            padding: 28px;
+            border-radius: 14px;
+            border: none;
+            box-shadow: 0 6px 16px rgba(0, 0, 0, 0.06);
+            text-align: left;
+            width: 100%;
+            transform: translateY(0);
+            transition: box-shadow 160ms ease, transform 180ms ease;
+            will-change: transform;
+        }
+
+        .modern-container:hover {
+            transform: translateY(-6px);
+            box-shadow: 0 18px 36px rgba(0, 0, 0, 0.14);
+        }
+
+        .card-title {
+            margin: 0 0 12px 0;
+            font-size: 1.1em;
+            font-weight: 700;
+            color: #1b61a7;
+        }
+
+        .tips {
+            list-style: none;
+            padding: 0;
+            margin: 0 0 12px 0;
+        }
+
+        .tips li {
+            padding: 8px 0;
+            border-bottom: 1px solid #eef2f6;
+            color: #4a5568;
+            font-size: 0.98em;
+        }
+
+        .tips li:last-child { border-bottom: 0; }
+
+        .modern-text {
+            font-size: clamp(1.6rem, 1.2rem + 2vw, 2.3rem);
+            color: #1b61a7;
+            margin: 0 0 10px 0;
+            font-weight: 700;
+            line-height: 1.2;
+        }
+
+        .description {
+            font-size: clamp(1rem, 0.9rem + 0.4vw, 1.1rem);
+            color: #4a5568;
+            margin: 0;
+            max-width: 56ch;
+        }
+
+        /* CTA Universidade Xmenu */
+        .cta-container {
+            background-color: #ffffff;
+            border-radius: 12px;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.06);
+            padding: 12px 14px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 8px;
+            grid-column: 1 / -1;
+            max-width: 680px;
+            margin: 8px auto 0 auto;
+        }
+
+        .cta-text {
+            margin: 0;
+            color: #1b3b66;
+            font-size: 0.95em;
+            font-weight: 600;
+        }
+
+        .cta-link {
+            background-color: #1b61a7;
+            color: #fff;
+            text-decoration: none;
+            font-weight: 700;
+            padding: 8px 12px;
+            border-radius: 8px;
+            box-shadow: 0 3px 10px rgba(27, 97, 167, 0.22);
+            transition: background-color 150ms ease, transform 150ms ease, box-shadow 150ms ease;
+            white-space: nowrap;
+            font-size: 0.95em;
+        }
+
+        .cta-link:hover { background-color: #175894; transform: translateY(-1px); box-shadow: 0 8px 18px rgba(27, 97, 167, 0.28); }
+        .cta-link:active { transform: translateY(0); box-shadow: 0 3px 10px rgba(27, 97, 167, 0.2); }
+
+        footer {
+            background-color: #14528c;
+            color: #fff;
+            text-align: center;
+            padding: 14px 12px;
+            font-size: 0.95em;
+            box-shadow: 0 -4px 6px rgba(0, 0, 0, 0.1);
+        }
+
+        /* Estilos para o botão */
+        .pdf-button {
+            background-color: #1b61a7;
+            color: #fff;
+            border: none;
+            padding: 14px 22px;
+            font-size: clamp(1rem, 0.95rem + 0.3vw, 1.05rem);
+            font-weight: 700;
+            cursor: pointer;
+            border-radius: 12px;
+            margin-top: 28px;
+            text-decoration: none;
+            display: inline-block;
+            box-shadow: 0 6px 16px rgba(27, 97, 167, 0.25);
+            transition: background-color 160ms ease, transform 120ms ease, box-shadow 160ms ease;
+        }
+
+        /* Imagens fluidas por padrão */
+        img { max-width: 100%; height: auto; }
+
+        .pdf-button:hover {
+            background-color: #175894;
+            transform: translateY(-1px);
+            box-shadow: 0 10px 22px rgba(27, 97, 167, 0.28);
+        }
+
+        .pdf-button:active {
+            transform: translateY(0);
+            box-shadow: 0 4px 12px rgba(27, 97, 167, 0.2);
+        }
+
+        .pdf-button:focus-visible {
+            outline: 3px solid rgba(27, 97, 167, 0.3);
+            outline-offset: 3px;
+        }
+
+        /* Responsivos */
+        @media (max-width: 1024px) {
+            .content { padding: 24px 14px; }
+            .cta-container { max-width: 100%; }
+        }
+
+        @media (min-width: 900px) {
+            .content-inner { grid-template-columns: 1.15fr 0.85fr; }
+        }
+
+        @media (max-width: 768px) {
+            header {
+                padding: 18px 12px;
+                gap: 10px;
+            }
+            header h1 {
+                font-size: clamp(1.2rem, 1rem + 1vw, 1.4rem);
+            }
+            header img {
+                height: clamp(36px, 30px + 2vw, 40px);
+                width: clamp(36px, 30px + 2vw, 40px);
+            }
+
+            .content { padding: 20px 12px; }
+            .content-inner { display: block; max-width: 680px; }
+
+            .modern-text { font-size: clamp(1.35rem, 1.1rem + 1.5vw, 1.6rem); }
+
+            .description { font-size: clamp(0.95rem, 0.9rem + 0.4vw, 1rem); max-width: 36ch; }
+
+            .modern-container { margin-top: 16px; padding: 20px 16px; border-radius: 12px; }
+            .cta-container { flex-direction: column; align-items: flex-start; gap: 8px; }
+        }
+
+        @media (max-width: 480px) {
+            .content { padding: 16px 10px; }
+            .modern-container { padding: 16px 12px; }
+            .tips li { font-size: 0.95em; }
+            .pdf-button { width: 100%; padding: 16px 20px; text-align: center; }
+            .cta-link { width: 100%; text-align: center; }
+        }
+
+        /* Tema escuro automático opcional */
+        @media (prefers-color-scheme: dark) {
+            body {
+                background: linear-gradient(180deg, #212c52 0%, #1b61a7 100%);
+                color: #e5e7eb;
+            }
+            .modern-container {
+                background-color: #0b1220;
+                border-color: rgba(255,255,255,0.06);
+                box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
+            }
+            .modern-text { color: #7cc0ff; }
+            .description { color: #cbd5e1; }
+            footer { background-color: #0b2340; }
+            .pdf-button { box-shadow: 0 6px 16px rgba(124, 192, 255, 0.25); }
+        }
+    </style>
+</head>
+<body>
+    <header>
+        <!-- CORREÇÃO: Removido 'config/' do caminho da imagem, pois o HTML e o PNG estão no mesmo diretório de destino (C:\Netcontroll\SuporteXmenuChat\Config) -->
+        <img src="iconheaderxmenu.png" alt="Logo" />
+        <h1>Bem-vindo ao Suporte Xmenu via Chat</h1>
+    </header>
+
+    <div class="content">
+        <div class="content-inner">
+            <section class="hero">
+                <div class="modern-text">Estamos prontos para ajudar você.</div>
+                <p class="description">Use o chat ao lado para falar conosco. Não feche ou recarregue a página enquanto estiver em atendimento.</p>
+            </section>
+            <aside class="modern-container" aria-label="Dicas antes do suporte">
+                <h3 class="card-title">Dicas rápidas</h3>
+                <ul class="tips">
+                    <li>Passe por todos os passos para chamar o suporte.</li>
+                    <li>Tenha os dados da loja em mãos.</li>
+                    <li>Descreva o passo a passo do problema.</li>
+                </ul>
+                <!-- Botão para abrir o PDF em nova aba -->
+                <!-- CORREÇÃO: Caminho corrigido para o PDF (removido 'config/') -->
+                <a href="SuporteXmenuDicas.pdf" target="_blank" class="pdf-button">ABRIR DICAS</a>
+            </aside>
+            <div class="cta-container" role="region" aria-label="Universidade Xmenu">
+                <p class="cta-text">Dúvidas sobre Cadastro de produtos, Combos e Funções do PDV?</p>
+                <a class="cta-link" href="https://netcontroll.gitbook.io/xmenu-universidade/" target="_blank" rel="noopener">CLIQUE AQUI</a>
+            </div>
+        </div>
+    </div>
+
+    <footer>
+        <p>Netcontroll Sistemas &copy; 2012-2026</p>
+    </footer>
+
+    <script>
+        var organization_token = "ba73c3289b77e89a13509acd861dfadd4b490e81";
+        var icon_color = "#000000";
+        var init_minimal = true;
+        var show_chat_icon = true;
+
+        var script = document.createElement('script');
+        script.type = 'text/javascript';
+        script.src = 'https://public-assets.tiflux.com/chat_widget.js?organization_token=' + organization_token + '&icon_color=' + encodeURIComponent(icon_color);
+        document.head.appendChild(script);
+    </script>
+    
+</body>
+</html>
