@@ -489,9 +489,14 @@ $btnConfig.Add_Click({
     Set-ItemProperty -Path "HKCU:\Control Panel\Desktop" -Name "FontSmoothing" -Value "2" -Force
     
     # Limpeza
-    Log-Message "Limpando arquivos temporarios..."
+    Log-Message "Limpando arquivos temporarios (Temp do Usuario)..."
     Remove-Item -Path "$env:TEMP\*" -Recurse -Force -ErrorAction SilentlyContinue | Out-Null
-    Remove-Item -Path "$env:windir\Temp\*" -Recurve -Force -ErrorAction SilentlyContinue | Out-Null
+    
+    # CORREÇÃO CRÍTICA: 'Recurve' -> 'Recurse' e adicionando segurança para 'Acesso Negado'
+    Log-Message "Limpando arquivos temporarios (Temp do Windows)..."
+    Get-ChildItem -Path "$env:windir\Temp" -Force -ErrorAction SilentlyContinue | Where-Object { -not $_.PSIsContainer } | Remove-Item -Force -ErrorAction SilentlyContinue | Out-Null
+    Get-ChildItem -Path "$env:windir\Temp" -Directory -Force -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue | Out-Null
+
     
     # 7.5. WALLPAPER & ATALHO DE SUPORTE (AJUSTADO PARA DOWNLOAD REMOTO)
     
@@ -502,8 +507,7 @@ $btnConfig.Add_Click({
     $tempDir = "$env:TEMP\XmenuResources"
     if (-not (Test-Path $tempDir)) { New-Item -Path $tempDir -ItemType Directory -Force | Out-Null }
     
-    # ATENÇÃO CRÍTICA: Não usar Join-Path sem $Path quando for variável (Corrige o erro de "Path é nulo")
-    # O Join-Path só deve ser usado se $tempDir existir.
+    # ATENÇÃO CRÍTICA: Correção para erro de caminho nulo
     $wallpaperPath = "$tempDir\$wallpaperFileName"
     
     # Usa a funcao WebClient para baixar o fundo.png para a pasta TEMP
