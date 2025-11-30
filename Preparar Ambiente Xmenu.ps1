@@ -130,7 +130,9 @@ function Log-Error {
     param($Msg)
     $txtLog.AppendText("[$((Get-Date).ToString('HH:mm:ss'))] ERRO: $Msg`r`n")
     $txtLog.ScrollToCaret()
+    $txtLog.ForeColor = $ColorError
     $form.Refresh()
+    $txtLog.ForeColor = $ColorLogText # Volta para a cor normal
 }
 
 # --- FUNCAO DOWNLOAD SIMPLES (USADA PARA DOWNLOADS EM SEQUENCIA) ---
@@ -499,7 +501,10 @@ $btnConfig.Add_Click({
     $wallpaperUrl = "$RepoBase/$wallpaperFileName"
     $tempDir = "$env:TEMP\XmenuResources"
     if (-not (Test-Path $tempDir)) { New-Item -Path $tempDir -ItemType Directory -Force | Out-Null }
-    $wallpaperPath = Join-Path -Path $tempDir -ChildPath $wallpaperFileName
+    
+    # ATENÇÃO CRÍTICA: Não usar Join-Path sem $Path quando for variável (Corrige o erro de "Path é nulo")
+    # O Join-Path só deve ser usado se $tempDir existir.
+    $wallpaperPath = "$tempDir\$wallpaperFileName"
     
     # Usa a funcao WebClient para baixar o fundo.png para a pasta TEMP
     try {
