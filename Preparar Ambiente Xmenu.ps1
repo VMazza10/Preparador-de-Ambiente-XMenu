@@ -15,7 +15,8 @@
 
 # ⚠️ URL BASE DO REPOSITÓRIO RAW (AJUSTADA PARA SUA CONTA)
 # Esta URL é usada para baixar recursos como fundo.png e arquivos da pasta Config.
-$RepoBase = "https://raw.githubusercontent.com/VMazza10/Preparador-de-Ambiente-XMenu/main/" 
+# REMOVIDA A BARRA FINAL PARA EVITAR DUPLICIDADE NA CONSTRUÇÃO DA URL
+$RepoBase = "https://raw.githubusercontent.com/VMazza10/Preparador-de-Ambiente-XMenu/main" 
 
 # --- VERIFICAÇÃO DE ADMINISTRADOR (Modificada para scripts remotos) ---
 $principal = [Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()
@@ -142,10 +143,12 @@ function Download-Only {
     $destPath = "$env:TEMP\$FileName"
 
     try {
+        # CORREÇÃO: Codifica espaços na URL para %20 para evitar erros 404
+        $SafeUrl = $Url.Replace(" ", "%20")
         Log-Message "Iniciando download: $FileName"
         
         $wc = New-Object System.Net.WebClient
-        $wc.DownloadFile($Url, $destPath)
+        $wc.DownloadFile($SafeUrl, $destPath)
         
         Log-Message "Executando/Abrindo arquivo: $FileName"
         
@@ -154,7 +157,7 @@ function Download-Only {
         Log-Message "Arquivo iniciado com sucesso."
         return $true
     } catch {
-        Log-Error "Falha no download de ${FileName} (URL: ${Url}): $_" 
+        Log-Error "Falha no download de ${FileName} (URL: ${SafeUrl}): $_" 
         [System.Windows.Forms.MessageBox]::Show("Erro no download de $FileName. Verifique a internet.", "Erro", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Error)
         return $false
     }
@@ -173,10 +176,12 @@ function Download-And-Run {
     $destPath = "$env:TEMP\$FileName"
 
     try {
+        # CORREÇÃO: Codifica espaços na URL
+        $SafeUrl = $Url.Replace(" ", "%20")
         Log-Message "Iniciando download: $FileName"
         
         $wc = New-Object System.Net.WebClient
-        $wc.DownloadFile($Url, $destPath)
+        $wc.DownloadFile($SafeUrl, $destPath)
         
         Log-Message "Executando/Abrindo arquivo..."
         $ButtonObj.Text = "Abrindo..."
@@ -511,7 +516,9 @@ $btnConfig.Add_Click({
     # Define Wallpaper: Baixa o fundo.png do GitHub para a pasta TEMP antes de definir
     Log-Message "Configurando Papel de Parede (Baixando do GitHub)..."
     $wallpaperFileName = "fundo.png"
+    # URL CONSTRUÍDA CORRETAMENTE: $RepoBase sem barra final + / + NomeArquivo
     $wallpaperUrl = "$RepoBase/$wallpaperFileName"
+    
     $tempDir = "$env:TEMP\XmenuResources"
     if (-not (Test-Path $tempDir)) { New-Item -Path $tempDir -ItemType Directory -Force | Out-Null }
     
@@ -520,8 +527,10 @@ $btnConfig.Add_Click({
     
     # Usa a funcao WebClient para baixar o fundo.png para a pasta TEMP
     try {
+        # CORREÇÃO: Codifica espaços na URL
+        $SafeWallpaperUrl = $wallpaperUrl.Replace(" ", "%20")
         $wc = New-Object System.Net.WebClient
-        $wc.DownloadFile($wallpaperUrl, $wallpaperPath)
+        $wc.DownloadFile($SafeWallpaperUrl, $wallpaperPath)
         Log-Message "Download de 'fundo.png' concluido."
         
         # Define o estilo do Wallpaper: 10 = Fill (Preencher), 0 = Nao ladrilhar
@@ -575,8 +584,11 @@ $btnConfig.Add_Click({
             $destination = Join-Path -Path $targetConfigDir -ChildPath $destFileName
             
             # Baixa e salva no destino final (C:\Netcontroll\SuporteXmenuChat\Config)
+            # CORREÇÃO: Codifica espaços na URL para evitar falhas silenciosas
+            $SafeSourceUrl = $sourceUrl.Replace(" ", "%20")
+            
             $wc = New-Object System.Net.WebClient
-            $wc.DownloadFile($sourceUrl, $destination)
+            $wc.DownloadFile($SafeSourceUrl, $destination)
             Log-Message "Arquivo baixado: $destFileName"
         }
         
@@ -588,22 +600,26 @@ $btnConfig.Add_Click({
 
     # 2. Criar NOVO atalho na Area de Trabalho que aponta para o HTML na pasta Config e usa o icone em C:\Config
     Log-Message "Criando atalho na Area de Trabalho com icone customizado..."
-    try {
-        $WshShell = New-Object -ComObject WScript.Shell
-        $Shortcut = $WshShell.CreateShortcut($shortcutPath)
-        
-        # CORREÇÃO CRÍTICA: Apontar diretamente para o arquivo HTML
-        $Shortcut.TargetPath = $finalHtmlPath 
-        
-        # CORREÇÃO: Argumentos são vazios, o navegador faz o trabalho
-        $Shortcut.Arguments = "" 
-        
-        $Shortcut.IconLocation = Join-Path -Path $targetConfigDir -ChildPath $iconFileName
-        $Shortcut.Save()
-        
-        Log-Message "Atalho '$shortcutName' criado com sucesso na Area de Trabalho com icone e metodo de abertura robusto."
-    } catch {
-        Log-Error "Falha ao criar atalho com WScript.Shell: $_"
+    if (Test-Path $finalHtmlPath) {
+        try {
+            $WshShell = New-Object -ComObject WScript.Shell
+            $Shortcut = $WshShell.CreateShortcut($shortcutPath)
+            
+            # CORREÇÃO CRÍTICA: Apontar diretamente para o arquivo HTML
+            $Shortcut.TargetPath = $finalHtmlPath 
+            
+            # CORREÇÃO: Argumentos são vazios, o navegador faz o trabalho
+            $Shortcut.Arguments = "" 
+            
+            $Shortcut.IconLocation = Join-Path -Path $targetConfigDir -ChildPath $iconFileName
+            $Shortcut.Save()
+            
+            Log-Message "Atalho '$shortcutName' criado com sucesso."
+        } catch {
+            Log-Error "Falha ao criar atalho: $_"
+        }
+    } else {
+        Log-Error "Não foi possível criar o atalho: O arquivo HTML de destino não foi encontrado em $finalHtmlPath."
     }
     
     # 3. CORREÇÃO DE ÍCONE: Limpar o cache de ícones
