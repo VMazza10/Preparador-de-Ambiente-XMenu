@@ -99,6 +99,39 @@ $lblLogTitle.AutoSize = $true
 $lblLogTitle.Font = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold)
 $form.Controls.Add($lblLogTitle)
 
+# --- FUNCAO PARA OBTER IP LOCAL ---
+function Get-LocalIP {
+    try {
+        # Tenta obter o primeiro IP de rede que não seja loopback
+        $ip = (Get-NetIPAddress -AddressFamily IPv4 -InterfaceAlias * -ErrorAction Stop |
+               Where-Object { $_.IPAddress -notlike "127.*" -and $_.IPAddress -notlike "169.*" } |
+               Select-Object -ExpandProperty IPAddress -First 1)
+        
+        if ($ip) {
+            $ip | Set-Clipboard
+            Log-Message "IP local copiado: $ip"
+        } else {
+            Log-Error "Nao foi possivel encontrar um IP de rede valido."
+        }
+    } catch {
+        Log-Error "Falha ao obter IP: $_"
+    }
+}
+
+# --- BOTAO COPIAR IP ---
+$btnCopyIP = New-Object System.Windows.Forms.Button
+$btnCopyIP.Text = "Copiar IP Local"
+$btnCopyIP.Size = New-Object System.Drawing.Size(120, 22)
+$btnCopyIP.Location = New-Object System.Drawing.Point(545, $logYStart)
+$btnCopyIP.BackColor = $ColorBtnDown
+$btnCopyIP.FlatStyle = "Flat"
+$btnCopyIP.FlatAppearance.BorderSize = 0
+$btnCopyIP.ForeColor = [System.Drawing.Color]::White
+$btnCopyIP.Font = New-Object System.Drawing.Font("Segoe UI", 9)
+$btnCopyIP.Cursor = [System.Windows.Forms.Cursors]::Hand
+$btnCopyIP.Add_Click({ Get-LocalIP })
+$form.Controls.Add($btnCopyIP)
+
 $txtLog = New-Object System.Windows.Forms.TextBox
 $txtLog.Multiline = $true
 $txtLog.ScrollBars = "Vertical"
