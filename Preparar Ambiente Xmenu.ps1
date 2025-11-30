@@ -394,9 +394,12 @@ $btnConfig.Add_Click({
 
     # 1. UAC
     Log-Message "ETAPA 1: Configurando UAC e Politicas..."
-    Start-Process "reg.exe" -ArgumentList "ADD HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System /v EnableLUA /t REG_DWORD /d 0 /f" -Wait -NoNewWindow
-    Start-Process "reg.exe" -ArgumentList "ADD HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System /v ConsentPromptBehaviorAdmin /t REG_DWORD /d 0 /f" -Wait -NoNewWindow
-    Start-Process "reg.exe" -ArgumentList "ADD HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System /v PromptOnSecureDesktop /t REG_DWORD /d 0 /f" -Wait -NoNewWindow
+    # REMOVIDO: -Wait para evitar falhas de processo encerrado
+    Start-Process "reg.exe" -ArgumentList "ADD HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System /v EnableLUA /t REG_DWORD /d 0 /f" -NoNewWindow
+    # REMOVIDO: -Wait para evitar falhas de processo encerrado
+    Start-Process "reg.exe" -ArgumentList "ADD HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System /v ConsentPromptBehaviorAdmin /t REG_DWORD /d 0 /f" -NoNewWindow
+    # REMOVIDO: -Wait para evitar falhas de processo encerrado
+    Start-Process "reg.exe" -ArgumentList "ADD HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System /v PromptOnSecureDesktop /t REG_DWORD /d 0 /f" -NoNewWindow
     $progressBar.Value = 20
 
     # 2. ENERGIA
@@ -409,7 +412,8 @@ $btnConfig.Add_Click({
     powercfg /setacvalueindex SCHEME_CURRENT 4f971e89-eebd-4455-a8de-9e59040e7347 96996bc0-ad50-47ec-923b-6f41874dd9eb 0
     powercfg /setacvalueindex SCHEME_CURRENT 4f971e89-eebd-4455-a8de-9e59040e7347 5ca83367-6e45-459f-a27b-476b1d01c936 0
     powercfg /setactive SCHEME_CURRENT
-    Start-Process "reg.exe" -ArgumentList "ADD ""HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Power"" /v HiberbootEnabled /t REG_DWORD /d 0 /f" -Wait -NoNewWindow
+    # REMOVIDO: -Wait para evitar falhas de processo encerrado
+    Start-Process "reg.exe" -ArgumentList "ADD ""HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Power"" /v HiberbootEnabled /t REG_DWORD /d 0 /f" -NoNewWindow
     $progressBar.Value = 40
 
     # 3. DATA
@@ -430,9 +434,12 @@ $btnConfig.Add_Click({
     # 5. REDE & COMPARTILHAMENTO
     Log-Message "ETAPA 5: Liberando Rede..."
     netsh advfirewall firewall set rule group="File and Printer Sharing" new enable=Yes | Out-Null
-    Start-Process "reg.exe" -ArgumentList "ADD HKLM\SYSTEM\CurrentControlSet\Control\Lsa /v LimitBlankPasswordUse /t REG_DWORD /d 0 /f" -Wait -NoNewWindow
-    Start-Process "reg.exe" -ArgumentList "ADD HKLM\SYSTEM\CurrentControlSet\Control\Lsa /v everyoneincludesanonymous /t REG_DWORD /d 1 /f" -Wait -NoNewWindow
-    Start-Process "reg.exe" -ArgumentList "ADD HKLM\SYSTEM\CurrentControlSet\Services\LanmanServer\Parameters /v restrictnullsessaccess /t REG_DWORD /d 0 /f" -Wait -NoNewWindow
+    # REMOVIDO: -Wait para evitar falhas de processo encerrado
+    Start-Process "reg.exe" -ArgumentList "ADD HKLM\SYSTEM\CurrentControlSet\Control\Lsa /v LimitBlankPasswordUse /t REG_DWORD /d 0 /f" -NoNewWindow
+    # REMOVIDO: -Wait para evitar falhas de processo encerrado
+    Start-Process "reg.exe" -ArgumentList "ADD HKLM\SYSTEM\CurrentControlSet\Control\Lsa /v everyoneincludesanonymous /t REG_DWORD /d 1 /f" -NoNewWindow
+    # REMOVIDO: -Wait para evitar falhas de processo encerrado
+    Start-Process "reg.exe" -ArgumentList "ADD HKLM\SYSTEM\CurrentControlSet\Services\LanmanServer\Parameters /v restrictnullsessaccess /t REG_DWORD /d 0 /f" -NoNewWindow
 
     # 6. LIMPEZA TOTAL DA BARRA DE TAREFAS
     Log-Message "ETAPA 6: Limpando Barra de Tarefas e Toolbars (Remocao de Streams)..."
@@ -452,7 +459,8 @@ $btnConfig.Add_Click({
     if (!(Test-Path $searchKey)) { New-Item -Path $searchKey -Force | Out-Null }
     Set-ItemProperty -Path $searchKey -Name "SearchboxTaskbarMode" -Value 0 -Force
     
-    Start-Process "reg.exe" -ArgumentList "ADD ""HKCU\Software\Microsoft\Windows\CurrentVersion\Feeds"" /v ShellFeedsTaskbarViewMode /t REG_DWORD /d 2 /f" -Wait -NoNewWindow
+    # REMOVIDO: -Wait para evitar falhas de processo encerrado
+    Start-Process "reg.exe" -ArgumentList "ADD ""HKCU\Software\Microsoft\Windows\CurrentVersion\Feeds"" /v ShellFeedsTaskbarViewMode /t REG_DWORD /d 2 /f" -NoNewWindow
     
     Log-Message "Desativando Widgets (News and Interests) via politica HKLM..."
     $dshPolicyPath = "HKLM:\SOFTWARE\Policies\Microsoft\Dsh"
@@ -492,7 +500,7 @@ $btnConfig.Add_Click({
     Log-Message "Limpando arquivos temporarios (Temp do Usuario)..."
     Remove-Item -Path "$env:TEMP\*" -Recurse -Force -ErrorAction SilentlyContinue | Out-Null
     
-    # CORREÇÃO CRÍTICA: 'Recurve' -> 'Recurse' e adicionando segurança para 'Acesso Negado'
+    # Limpeza de Temp do Windows (CORRIGIDO ERRO DE DIGITAÇÃO E SEGURANÇA)
     Log-Message "Limpando arquivos temporarios (Temp do Windows)..."
     Get-ChildItem -Path "$env:windir\Temp" -Force -ErrorAction SilentlyContinue | Where-Object { -not $_.PSIsContainer } | Remove-Item -Force -ErrorAction SilentlyContinue | Out-Null
     Get-ChildItem -Path "$env:windir\Temp" -Directory -Force -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue | Out-Null
@@ -507,7 +515,7 @@ $btnConfig.Add_Click({
     $tempDir = "$env:TEMP\XmenuResources"
     if (-not (Test-Path $tempDir)) { New-Item -Path $tempDir -ItemType Directory -Force | Out-Null }
     
-    # ATENÇÃO CRÍTICA: Correção para erro de caminho nulo
+    # Correção para erro de caminho nulo
     $wallpaperPath = "$tempDir\$wallpaperFileName"
     
     # Usa a funcao WebClient para baixar o fundo.png para a pasta TEMP
@@ -584,8 +592,12 @@ $btnConfig.Add_Click({
         $WshShell = New-Object -ComObject WScript.Shell
         $Shortcut = $WshShell.CreateShortcut($shortcutPath)
         
-        $Shortcut.TargetPath = "cmd.exe"
-        $Shortcut.Arguments = '/c start "" "{0}"' -f $finalHtmlPath
+        # CORREÇÃO CRÍTICA: Apontar diretamente para o arquivo HTML
+        $Shortcut.TargetPath = $finalHtmlPath 
+        
+        # CORREÇÃO: Argumentos são vazios, o navegador faz o trabalho
+        $Shortcut.Arguments = "" 
+        
         $Shortcut.IconLocation = Join-Path -Path $targetConfigDir -ChildPath $iconFileName
         $Shortcut.Save()
         
