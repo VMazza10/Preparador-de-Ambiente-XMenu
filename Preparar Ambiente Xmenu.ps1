@@ -15,6 +15,7 @@
 
 # ⚠️ URL BASE DO REPOSITÓRIO RAW (AJUSTADA PARA SUA CONTA)
 # Esta URL é usada para baixar recursos como fundo.png e arquivos da pasta Config.
+# REMOVIDA A BARRA FINAL PARA EVITAR DUPLICIDADE NA CONSTRUÇÃO DA URL
 $RepoBase = "https://raw.githubusercontent.com/VMazza10/Preparador-de-Ambiente-XMenu/main" 
 
 # --- VERIFICAÇÃO DE ADMINISTRADOR (Modificada para scripts remotos) ---
@@ -95,26 +96,43 @@ $logYStart = 90
 $lblLogTitle = New-Object System.Windows.Forms.Label
 $lblLogTitle.Text = "Log de Execucao:"
 $lblLogTitle.Location = New-Object System.Drawing.Point(20, $logYStart)
-$lblLogTitle.AutoSize = $true
+$lblLogTitle.AutoSize = $true 
 $lblLogTitle.Font = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold)
 $form.Controls.Add($lblLogTitle)
 
 # --- FUNCAO PARA OBTER IP LOCAL ---
 function Get-LocalIP {
     try {
-        # Tenta obter o primeiro IP de rede que não seja loopback
-        $ip = (Get-NetIPAddress -AddressFamily IPv4 -InterfaceAlias * -ErrorAction Stop |
-               Where-Object { $_.IPAddress -notlike "127.*" -and $_.IPAddress -notlike "169.*" } |
-               Select-Object -ExpandProperty IPAddress -First 1)
+        # CRÍTICO: Filtra interfaces que estão ESTRITAMENTE 'Up' (Conectadas)
+        $activeAdapters = Get-NetAdapter | Where-Object { $_.Status -eq 'Up' }
         
-        if ($ip) {
-            $ip | Set-Clipboard
-            Log-Message "IP local copiado: $ip"
+        if (-not $activeAdapters) {
+            Log-Error "Nenhuma rede conectada encontrada."
+            return
+        }
+
+        # Pega os IPs apenas desses adaptadores ativos
+        $ips = $activeAdapters | Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+               Where-Object { $_.IPAddress -notlike "127.*" -and $_.IPAddress -notlike "169.*" } |
+               Select-Object -ExpandProperty IPAddress -Unique
+        
+        if ($ips) {
+            # Se for apenas um IP (string), transforma em array para contagem funcionar
+            if ($ips -is [string]) { $ips = @($ips) }
+
+            $ipString = $ips -join "`n"
+            $ipString | Set-Clipboard
+            
+            if ($ips.Count -eq 1) {
+                Log-Message "IP copiado: $($ips[0])"
+            } else {
+                Log-Message "IPs copiados: $($ips -join ', ')"
+            }
         } else {
-            Log-Error "Nao foi possivel encontrar um IP de rede valido."
+            Log-Error "Rede conectada, mas sem IP valido."
         }
     } catch {
-        Log-Error "Falha ao obter IP: $_"
+        Log-Error "Erro ao obter IP: $_"
     }
 }
 
@@ -133,14 +151,14 @@ $btnCopyIP.Add_Click({ Get-LocalIP })
 $form.Controls.Add($btnCopyIP)
 
 $txtLog = New-Object System.Windows.Forms.TextBox
-$txtLog.Multiline = $true
+$txtLog.Multiline = $true 
 $txtLog.ScrollBars = "Vertical"
 $txtLog.Size = New-Object System.Drawing.Size(645, 200)
 $txtLog.Location = New-Object System.Drawing.Point(20, ($logYStart + 25))
 $txtLog.BackColor = $ColorLog
 $txtLog.ForeColor = $ColorLogText
 $txtLog.Font = New-Object System.Drawing.Font("Consolas", 10)
-$txtLog.ReadOnly = $true
+$txtLog.ReadOnly = $true 
 $txtLog.BorderStyle = "FixedSingle"
 $form.Controls.Add($txtLog)
 
@@ -184,18 +202,19 @@ function Download-Only {
         
         # ⚠️ CORREÇÃO CRÍTICA: Desbloqueia o arquivo para evitar "Politica de Controle de Aplicativo"
         Log-Message "Desbloqueando arquivo..."
-        Unblock-File -Path $destPath -ErrorAction Stop
+        # Tenta desbloquear o arquivo, se falhar, o script continua.
+        Unblock-File -Path $destPath -ErrorAction SilentlyContinue
         
         Log-Message "Executando/Abrindo arquivo: $FileName"
         
         Start-Process $destPath
         
         Log-Message "Arquivo iniciado com sucesso."
-        return $true
+        return $true 
     } catch {
         Log-Error "Falha no download de ${FileName} (URL: ${SafeUrl}): $_" 
         [System.Windows.Forms.MessageBox]::Show("Erro no download de $FileName. Verifique a internet.", "Erro", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Error)
-        return $false
+        return $false 
     }
 }
 
@@ -204,7 +223,7 @@ function Download-And-Run {
     param($Url, $FileName, $ButtonObj)
     
     $originalText = $ButtonObj.Text
-    $ButtonObj.Enabled = $false
+    $ButtonObj.Enabled = $false 
     $ButtonObj.Text = "Baixando..."
     $ButtonObj.BackColor = [System.Drawing.Color]::Orange
     $form.Refresh()
@@ -221,7 +240,8 @@ function Download-And-Run {
         
         # ⚠️ CORREÇÃO CRÍTICA: Desbloqueia o arquivo para evitar "Politica de Controle de Aplicativo"
         Log-Message "Desbloqueando arquivo..."
-        Unblock-File -Path $destPath -ErrorAction Stop
+        # Tenta desbloquear o arquivo, se falhar, o script continua.
+        Unblock-File -Path $destPath -ErrorAction SilentlyContinue
         
         Log-Message "Executando/Abrindo arquivo..."
         $ButtonObj.Text = "Abrindo..."
@@ -239,7 +259,7 @@ function Download-And-Run {
         $ButtonObj.Text = "Erro"
     }
 
-    $ButtonObj.Enabled = $true
+    $ButtonObj.Enabled = $true 
     Start-Sleep -Seconds 2
     if ($ButtonObj.Text -eq "Erro") { $ButtonObj.Text = $originalText }
 }
@@ -399,7 +419,7 @@ $btnZipConc.Add_Click({
 
 $btnSQLSSMSManual.Add_Click({ 
     $originalText = $btnSQLSSMSManual.Text
-    $btnSQLSSMSManual.Enabled = $false
+    $btnSQLSSMSManual.Enabled = $false 
     $btnSQLSSMSManual.Text = "Baixando SQL 2019..."
     $btnSQLSSMSManual.BackColor = [System.Drawing.Color]::Orange
     $form.Refresh()
@@ -423,7 +443,7 @@ $btnSQLSSMSManual.Add_Click({
         $btnSQLSSMSManual.BackColor = [System.Drawing.Color]::SeaGreen
     }
     
-    $btnSQLSSMSManual.Enabled = $true
+    $btnSQLSSMSManual.Enabled = $true 
     Start-Sleep -Seconds 2
     if ($btnSQLSSMSManual.Text -eq "Erro") { $btnSQLSSMSManual.Text = $originalText }
 })
@@ -432,7 +452,7 @@ $btnNFCe.Add_Click({ Download-And-Run "https://www.netcontroll.com.br/util/insta
 
 # --- LOGICA DE CONFIGURACAO ---
 $btnConfig.Add_Click({
-    $btnConfig.Enabled = $false
+    $btnConfig.Enabled = $false 
     $btnConfig.Text = "Processando... Por favor, aguarde."
     $btnConfig.BackColor = [System.Drawing.Color]::Gray
     $progressBar.Value = 0
@@ -701,8 +721,8 @@ $btnConfig.Add_Click({
     $finalForm.BackColor = $ColorDarkBg
     $finalForm.ForeColor = $ColorText
     $finalForm.FormBorderStyle = "FixedDialog"
-    $finalForm.MaximizeBox = $false
-    $finalForm.MinimizeBox = $false
+    $finalForm.MaximizeBox = $false 
+    $finalForm.MinimizeBox = $false 
 
     $lblHead = New-Object System.Windows.Forms.Label
     $lblHead.Text = "CONFIGURACAO AUTOMATICA CONCLUIDA!"
@@ -742,7 +762,7 @@ $btnConfig.Add_Click({
     
     $btnConfig.Text = "Configuracao Concluida"
     $btnConfig.BackColor = [System.Drawing.Color]::SeaGreen
-    $btnConfig.Enabled = $true
+    $btnConfig.Enabled = $true 
 })
 
 $form.ShowDialog()
