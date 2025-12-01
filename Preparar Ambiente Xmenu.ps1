@@ -348,6 +348,8 @@ Add-Btn "VSPE (Serial Port)" "https://www.netcontroll.com.br/util/instaladores/V
 Add-Btn "ZIP Versoes PDV" "http://link.para.zip.versoes.pdv/VERSOESPDV.zip" "VERSOESPDV.zip" 4 0 | Out-Null
 Add-Btn "ZIP Versoes Concentrador" "http://link.para.zip.versoes.concentrador/VERSOESCONC.zip" "VERSOESCONC.zip" 4 1 | Out-Null
 Add-Btn "TecnoSpeed" "https://www.netcontroll.com.br/util/instaladores/NFCE/10.1.83.68/InstaladorNFCe.exe" "InstaladorNFCe.exe" 5 0 | Out-Null
+Add-Btn "TeamViewer Full" "https://download.teamviewer.com/download/TeamViewer_Setup_x64.exe" "Teamviewer.exe" 5 0 | Out-Null
+Add-Btn "Google Chrome" "https://dl.google.com/chrome/install/ChromeStandaloneSetup64.exe" "Google_Chrome.exe" 5 0 | Out-Null
 
 # SQL Manual Custom
 $btnMan = New-Object System.Windows.Forms.Button
