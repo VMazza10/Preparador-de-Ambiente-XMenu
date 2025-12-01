@@ -1,20 +1,20 @@
 ﻿# =============================================================================
-# FERRAMENTA DE PREPARAÇÃO DE AMBIENTE XMENU (GUI v12.0 - FIXED RESIZE)
+# FERRAMENTA DE PREPARACAO DE AMBIENTE XMENU (GUI v12.0 - FIXED RESIZE)
 # =============================================================================
-# CORREÇÕES E RESTAURAÇÕES COMPLETAS:
-# - Altura do cabeçalho e responsividade corrigidas
-# - Acentuação e ortografia corrigidas
-# - Ícones da Área de Trabalho (Computador, Rede, Lixeira, Usuário) GARANTIDOS
+# CORRECOES E RESTAURACOES COMPLETAS:
+# - Altura do cabecalho e responsividade corrigidas
+# - Acentuacao e ortografia removidas para compatibilidade
+# - Icones da Area de Trabalho (Computador, Rede, Lixeira, Usuario) GARANTIDOS
 # - Limpeza de Toolbars da Barra de Tarefas restaurada
-# - Desativação de Hibernação restaurada
+# - Desativacao de Hibernacao restaurada
 # - Ajustes Visuais (MenuDelay, etc) restaurados
-# - Limpeza de Arquivos Temporários restaurada
-# - Limpeza de Cache de Ícones restaurada
-# - Criação do Atalho "Suporte Xmenu" REFORÇADA (Igual versão 8.2)
-# - CORREÇÃO DE ERRO: Tratamento de permissão na chave de Feeds (Notícias)
+# - Limpeza de Arquivos Temporarios restaurada
+# - Limpeza de Cache de Icones restaurada
+# - Criacao do Atalho "Suporte Xmenu" REFORCADA (Igual versao 8.2)
+# - CORRECAO DE ERRO: Tratamento de permissao na chave de Feeds (Noticias)
 # =============================================================================
 
-# --- VARIÁVEIS GLOBAIS ---
+# --- VARIAVEIS GLOBAIS ---
 $RepoBase = "https://raw.githubusercontent.com/VMazza10/Preparador-de-Ambiente-XMenu/main" 
 $Script:LogControl = $null 
 $Script:HeaderPanel = $null
@@ -31,10 +31,10 @@ if (-not (Test-Path $Script:DownloadFolder)) {
     New-Item -Path $Script:DownloadFolder -ItemType Directory -Force | Out-Null
 }
 
-# --- VERIFICAÇÃO DE ADMINISTRADOR ---
+# --- VERIFICACAO DE ADMINISTRADOR ---
 $principal = [Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()
 if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
-    Write-Error "ERRO CRÍTICO: Execute como Administrador."
+    Write-Error "ERRO CRITICO: Execute como Administrador."
     Start-Sleep -Seconds 5
     Exit 1
 }
@@ -73,7 +73,7 @@ $FontBtn   = New-Object System.Drawing.Font("Segoe UI Semibold", 10)
 $FontLog   = New-Object System.Drawing.Font("Consolas", 10)
 $FontBigBtn = New-Object System.Drawing.Font("Segoe UI", 16, [System.Drawing.FontStyle]::Bold)
 
-# --- FORMULÁRIO PRINCIPAL ---
+# --- FORMULARIO PRINCIPAL ---
 $form = New-Object System.Windows.Forms.Form
 $form.Text = "Instalador XMenu v12.0"
 $form.Size = New-Object System.Drawing.Size(850, 900) 
@@ -83,7 +83,7 @@ $form.BackColor = $ColorBg
 $form.ForeColor = $ColorText
 $form.FormBorderStyle = "Sizable"
 
-# --- CABEÇALHO ---
+# --- CABECALHO ---
 $pnlHeader = New-Object System.Windows.Forms.Panel
 $pnlHeader.Height = 140
 $pnlHeader.Dock = "Top"
@@ -93,7 +93,7 @@ $form.Controls.Add($pnlHeader)
 $Script:HeaderPanel = $pnlHeader
 
 $lblTitle = New-Object System.Windows.Forms.Label
-$lblTitle.Text = "ASSISTENTE DE CONFIGURAÇÃO XMENU"
+$lblTitle.Text = "ASSISTENTE DE CONFIGURACAO XMENU"
 $lblTitle.Font = $FontTitle
 $lblTitle.ForeColor = [System.Drawing.Color]::White
 $lblTitle.Location = New-Object System.Drawing.Point(20, 15)
@@ -104,7 +104,7 @@ $lblTitle.TextAlign = [System.Drawing.ContentAlignment]::MiddleLeft
 $pnlHeader.Controls.Add($lblTitle)
 
 $lblSub = New-Object System.Windows.Forms.Label
-$lblSub.Text = "Automação de Ambiente Windows e Softwares Netcontroll"
+$lblSub.Text = "Automacao de Ambiente Windows e Softwares Netcontroll"
 $lblSub.Font = $FontSub
 $lblSub.ForeColor = [System.Drawing.Color]::FromArgb(230, 230, 230)
 $lblSub.Location = New-Object System.Drawing.Point(25, 95) 
@@ -114,7 +114,7 @@ $lblSub.Anchor = [System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.F
 $lblSub.TextAlign = [System.Drawing.ContentAlignment]::MiddleLeft
 $pnlHeader.Controls.Add($lblSub)
 
-# --- BOTÃO COPIAR IP ---
+# --- BOTAO COPIAR IP ---
 $btnCopyIP = New-Object System.Windows.Forms.Button
 $btnCopyIP.Text = "Copiar IP local"
 $btnCopyIP.Size = New-Object System.Drawing.Size(120, 30)
@@ -127,7 +127,7 @@ $btnCopyIP.Font = New-Object System.Drawing.Font("Segoe UI", 8, [System.Drawing.
 $btnCopyIP.Cursor = [System.Windows.Forms.Cursors]::Hand
 $pnlHeader.Controls.Add($btnCopyIP)
 
-# --- PAINEL DE CONTEÚDO ---
+# --- PAINEL DE CONTEUDO ---
 $pnlContent = New-Object System.Windows.Forms.Panel
 $pnlContent.Dock = "Fill"
 $pnlContent.AutoScroll = $true
@@ -150,7 +150,7 @@ $pnlContent.Controls.Add($tlpMain)
 
 # --- 1. LOGS ---
 $grpLog = New-Object System.Windows.Forms.GroupBox
-$grpLog.Text = "Log de Operações Detalhado"
+$grpLog.Text = "Log de Operacoes Detalhado"
 $grpLog.ForeColor = $ColorSubText
 $grpLog.Font = $FontSub
 $grpLog.Dock = "Fill"
@@ -169,7 +169,7 @@ $txtLog.BorderStyle = "None"
 $grpLog.Controls.Add($txtLog)
 $Script:LogControl = $txtLog
 
-# --- 2. BOTÃO PRINCIPAL ---
+# --- 2. BOTAO PRINCIPAL ---
 $btnConfig = New-Object System.Windows.Forms.Button
 $btnConfig.Text = "PREPARAR AMBIENTE"
 $btnConfig.Dock = "Fill"
@@ -184,7 +184,7 @@ $Script:MainButton = $btnConfig
 
 # --- 3. DOWNLOADS ---
 $grpInstall = New-Object System.Windows.Forms.GroupBox
-$grpInstall.Text = "Instalação de Softwares"
+$grpInstall.Text = "Instalacao de Softwares"
 $grpInstall.ForeColor = $ColorSubText
 $grpInstall.Font = $FontSub
 $grpInstall.AutoSize = $true
@@ -209,7 +209,7 @@ $progressBar.Style = "Continuous"
 $form.Controls.Add($progressBar)
 $Script:ProgressBar = $progressBar
 
-# --- FUNÇÕES AUXILIARES ---
+# --- FUNCOES AUXILIARES ---
 
 function Log-Message {
     param($Msg)
@@ -248,7 +248,7 @@ function Get-LocalIP {
             
             if ($ips.Count -eq 1) { Log-Message "IP copiado: $($ips[0])" }
             else { Log-Message "IPs copiados: $($ips -join ', ')" }
-        } else { Log-Error "Nenhum IP válido encontrado." }
+        } else { Log-Error "Nenhum IP valido encontrado." }
     } catch { Log-Error "Erro IP: $_" }
 }
 $btnCopyIP.Add_Click({ Get-LocalIP })
@@ -275,7 +275,7 @@ function Download-Core {
         
         Log-Message "Executando instalador..."
         Start-Process $destPath
-        Log-Message "Instalação iniciada: $FileName"
+        Log-Message "Instalacao iniciada: $FileName"
         return $true
     } catch {
         $errMsg = "Falha no download de $FileName : $_"
@@ -336,17 +336,17 @@ function Add-Btn {
     return $b
 }
 
-# --- LISTA BOTÕES ---
-Add-Btn "SQL Server 2008 (Automático)" "https://www.netcontroll.com.br/util/instaladores/netpdv/SQL2008x64.exe" "SQL2008x64.exe" 0 0 | Out-Null
-Add-Btn "SQL Server 2019 (Automático)" "https://www.netcontroll.com.br/util/instaladores/netpdv/SQL2019.exe" "SQL2019.exe" 0 1 | Out-Null
+# --- LISTA BOTOES ---
+Add-Btn "SQL Server 2008 (Automatico)" "https://www.netcontroll.com.br/util/instaladores/netpdv/SQL2008x64.exe" "SQL2008x64.exe" 0 0 | Out-Null
+Add-Btn "SQL Server 2019 (Automatico)" "https://www.netcontroll.com.br/util/instaladores/netpdv/SQL2019.exe" "SQL2019.exe" 0 1 | Out-Null
 Add-Btn "Concentrador" "https://www.netcontroll.com.br/util/instaladores/netpdv/InstaladorConcentrador.exe" "Concentrador.exe" 1 0 | Out-Null
 Add-Btn "NetPDV" "https://netcontroll.com.br/util/instaladores/netpdv/1.3/55/0/NetPDV.exe" "NetPDV.exe" 1 1 | Out-Null
 Add-Btn "Link XMenu" "https://netcontroll.com.br/util/instaladores/LinkXMenu/10/11/LinkXMenu.exe" "LinkXMenu.exe" 2 0 | Out-Null
 Add-Btn "XBot" "https://aws.netcontroll.com.br/XBotClient/setup.exe" "XBotSetup.exe" 2 1 | Out-Null
 Add-Btn "XTag Client 2.0" "https://aws.netcontroll.com.br/XTagClient2.0/setup.exe" "XTagSetup.exe" 3 0 | Out-Null
 Add-Btn "VSPE (Serial Port)" "https://www.netcontroll.com.br/util/instaladores/VSPE/VSPE.zip" "VSPE.zip" 3 1 | Out-Null
-Add-Btn "ZIP Versões PDV" "http://link.para.zip.versoes.pdv/VERSOESPDV.zip" "VERSOESPDV.zip" 4 0 | Out-Null
-Add-Btn "ZIP Versões Concentrador" "http://link.para.zip.versoes.concentrador/VERSOESCONC.zip" "VERSOESCONC.zip" 4 1 | Out-Null
+Add-Btn "ZIP Versoes PDV" "http://link.para.zip.versoes.pdv/VERSOESPDV.zip" "VERSOESPDV.zip" 4 0 | Out-Null
+Add-Btn "ZIP Versoes Concentrador" "http://link.para.zip.versoes.concentrador/VERSOESCONC.zip" "VERSOESCONC.zip" 4 1 | Out-Null
 Add-Btn "TecnoSpeed" "https://www.netcontroll.com.br/util/instaladores/NFCE/10.1.83.68/InstaladorNFCe.exe" "InstaladorNFCe.exe" 5 0 | Out-Null
 
 # SQL Manual Custom
@@ -371,7 +371,7 @@ $btnMan.Add_Click({
     $this.Text = "SQL Manual Instalado"; $this.BackColor = [System.Drawing.Color]::SeaGreen
 })
 
-# --- AÇÃO CONFIGURAR ---
+# --- ACAO CONFIGURAR ---
 $btnConfig.Add_Click({
     $this.Enabled = $false
     $this.Text = "PROCESSANDO..."
@@ -379,8 +379,8 @@ $btnConfig.Add_Click({
     $Script:ProgressBar.Value = 0 
     
     # 1. UAC
-    Log-Message "--- INICIANDO CONFIGURAÇÃO ---"
-    Log-Message "1. UAC (Segurança):"
+    Log-Message "--- INICIANDO CONFIGURACAO ---"
+    Log-Message "1. UAC (Seguranca):"
     Log-Message "   > Desativando EnableLUA..."
     Start-Process "reg.exe" -ArgumentList "ADD HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System /v EnableLUA /t REG_DWORD /d 0 /f" -NoNewWindow
     Log-Message "   > Desativando Prompt Admin..."
@@ -397,8 +397,8 @@ $btnConfig.Add_Click({
     powercfg /change disk-timeout-ac 0 | Out-Null
     powercfg /change standby-timeout-ac 0 | Out-Null
     
-    # --- RESTAURADO: Desativaçao de Hibernacao/FastStartup ---
-    Log-Message "   > Desativando Hibernação (FastStartup)..."
+    # --- RESTAURADO: Desativacao de Hibernacao/FastStartup ---
+    Log-Message "   > Desativando Hibernacao (FastStartup)..."
     Start-Process "reg.exe" -ArgumentList "ADD ""HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Power"" /v HiberbootEnabled /t REG_DWORD /d 0 /f" -NoNewWindow
     
     $Script:ProgressBar.Value = 40
@@ -410,7 +410,7 @@ $btnConfig.Add_Click({
     Log-Message "   > Explorer: Abrir em 'Meu Computador'..."
     Set-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" -Name "LaunchTo" -Value 1 -Force
     
-    # --- RESTAURADO: Ajustes Visuais (Delay e Suavização) ---
+    # --- RESTAURADO: Ajustes Visuais (Delay e Suavizacao) ---
     Log-Message "   > Otimizando efeitos visuais (MenuDelay, Fontes)..."
     Set-ItemProperty -Path "HKCU:\Control Panel\Desktop" -Name "MenuShowDelay" -Value "0" -Force
     Set-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\VisualEffects" -Name "VisualFXSetting" -Value 3 -Force
@@ -418,15 +418,15 @@ $btnConfig.Add_Click({
     Set-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" -Name "ListviewShadow" -Value 1 -Force
     Set-ItemProperty -Path "HKCU:\Control Panel\Desktop" -Name "FontSmoothing" -Value "2" -Force
 
-    # --- RESTAURADO: Icones Desktop (Computador, Lixeira, Rede, Usuário) ---
-    Log-Message "   > Exibindo Ícones Desktop (Computador, Lixeira, Rede, Usuário)..."
+    # --- RESTAURADO: Icones Desktop (Computador, Lixeira, Rede, Usuario) ---
+    Log-Message "   > Exibindo Icones Desktop (Computador, Lixeira, Rede, Usuario)..."
     $iconPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\HideDesktopIcons\NewStartPanel"
     if (!(Test-Path $iconPath)) { New-Item -Path $iconPath -Force | Out-Null }
     # Computador
     Set-ItemProperty -Path $iconPath -Name "{20D04FE0-3AEA-1069-A2D8-08002B30309D}" -Value 0 -Force
     # Lixeira
     Set-ItemProperty -Path $iconPath -Name "{645FF040-5081-101B-9F08-00AA002F954E}" -Value 0 -Force
-    # Arquivos do Usuário
+    # Arquivos do Usuario
     Set-ItemProperty -Path $iconPath -Name "{59031a47-3f72-44a7-89c5-5595fe6b30ee}" -Value 0 -Force
     # Rede
     Set-ItemProperty -Path $iconPath -Name "{F02C1A0D-BE21-4350-88B0-7367FC96EF3C}" -Value 0 -Force
@@ -457,8 +457,8 @@ $btnConfig.Add_Click({
     Set-ItemProperty -Path $peopleKeyPath -Name "PeopleBand" -Value 0 -Force
     
     Log-Message "   > Desativando Feeds (Noticias e Interesses) na Barra..."
-    # 1. Configuracao do Usuario (HKCU) - Modo de Visualização (0=Show, 1=IconOnly, 2=Hidden)
-    # CORREÇÃO: Tratamento de erro caso a chave esteja bloqueada/permissão negada
+    # 1. Configuracao do Usuario (HKCU) - Modo de Visualizacao (0=Show, 1=IconOnly, 2=Hidden)
+    # CORRECAO: Tratamento de erro caso a chave esteja bloqueada/permissao negada
     $feedsKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Feeds"
     if (!(Test-Path $feedsKey)) { New-Item -Path $feedsKey -Force | Out-Null }
     
@@ -466,25 +466,28 @@ $btnConfig.Add_Click({
         # Tenta modo nativo do PowerShell
         Set-ItemProperty -Path $feedsKey -Name "ShellFeedsTaskbarViewMode" -Type DWord -Value 2 -Force -ErrorAction Stop
     } catch {
-        # Se falhar (acesso negado), tenta via CMD/Reg.exe de forma silenciosa e força via Policy HKLM abaixo
-        Log-Message "   > Aviso: Permissao negada no HKCU. Tentando forçar via HKLM Policy..."
-        Start-Process "reg.exe" -ArgumentList "ADD ""HKCU\Software\Microsoft\Windows\CurrentVersion\Feeds"" /v ShellFeedsTaskbarViewMode /t REG_DWORD /d 2 /f" -NoNewWindow -ErrorAction SilentlyContinue
+        # Se falhar (acesso negado), tenta via CMD/Reg.exe de forma silenciosa e forca via Policy HKLM abaixo
+        Log-Message "   > Aviso: Permissao negada no HKCU. Tentando forcar via CMD..."
+        
+        # CORRECAO: Uso de aspas simples para os argumentos para evitar conflito de parser no PowerShell
+        $regArgs = 'ADD "HKCU\Software\Microsoft\Windows\CurrentVersion\Feeds" /v ShellFeedsTaskbarViewMode /t REG_DWORD /d 2 /f'
+        Start-Process "reg.exe" -ArgumentList $regArgs -NoNewWindow -ErrorAction SilentlyContinue
     }
 
-    # --- REMOÇÃO DO WINGET (APP INSTALLER) ---
+    # --- REMOCAO DO WINGET (APP INSTALLER) ---
     Log-Message "   > Removendo App Installer (Winget)..."
     Get-AppxPackage -AllUsers *Microsoft.DesktopAppInstaller* | Remove-AppxPackage -ErrorAction SilentlyContinue
 
-    # --- REMOÇÃO DE WIDGETS (NEWS AND INTERESTS) VIA POLÍTICA ---
+    # --- REMOCAO DE WIDGETS (NEWS AND INTERESTS) VIA POLITICA ---
     Log-Message "   > Bloqueando Widgets via Politica (DSH)..."
     if (!(Test-Path "HKLM:\SOFTWARE\Policies\Microsoft\Dsh")) { New-Item -Path "HKLM:\SOFTWARE\Policies\Microsoft\Dsh" -Force | Out-Null }
     Set-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Dsh" -Name "AllowNewsAndInterests" -Type DWord -Value 0 -Force
-    # Forçar também EnableFeeds para 0
+    # Forcar tambem EnableFeeds para 0
     if (!(Test-Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Windows Feeds")) { New-Item -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Windows Feeds" -Force | Out-Null }
     Set-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Windows Feeds" -Name "EnableFeeds" -Type DWord -Value 0 -Force
 
 
-    # --- RESTAURADO: REMOÇAO DE TOOLBARS (Endereço, Links, Area de Trabalho) ---
+    # --- RESTAURADO: REMOCAO DE TOOLBARS (Endereco, Links, Area de Trabalho) ---
     Log-Message "   > Resetando Toolbars da Barra de Tarefas..."
     $toolbarStreamPaths = @(
         "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Streams\Desktop",
@@ -504,8 +507,8 @@ $btnConfig.Add_Click({
 
     $Script:ProgressBar.Value = 80
 
-    # 6. PERSONALIZAÇÃO
-    Log-Message "6. PERSONALIZAÇAO (ATALHO SUPORTE):"
+    # 6. PERSONALIZACAO
+    Log-Message "6. PERSONALIZACAO (ATALHO SUPORTE):"
     $tempDir = "$env:TEMP\XmenuResources"
     if (-not (Test-Path $tempDir)) { New-Item -Path $tempDir -ItemType Directory -Force | Out-Null }
     $wallpaperPath = "$tempDir\fundo.png"
@@ -534,13 +537,13 @@ $btnConfig.Add_Click({
     $finalHtmlPath = Join-Path $targetConfigDir "Suporte Xmenu.html"
     $iconPath = Join-Path $targetConfigDir "iconeatalho.ico"
     
-    # --- RESTAURADO: Criação do Atalho com Lógica da v8.2 ---
+    # --- RESTAURADO: Criacao do Atalho com Logica da v8.2 ---
     if (Test-Path $finalHtmlPath) {
         try {
-            Log-Message "   > Criando atalho 'Suporte Xmenu' no Desktop Público..."
+            Log-Message "   > Criando atalho 'Suporte Xmenu' no Desktop Publico..."
             $WshShell = New-Object -ComObject WScript.Shell
             
-            # Atalho no Desktop Público (Visível para todos os usuários)
+            # Atalho no Desktop Publico (Visivel para todos os usuarios)
             $shortcutPath = [System.IO.Path]::Combine($env:PUBLIC, "Desktop", "Suporte Xmenu.lnk")
             $Shortcut = $WshShell.CreateShortcut($shortcutPath)
             
@@ -554,14 +557,14 @@ $btnConfig.Add_Click({
             Log-Error "Falha ao criar atalho: $_"
         }
     } else {
-        Log-Error "Arquivo HTML base não encontrado. Atalho não criado."
+        Log-Error "Arquivo HTML base nao encontrado. Atalho nao criado."
     }
 
     # 7. FIM
-    Log-Message "7. FINALIZAÇÃO:"
+    Log-Message "7. FINALIZACAO:"
     
     # --- RESTAURADO: Limpeza de Cache de Icones ---
-    Log-Message "   > Limpando cache de ícones..."
+    Log-Message "   > Limpando cache de icones..."
     Get-ChildItem -Path "$env:LOCALAPPDATA\IconCache.db" -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
     Get-ChildItem -Path "$env:LOCALAPPDATA\Microsoft\Windows\Explorer\iconcache_*.db" -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
 
@@ -574,13 +577,13 @@ $btnConfig.Add_Click({
     
     $Script:HeaderPanel.BackColor = $ColorSuccess
     $Script:MainButton.BackColor = $ColorSuccess
-    $Script:MainButton.Text = "CONFIGURAÇÃO CONCLUÍDA"
+    $Script:MainButton.Text = "CONFIGURACAO CONCLUIDA"
     $Script:MainButton.Enabled = $true
     $Script:GrpLog.ForeColor = $ColorSuccess 
     
-    # JANELA FINAL (PAUSA AQUI ATÉ CLICAR EM OK)
+    # JANELA FINAL (PAUSA AQUI ATE CLICAR EM OK)
     $finalForm = New-Object System.Windows.Forms.Form
-    $finalForm.Text = "Configuração Concluída"
+    $finalForm.Text = "Configuracao Concluida"
     $finalForm.Size = New-Object System.Drawing.Size(400, 250)
     $finalForm.StartPosition = "CenterScreen"
     $finalForm.BackColor = $ColorBg
@@ -590,7 +593,7 @@ $btnConfig.Add_Click({
     $finalForm.TopMost = $true 
 
     $lblHead = New-Object System.Windows.Forms.Label
-    $lblHead.Text = "CONFIGURAÇÃO FINALIZADA!"
+    $lblHead.Text = "CONFIGURACAO FINALIZADA!"
     $lblHead.Location = New-Object System.Drawing.Point(30, 30)
     $lblHead.AutoSize = $true
     $lblHead.Font = New-Object System.Drawing.Font("Segoe UI", 14, [System.Drawing.FontStyle]::Bold)
@@ -598,7 +601,7 @@ $btnConfig.Add_Click({
     $finalForm.Controls.Add($lblHead)
 
     $lblInfo = New-Object System.Windows.Forms.Label
-    $lblInfo.Text = "Ao clicar em ENTENDIDO, as janelas de ajustes manuais (Rede, Recursos, etc.) serão abertas."
+    $lblInfo.Text = "Ao clicar em ENTENDIDO, as janelas de ajustes manuais (Rede, Recursos, etc.) serao abertas."
     $lblInfo.Location = New-Object System.Drawing.Point(30, 70)
     $lblInfo.Size = New-Object System.Drawing.Size(340, 80)
     $lblInfo.Font = $FontSub
@@ -612,7 +615,7 @@ $btnConfig.Add_Click({
     $btnFim.ForeColor = [System.Drawing.Color]::White
     $btnFim.FlatStyle = "Flat"
     
-    # AQUI: AS FERRAMENTAS ABREM QUANDO CLICAR NO BOTÃO
+    # AQUI: AS FERRAMENTAS ABREM QUANDO CLICAR NO BOTAO
     $btnFim.Add_Click({ 
         $finalForm.Close()
         
