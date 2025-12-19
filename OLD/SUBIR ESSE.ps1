@@ -613,7 +613,7 @@ $btnVersoes.Add_Click({
     }
 })
 
-Add-Btn "TecnoSpeed (11.1.7.27)" "http://netcontroll.com.br/util/instaladores/NFCE/11.1.7.27/InstaladorNFCe.exe" "InstaladorNFCe.exe" 5 0 | Out-Null
+Add-Btn "TecnoSpeed" "https://www.netcontroll.com.br/util/instaladores/NFCE/10.1.83.68/InstaladorNFCe.exe" "InstaladorNFCe.exe" 5 0 | Out-Null
 Add-Btn "TeamViewer Full" "https://download.teamviewer.com/download/TeamViewer_Setup_x64.exe" "Teamviewer.exe" 5 1 | Out-Null
 Add-Btn "Google Chrome" "https://github.com/VMazza10/Preparador-de-Ambiente-XMenu/releases/download/Chrome/ChromeSetup.exe" "ChromeSetup.exe" 6 0 | Out-Null
 
