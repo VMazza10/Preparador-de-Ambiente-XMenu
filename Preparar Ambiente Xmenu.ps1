@@ -1,890 +1,909 @@
-﻿# =============================================================================
-# XMENU SYSTEM MANAGER v17.47 (STABILITY FIX)
-# Visual: Dashboard Moderno
-# Correcoes:
-#   - CRITICO: Removido DoEvents do loop de evento de download (causava crash).
-#   - Link do Chrome atualizado para Mirror GitHub (Versao Estavel).
+# =============================================================================
+# FIX INICIAL: OCULTAR JANELA DE CONSOLE E BARRAS DE PROGRESSO
 # =============================================================================
 
-# -----------------------------------------------------------------------------
-# 1. CONFIGURACOES PRELIMINARES
-# -----------------------------------------------------------------------------
-[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-$ErrorActionPreference = "SilentlyContinue"
+# 1. SUPRIMIR BARRA DE PROGRESSO (A "Barra Verde" da Imagem)
+# Isso impede que comandos como Remove-AppxPackage abram aquela janela de progresso
+# que trava na frente da sua interface. O comando continua rodando em "silêncio".
+$ProgressPreference = 'SilentlyContinue'
 
-# Define diretorios
-$Script:DesktopPath = [Environment]::GetFolderPath("Desktop")
-$Script:DownloadFolder = Join-Path $Script:DesktopPath "Arquivos Xmenu"
-$Script:RepoBase = "https://raw.githubusercontent.com/VMazza10/Preparador-de-Ambiente-XMenu/main"
-
-if (-not (Test-Path $Script:DownloadFolder)) { 
-    New-Item -Path $Script:DownloadFolder -ItemType Directory -Force | Out-Null 
+# 2. OCULTAR JANELA DO CONSOLE (TELA PRETA)
+# Se o seu EXE abrir uma janela preta de fundo, isso vai forçá-la a sumir imediatamente.
+try {
+    $codeConsole = @'
+    [DllImport("user32.dll")]
+    public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+    [DllImport("kernel32.dll")]
+    public static extern IntPtr GetConsoleWindow();
+'@
+    $typeConsole = Add-Type -MemberDefinition $codeConsole -Name "WinConsoleFix" -Namespace "Win32Fix" -PassThru
+    $hwnd = $typeConsole::GetConsoleWindow()
+    if ($hwnd -ne [IntPtr]::Zero) {
+        $typeConsole::ShowWindow($hwnd, 0) # 0 = SW_HIDE (Ocultar)
+    }
+} catch {
+    # Se falhar, apenas ignora (não afeta o funcionamento)
 }
 
-# Variaveis Globais UI
-$Script:LogBox = $null
-$Script:ProgressBar = $null
-$Script:StatusLabel = $null
-$Script:MainForm = $null
-$Script:BtnCancel = $null
+# =============================================================================
+# FERRAMENTA DE PREPARACAO DE AMBIENTE XMENU (VERSAO FINAL v14.2 - STABLE)
+# =============================================================================
+# CORRECOES v14.2:
+# - Fix de sintaxe: Adicionado espaco apos variaveis de log para evitar erro de parser.
+# - Feedback visual melhorado durante a extracao de ZIP (para nao parecer travado).
+# - Mantidas todas as funcoes de Seguranca, Download Inteligente e Layout.
+# =============================================================================
+
+# --- SEGURANCA TLS 1.2 ---
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+
+# --- VARIAVEIS GLOBAIS ---
+$RepoBase = "https://raw.githubusercontent.com/VMazza10/Preparador-de-Ambiente-XMenu/main" 
+$Script:LogControl = $null 
+$Script:HeaderPanel = $null
+$Script:MainButton = $null
+$Script:GrpLog = $null
+$Script:GrpInstall = $null
+$Script:ProgressBar = $null 
+
+# Variaveis de Controle de Download
 $Script:DownloadComplete = $false
 $Script:DownloadError = $null
-$Script:IsDownloading = $false
-$Script:CurrentWebClient = $null 
-$Script:CancelRequested = $false
+$Script:IsDownloading = $false 
 
-# -----------------------------------------------------------------------------
-# 2. VERIFICACAO DE PERMISSOES
-# -----------------------------------------------------------------------------
-$principal = [Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()
-if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
-    [System.Windows.Forms.MessageBox]::Show("ERRO CRITICO: Execute como Administrador.", "Permissao", "OK", "Error") | Out-Null
-    Exit
+# --- CONFIGURACAO DE PASTAS ---
+$DesktopPath = [System.Environment]::GetFolderPath('Desktop')
+$Script:DownloadFolder = Join-Path -Path $DesktopPath -ChildPath "Arquivos Xmenu"
+
+if (-not (Test-Path $Script:DownloadFolder)) {
+    New-Item -Path $Script:DownloadFolder -ItemType Directory -Force | Out-Null
 }
 
-# Carrega Graficos
+# --- VERIFICACAO DE ADMIN ---
+$principal = [Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()
+if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+    Write-Error "ERRO CRITICO: Execute como Administrador."
+    Start-Sleep -Seconds 5
+    Exit 1
+}
+
+# --- IMPORTS DO SISTEMA ---
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
+Add-Type -AssemblyName System.Net
 
-# API Wallpaper
-$code = '[DllImport("user32.dll", CharSet=CharSet.Auto)] public static extern int SystemParametersInfo (UInt32 uiAction, UInt32 uiParam, string pvParam, UInt32 fWinIni);'
-Add-Type -MemberDefinition $code -Name "WinAPI" -Namespace "XMenuTools"
+# --- API Import (Wallpaper) ---
+$code = @'
+[DllImport("user32.dll", CharSet=CharSet.Auto)]
+public static extern int SystemParametersInfo (UInt32 uiAction, UInt32 uiParam, string pvParam, UInt32 fWinIni);
+'@
+Add-Type -MemberDefinition $code -Name "WinAPI" -Namespace "Stuff"
+$SPI_SETDESKWALLPAPER = 0x14
+$SPIF_UPDATEINIFILE = 0x01
+$SPIF_SENDCHANGE = 0x02
 
-# -----------------------------------------------------------------------------
-# 3. FUNCOES UTILITARIAS E LOGS
-# -----------------------------------------------------------------------------
+# --- CORES E ESTILOS ---
+$ColorBg        = [System.Drawing.Color]::FromArgb(32, 33, 36)
+$ColorHeader    = [System.Drawing.Color]::FromArgb(0, 120, 212)
+$ColorSuccess   = [System.Drawing.Color]::SeaGreen
+$ColorText      = [System.Drawing.Color]::WhiteSmoke
+$ColorSubText   = [System.Drawing.Color]::FromArgb(180, 180, 180)
+$ColorLogBg     = [System.Drawing.Color]::FromArgb(15, 15, 15)
+$ColorLogText   = [System.Drawing.Color]::FromArgb(0, 255, 128)
+$ColorError     = [System.Drawing.Color]::FromArgb(255, 80, 80)
+$ColorBtnNormal = [System.Drawing.Color]::FromArgb(60, 60, 60)
+$ColorBtnAction = [System.Drawing.Color]::FromArgb(0, 120, 212)
 
-# Nova funcao de espera que NAO trava a tela
-function Wait-UI {
-    param($Seconds)
-    $sw = [System.Diagnostics.Stopwatch]::StartNew()
-    while ($sw.Elapsed.TotalSeconds -lt $Seconds) {
-        [System.Windows.Forms.Application]::DoEvents()
-        Start-Sleep -Milliseconds 10
-    }
-    $sw.Stop()
-}
+# Fonte do Titulo (18pt)
+$FontTitle = New-Object System.Drawing.Font("Segoe UI", 18, [System.Drawing.FontStyle]::Bold)
+$FontSub   = New-Object System.Drawing.Font("Segoe UI", 11, [System.Drawing.FontStyle]::Regular)
+$FontBtn   = New-Object System.Drawing.Font("Segoe UI Semibold", 10)
+$FontLog   = New-Object System.Drawing.Font("Consolas", 10)
+$FontBigBtn = New-Object System.Drawing.Font("Segoe UI", 16, [System.Drawing.FontStyle]::Bold)
+
+# --- FORMULARIO PRINCIPAL ---
+$form = New-Object System.Windows.Forms.Form
+$form.Text = "Instalador XMenu v14.2 (Stable)"
+$form.AutoScaleMode = [System.Windows.Forms.AutoScaleMode]::Dpi
+
+# --- AJUSTE INTELIGENTE DE TAMANHO ---
+$workArea = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
+$targetHeight = [math]::Round($workArea.Height * 0.95)
+$targetWidth = 850 
+if ($workArea.Width -lt 900) { $targetWidth = [math]::Round($workArea.Width * 0.95) }
+
+$form.Size = New-Object System.Drawing.Size($targetWidth, $targetHeight)
+$form.StartPosition = "CenterScreen"
+$form.BackColor = $ColorBg
+$form.ForeColor = $ColorText
+$form.FormBorderStyle = "Sizable"
+
+# --- CABECALHO ---
+$pnlHeader = New-Object System.Windows.Forms.Panel
+$pnlHeader.Height = 140
+$pnlHeader.Dock = "Top"
+$pnlHeader.BackColor = $ColorHeader
+$pnlHeader.Padding = New-Object System.Windows.Forms.Padding(20)
+$form.Controls.Add($pnlHeader)
+$Script:HeaderPanel = $pnlHeader
+
+$lblTitle = New-Object System.Windows.Forms.Label
+$lblTitle.Text = "ASSISTENTE DE CONFIGURACAO XMENU"
+$lblTitle.Font = $FontTitle
+$lblTitle.ForeColor = [System.Drawing.Color]::White
+$lblTitle.Location = New-Object System.Drawing.Point(20, 15)
+$lblTitle.AutoSize = $false
+$lblTitle.Size = New-Object System.Drawing.Size(($targetWidth - 180), 75) 
+$lblTitle.Anchor = [System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Left -bor [System.Windows.Forms.AnchorStyles]::Right
+$lblTitle.TextAlign = [System.Drawing.ContentAlignment]::MiddleLeft
+$pnlHeader.Controls.Add($lblTitle)
+
+$lblSub = New-Object System.Windows.Forms.Label
+$lblSub.Text = "Automacao de Ambiente Windows e Softwares Netcontroll"
+$lblSub.Font = $FontSub
+$lblSub.ForeColor = [System.Drawing.Color]::FromArgb(230, 230, 230)
+$lblSub.Location = New-Object System.Drawing.Point(25, 95) 
+$lblSub.AutoSize = $false
+$lblSub.Size = New-Object System.Drawing.Size(($targetWidth - 180), 30)
+$lblSub.Anchor = [System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Left -bor [System.Windows.Forms.AnchorStyles]::Right
+$lblSub.TextAlign = [System.Drawing.ContentAlignment]::MiddleLeft
+$pnlHeader.Controls.Add($lblSub)
+
+$btnCopyIP = New-Object System.Windows.Forms.Button
+$btnCopyIP.Text = "Copiar IP local"
+$btnCopyIP.Size = New-Object System.Drawing.Size(120, 30)
+$btnCopyIP.Location = New-Object System.Drawing.Point(($pnlHeader.Width - 150), 25) 
+$btnCopyIP.Anchor = [System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Right
+$btnCopyIP.BackColor = [System.Drawing.Color]::White
+$btnCopyIP.ForeColor = $ColorHeader
+$btnCopyIP.FlatStyle = "Flat"
+$btnCopyIP.Cursor = [System.Windows.Forms.Cursors]::Hand
+$pnlHeader.Controls.Add($btnCopyIP)
+
+# --- PAINEL DE CONTEUDO ---
+$pnlContent = New-Object System.Windows.Forms.Panel
+$pnlContent.Dock = "Fill"
+$pnlContent.AutoScroll = $true
+$pnlContent.Padding = New-Object System.Windows.Forms.Padding(30) 
+$form.Controls.Add($pnlContent)
+$pnlContent.BringToFront() 
+
+$tlpMain = New-Object System.Windows.Forms.TableLayoutPanel
+$tlpMain.Dock = "Top"
+$tlpMain.AutoSize = $true
+$tlpMain.ColumnCount = 1
+$tlpMain.RowCount = 5
+$tlpMain.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Absolute, 250))) | Out-Null
+$tlpMain.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Absolute, 20))) | Out-Null
+$tlpMain.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Absolute, 80))) | Out-Null
+$tlpMain.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Absolute, 20))) | Out-Null
+$tlpMain.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::AutoSize))) | Out-Null
+$pnlContent.Controls.Add($tlpMain)
+
+$grpLog = New-Object System.Windows.Forms.GroupBox
+$grpLog.Text = "Log de Operacoes Detalhado"
+$grpLog.ForeColor = $ColorSubText
+$grpLog.Font = $FontSub
+$grpLog.Dock = "Fill"
+$tlpMain.Controls.Add($grpLog, 0, 0)
+$Script:GrpLog = $grpLog
+
+$txtLog = New-Object System.Windows.Forms.RichTextBox
+$txtLog.Multiline = $true
+$txtLog.ScrollBars = "Vertical"
+$txtLog.Dock = "Fill"
+$txtLog.BackColor = $ColorLogBg
+$txtLog.ForeColor = $ColorLogText
+$txtLog.Font = $FontLog
+$txtLog.ReadOnly = $true
+$txtLog.BorderStyle = "None"
+$grpLog.Controls.Add($txtLog)
+$Script:LogControl = $txtLog
+
+$btnConfig = New-Object System.Windows.Forms.Button
+$btnConfig.Text = "PREPARAR AMBIENTE"
+$btnConfig.Dock = "Fill"
+$btnConfig.BackColor = $ColorBtnAction
+$btnConfig.ForeColor = [System.Drawing.Color]::White
+$btnConfig.FlatStyle = "Flat"
+$btnConfig.Font = $FontBigBtn
+$btnConfig.Cursor = [System.Windows.Forms.Cursors]::Hand
+$tlpMain.Controls.Add($btnConfig, 0, 2)
+$Script:MainButton = $btnConfig
+
+$grpInstall = New-Object System.Windows.Forms.GroupBox
+$grpInstall.Text = "Instalacao de Softwares"
+$grpInstall.ForeColor = $ColorSubText
+$grpInstall.Font = $FontSub
+$grpInstall.AutoSize = $true
+$grpInstall.Dock = "Top"
+$grpInstall.Padding = New-Object System.Windows.Forms.Padding(10, 25, 10, 10)
+$tlpMain.Controls.Add($grpInstall, 0, 4)
+
+$tblButtons = New-Object System.Windows.Forms.TableLayoutPanel
+$tblButtons.Dock = "Top"
+$tblButtons.AutoSize = $true
+$tblButtons.ColumnCount = 2
+$tblButtons.RowCount = 8 
+$tblButtons.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::Percent, 50))) | Out-Null
+$tblButtons.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::Percent, 50))) | Out-Null
+$grpInstall.Controls.Add($tblButtons)
+
+$progressBar = New-Object System.Windows.Forms.ProgressBar
+$progressBar.Size = New-Object System.Drawing.Size(720, 5)
+$progressBar.Dock = "Bottom"
+$progressBar.Style = "Continuous"
+$form.Controls.Add($progressBar)
+$Script:ProgressBar = $progressBar
+
+# --- FUNCOES AUXILIARES ---
 
 function Log-Message {
-    param($Tag, $Msg)
-    if ($null -eq $Script:LogBox) { return }
-
-    if ($Script:LogBox.InvokeRequired) {
-        $Script:LogBox.Invoke({ Log-Message $Tag $Msg })
-    } else {
-        $timestamp = (Get-Date).ToString("HH:mm:ss")
-        $Script:LogBox.SelectionStart = $Script:LogBox.TextLength
-        $Script:LogBox.SelectionLength = 0
-        
-        $color = [System.Drawing.Color]::WhiteSmoke
-        if ($Tag -eq "ERRO") { $color = [System.Drawing.Color]::Salmon }
-        elseif ($Tag -eq "SUCESSO") { $color = [System.Drawing.Color]::LimeGreen }
-        elseif ($Tag -eq "INFO") { $color = [System.Drawing.Color]::LightSkyBlue }
-        elseif ($Tag -eq "ZIP") { $color = [System.Drawing.Color]::Gold }
-        elseif ($Tag -eq "LOG") { $color = [System.Drawing.Color]::LightGray; $Tag = "" }
-        elseif ($Tag -eq "CANCEL") { $color = [System.Drawing.Color]::Orange }
-        
-        $Script:LogBox.SelectionColor = [System.Drawing.Color]::Gray
-        $Script:LogBox.AppendText("[$timestamp] ")
-        $Script:LogBox.SelectionColor = $color
-        
-        if ($Tag -ne "") { $Script:LogBox.AppendText("${Tag}: ") }
-        $Script:LogBox.AppendText("$Msg`r`n")
-        $Script:LogBox.ScrollToCaret()
-        
-        $Script:MainForm.Refresh()
-        [System.Windows.Forms.Application]::DoEvents()
-    }
+    param($Msg)
+    $t = $Script:LogControl
+    $clean = $Msg -replace '[^a-zA-Z0-9\s:\[\]\-\/\.\(\)]', ''
+    $t.AppendText("[$((Get-Date).ToString('HH:mm:ss'))] $clean`r`n")
+    $t.ScrollToCaret()
+    $form.Refresh()
 }
 
-function Show-IPs {
+function Log-Error {
+    param($Msg)
+    $t = $Script:LogControl
+    $t.SelectionStart = $t.TextLength
+    $t.SelectionLength = 0
+    $t.SelectionColor = $ColorError
+    $t.AppendText("[$((Get-Date).ToString('HH:mm:ss'))] ERRO: $Msg`r`n")
+    $t.SelectionColor = $ColorLogText
+    $t.ScrollToCaret()
+    $form.Refresh()
+}
+
+function Get-LocalIP {
     try {
         $activeAdapters = Get-NetAdapter -ErrorAction SilentlyContinue | Where-Object { $_.Status -eq 'Up' }
-        if ($activeAdapters) {
-            $ips = $activeAdapters | Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object { $_.IPAddress -notlike "127.*" -and $_.IPAddress -notlike "169.*" } | Select-Object -ExpandProperty IPAddress -Unique
-            
-            $netConfig = Get-NetIPConfiguration | Where-Object { $_.IPv4DefaultGateway -ne $null } | Select-Object -First 1
-            $gateway = if ($netConfig) { $netConfig.IPv4DefaultGateway.NextHop } else { "Nao detectado" }
-            $dnsServers = if ($netConfig) { $netConfig.DNSServer.ServerAddresses -join ", " } else { "Nao detectado" }
-            
-            $internetStatus = if (Test-Connection 8.8.8.8 -Count 1 -Quiet) { "Conectado (Online)" } else { "Sem Acesso (Offline)" }
-            $pingAdm2 = if (Test-Connection "adm2.netcontroll.com.br" -Count 1 -Quiet) { "OK (Acessivel)" } else { "FALHA (Inacessivel)" }
-            
-            if ($ips) {
-                if ($ips -is [string]) { $ips = @($ips) }
-                $txtIPs = $ips -join ", "
-                $txtClipboard = $ips -join "`r`n"
-                
-                Clear-DnsClientCache
-                
-                Log-Message "INFO" "Diagnostico de Rede Detalhado:"
-                Log-Message "INFO" "   > Endereco IP.....: $txtIPs"
-                Log-Message "INFO" "   > Gateway Padrao..: $gateway"
-                Log-Message "INFO" "   > Servidores DNS..: $dnsServers"
-                Log-Message "INFO" "   > Status Internet.: $internetStatus (Cache DNS Limpo)"
-                Log-Message "INFO" "   > Ping ADM2.......: $pingAdm2"
-                
-                [System.Windows.Forms.Clipboard]::SetText($txtClipboard)
-                
-                $msgBody = "RELATORIO DE REDE:`n" +
-                           "--------------------------------------------------`n" +
-                           "Endereco IP.......: $txtIPs`n" +
-                           "Gateway Padrao....: $gateway`n" +
-                           "Servidores DNS....: $dnsServers`n" +
-                           "Status Internet...: $internetStatus`n" +
-                           "Ping ADM2 (Server): $pingAdm2`n" +
-                           "--------------------------------------------------`n" +
-                           "(Enderecos IP copiados para a Area de Transferencia!)"
+        if (-not $activeAdapters) { Log-Error "Sem rede conectada."; return }
+        $ips = $activeAdapters | Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object { $_.IPAddress -notlike "127.*" -and $_.IPAddress -notlike "169.*" } | Select-Object -ExpandProperty IPAddress -Unique
+        if ($ips) {
+            if ($ips -is [string]) { $ips = @($ips) }
+            $ipString = $ips -join "`n"
+            $ipString | Set-Clipboard
+            if ($ips.Count -eq 1) { Log-Message "IP copiado: $($ips[0])" } else { Log-Message "IPs copiados: $($ips -join ', ')" }
+        } else { Log-Error "Nenhum IP valido encontrado." }
+    } catch { Log-Error "Erro IP: $_" }
+}
+$btnCopyIP.Add_Click({ Get-LocalIP })
 
-                [System.Windows.Forms.MessageBox]::Show($msgBody, "Diagnostico de Rede", "OK", "Information") | Out-Null
-            } else {
-                [System.Windows.Forms.MessageBox]::Show("Nenhum IP valido encontrado.", "Rede", "OK", "Warning") | Out-Null
-            }
-        } else {
-            [System.Windows.Forms.MessageBox]::Show("Sem adaptadores de rede conectados.", "Rede", "OK", "Warning") | Out-Null
-        }
-    } catch { Log-Message "ERRO" "Falha ao ler IPs: $_" }
+# --- FUNCAO PARA MOSTRAR SELETOR DE VERSOES ---
+function Show-VersionSelector {
+    param($Title, $Versions)
+
+    $selForm = New-Object System.Windows.Forms.Form
+    $selForm.Text = $Title
+    $selForm.Size = New-Object System.Drawing.Size(400, 200)
+    $selForm.StartPosition = "CenterParent"
+    $selForm.BackColor = [System.Drawing.Color]::FromArgb(32, 33, 36)
+    $selForm.ForeColor = [System.Drawing.Color]::WhiteSmoke
+    $selForm.FormBorderStyle = "FixedDialog"
+    $selForm.MaximizeBox = $false
+    $selForm.MinimizeBox = $false
+
+    $lbl = New-Object System.Windows.Forms.Label
+    $lbl.Text = "Selecione a versao desejada:"
+    $lbl.Location = New-Object System.Drawing.Point(20, 20)
+    $lbl.AutoSize = $true
+    $lbl.Font = $FontSub
+    $selForm.Controls.Add($lbl)
+
+    $cb = New-Object System.Windows.Forms.ComboBox
+    $cb.Location = New-Object System.Drawing.Point(20, 50)
+    $cb.Width = 340
+    $cb.DropDownStyle = "DropDownList"
+    $cb.Font = $FontBtn
+    $cb.BackColor = [System.Drawing.Color]::FromArgb(60, 60, 60)
+    $cb.ForeColor = [System.Drawing.Color]::White
+    
+    foreach ($v in $Versions) {
+        $cb.Items.Add($v.Name) | Out-Null
+    }
+    $cb.SelectedIndex = 0
+    $selForm.Controls.Add($cb)
+
+    $btn = New-Object System.Windows.Forms.Button
+    $btn.Text = "BAIXAR SELECIONADO"
+    $btn.Location = New-Object System.Drawing.Point(80, 100)
+    $btn.Size = New-Object System.Drawing.Size(220, 40)
+    $btn.BackColor = [System.Drawing.Color]::FromArgb(0, 120, 212)
+    $btn.ForeColor = [System.Drawing.Color]::White
+    $btn.FlatStyle = "Flat"
+    $btn.DialogResult = "OK"
+    $btn.Font = $FontBtn
+    $selForm.Controls.Add($btn)
+    
+    $selForm.AcceptButton = $btn
+
+    if ($selForm.ShowDialog() -eq "OK") {
+        return $Versions[$cb.SelectedIndex]
+    }
+    return $null
 }
 
-# -----------------------------------------------------------------------------
-# 4. MOTOR DE DOWNLOAD E INSTALACAO
-# -----------------------------------------------------------------------------
+# --- FUNCAO PRINCIPAL DE DOWNLOAD (COM RETRY E ANTI-FREEZE) ---
+function Download-Core {
+    param($Url, $FileName, $Unblock, $FeedbackBtn)
+    if ($null -eq $Unblock) { $Unblock = $true }
 
-function Cancel-Download {
-    if ($Script:CurrentWebClient -ne $null -and $Script:IsDownloading) {
-        $Script:CancelRequested = $true
-        try { $Script:CurrentWebClient.CancelAsync() } catch {}
-        Log-Message "CANCEL" "Solicitacao de cancelamento enviada..."
-        [System.Windows.Forms.Application]::DoEvents()
-    }
-}
-
-function Start-Download {
-    param($Url, $FileName, $Button)
+    $destPath = Join-Path -Path $Script:DownloadFolder -ChildPath $FileName
+    $Script:ProgressBar.Value = 0
     
-    if ($Script:IsDownloading) { 
-        [System.Windows.Forms.MessageBox]::Show("Ja existe um download em andamento. Cancele-o primeiro se desejar.", "Ocupado", "OK", "Warning") | Out-Null
-        return 
-    }
+    $maxRetries = 3
+    $retryCount = 0
+    $downloadSuccessful = $false
     
-    if ($Button.Text -like "*Instalado" -or $Button.Text -like "*Aberto" -or $Button.Text -like "*Extraido") { return }
-
-    $originalText = $Button.Text
-    $Script:IsDownloading = $true
-    $Script:CancelRequested = $false
-    
-    if ($Script:BtnCancel) { 
-        $Script:BtnCancel.Visible = $true
-        $Script:BtnCancel.Enabled = $true
-        $Script:BtnCancel.BringToFront()
-    }
-    
-    try {
+    while (-not $downloadSuccessful -and $retryCount -lt $maxRetries) {
+        $retryCount++
+        
+        # Reseta flags de controle para nova tentativa
         $Script:DownloadComplete = $false
         $Script:DownloadError = $null
         
-        if ($Script:ProgressBar) { $Script:ProgressBar.Value = 0 }
-        
-        $Button.Text = "Conectando..."
-        $Button.Enabled = $false 
-        $Button.BackColor = [System.Drawing.Color]::FromArgb(200, 140, 0)
-        
-        $destPath = Join-Path $Script:DownloadFolder $FileName
-        Log-Message "DOWN" "Iniciando download: $FileName"
-        if ($Script:StatusLabel) { $Script:StatusLabel.Text = "Baixando $FileName... (Pressione Cancelar para parar)" }
-
-        $maxRetries = 3
-        $retryCount = 0
-        $downloadSuccessful = $false
-        $wc = $null
-
-        while (-not $downloadSuccessful -and $retryCount -lt $maxRetries -and -not $Script:CancelRequested) {
-            $retryCount++
-            $Script:DownloadComplete = $false
-            $Script:DownloadError = $null
-
-            try {
-                $wc = New-Object System.Net.WebClient
-                $Script:CurrentWebClient = $wc
-                
-                if ($retryCount -gt 1) { 
-                    Log-Message "INFO" "Tentativa $retryCount de $maxRetries..." 
-                    $Button.Text = "Tentativa $retryCount..."
-                }
-
-                $wc.Add_DownloadProgressChanged({
-                    param($s, $e)
-                    # CORRECAO CRITICA: REMOVIDO DoEvents AQUI. Causa StackOverflow em downloads rapidos.
-                    
-                    if ($Script:ProgressBar) { $Script:ProgressBar.Value = $e.ProgressPercentage }
-                    
-                    # Atualiza texto apenas se mudar o valor para economizar UI
-                    $mbRead = "{0:N1}" -f ($e.BytesReceived / 1MB)
-                    $mbTotal = "{0:N1}" -f ($e.TotalBytesToReceive / 1MB)
-                    
-                    if ($Script:CancelRequested) {
-                        try { $s.CancelAsync() } catch {}
-                    } else {
-                        $Button.Text = "$mbRead / $mbTotal MB"
-                    }
-                })
-
-                $wc.Add_DownloadFileCompleted({
-                    param($s, $e)
-                    if ($e.Cancelled) {
-                        $Script:CancelRequested = $true
-                    } elseif ($e.Error) { 
-                        $Script:DownloadError = $e.Error 
-                    }
-                    $Script:DownloadComplete = $true
-                })
-
-                $cleanUrl = $Url.Replace(" ", "%20")
-                $wc.DownloadFileAsync((New-Object Uri($cleanUrl)), $destPath)
-
-                while (-not $Script:DownloadComplete) {
-                    # DoEvents aqui eh seguro pois tem delay
-                    [System.Windows.Forms.Application]::DoEvents()
-                    Start-Sleep -Milliseconds 10 
-                }
-                
-                if ($Script:CancelRequested) {
-                    Log-Message "CANCEL" "Cancelado pelo usuario."
-                    break 
-                }
-
-                if ($Script:DownloadError) { throw $Script:DownloadError }
-                $downloadSuccessful = $true
-
-            } catch {
-                if ($Script:CancelRequested) { break }
-                Log-Message "ERRO" "Falha na tentativa ${retryCount}: $($_.Exception.Message)"
-                Wait-UI 2
-            } finally {
-                if ($wc) { $wc.Dispose(); $wc = $null }
-                $Script:CurrentWebClient = $null
-            }
-        }
-
-        if ($Script:CancelRequested) {
-            $Button.BackColor = [System.Drawing.Color]::Salmon
-            $Button.Text = "Cancelado"
-            $Script:StatusLabel.Text = "Cancelado."
-            if (Test-Path $destPath) { 
-                Wait-UI 0.5 
-                try { Remove-Item $destPath -Force -ErrorAction SilentlyContinue | Out-Null } catch {}
-            }
-            Wait-UI 1 
-            $Button.BackColor = [System.Drawing.Color]::FromArgb(40, 40, 45)
-            $Button.Text = $originalText
+        try {
+            $SafeUrl = $Url.Replace(" ", "%20")
+            if ($retryCount -gt 1) { Log-Message "Tentativa $retryCount de $maxRetries..." }
+            else { Log-Message "Iniciando download de: $FileName" }
             
-        } elseif ($downloadSuccessful) {
+            $wc = New-Object System.Net.WebClient
             
-            # Verificacao de integridade basica (arquivo > 50kb)
-            $fileInfo = Get-Item $destPath
-            if ($fileInfo.Length -lt 50000) {
-                 Log-Message "ERRO" "Arquivo corrompido ou link invalido (Tamanho: $($fileInfo.Length) bytes)."
-                 $Button.BackColor = [System.Drawing.Color]::Salmon
-                 $Button.Text = "Erro (Arquivo Invalido)"
-                 return
-            }
+            # EVENTO DE PROGRESSO
+            $wc.Add_DownloadProgressChanged({
+                param($sender, $e)
+                $Script:ProgressBar.Value = $e.ProgressPercentage
+                if ($FeedbackBtn) {
+                    $FeedbackBtn.Text = "Baixando $($e.ProgressPercentage)%..."
+                }
+            })
 
-            Log-Message "SUCESSO" "Download concluido."
-            $Button.BackColor = [System.Drawing.Color]::FromArgb(46, 204, 113)
-            $Button.Text = "Instalar"
-            
-            Unblock-File -Path $destPath -ErrorAction SilentlyContinue
+            # EVENTO DE CONCLUSAO
+            $wc.Add_DownloadFileCompleted({
+                param($sender, $e)
+                if ($e.Error) { $Script:DownloadError = $e.Error }
+                $Script:DownloadComplete = $true
+            })
 
-            if ($FileName.EndsWith(".zip")) {
-                Log-Message "ZIP" "Extraindo arquivo..."
-                $Button.Text = "Extraindo..."
+            # INICIA DOWNLOAD
+            $wc.DownloadFileAsync((New-Object Uri($SafeUrl)), $destPath)
+
+            # LOOP DE ESPERA
+            while (-not $Script:DownloadComplete) {
                 [System.Windows.Forms.Application]::DoEvents()
-                
-                try {
-                    $folderName = [System.IO.Path]::GetFileNameWithoutExtension($FileName)
-                    $finalPath = Join-Path $Script:DownloadFolder $folderName
-                    $tempPath = Join-Path $Script:DownloadFolder "temp_$folderName"
-                    
-                    if (Test-Path $tempPath) { Remove-Item $tempPath -Recurse -Force | Out-Null }
-                    if (Test-Path $finalPath) { Remove-Item $finalPath -Recurse -Force | Out-Null }
-                    
-                    Expand-Archive -LiteralPath $destPath -DestinationPath $tempPath -Force
-                    
-                    $items = Get-ChildItem -Path $tempPath
-                    if ($items.Count -eq 1 -and $items[0].PSIsContainer) {
-                        Move-Item -Path $items[0].FullName -Destination $finalPath
-                        Remove-Item $tempPath -Recurse -Force | Out-Null
-                    } else {
-                        Rename-Item -Path $tempPath -NewName $folderName
-                    }
-                    
-                    Invoke-Item $finalPath
-                    $Button.Text = "Pasta Aberta"
-                    Log-Message "SUCESSO" "Extraido com sucesso para: $folderName"
-                } catch {
-                    Log-Message "ERRO" "Falha ao extrair ZIP."
-                    $Button.Text = "Erro ZIP"
-                    $Button.BackColor = [System.Drawing.Color]::Salmon
-                }
-                
-            } elseif ($FileName.EndsWith(".rar")) {
-                 $Button.Text = "Baixado (RAR)"
-                 Invoke-Item $destPath
-            } else {
-                Log-Message "EXEC" "Executando instalador..."
-                Start-Process $destPath
-                $Button.Text = "Executado"
+                Start-Sleep -Milliseconds 100
             }
-        } else {
-            if (-not $Script:CancelRequested) {
-                Log-Message "ERRO" "Falha definitiva no download."
-                $Button.BackColor = [System.Drawing.Color]::Salmon
-                $Button.Text = "Erro"
-                Wait-UI 2
-                $Button.BackColor = [System.Drawing.Color]::FromArgb(40, 40, 45)
-                $Button.Text = $originalText
-            }
+
+            if ($Script:DownloadError) { throw $Script:DownloadError }
+            
+            # Se chegou aqui, sucesso!
+            $downloadSuccessful = $true
+            Log-Message "Download OK."
+
+        } catch {
+            Log-Error "Erro na tentativa $retryCount : $_" 
+            Start-Sleep -Seconds 2 # Espera um pouco antes de tentar de novo
         }
+    }
 
-    } catch {
-        Log-Message "ERRO" "Erro Fatal de Script: $($_.Exception.Message)"
-        $Button.Text = "Erro Fatal"
-        $Button.BackColor = [System.Drawing.Color]::Red
-    } finally {
-        $Script:IsDownloading = $false
-        $Script:CurrentWebClient = $null
-        $Script:CancelRequested = $false
+    # Se falhou todas as vezes
+    if (-not $downloadSuccessful) {
+        Log-Error "Falha definitiva no download de $FileName apos $maxRetries tentativas."
+        return $false
+    }
         
-        if ($Script:BtnCancel) { $Script:BtnCancel.Visible = $false }
-        $Button.Enabled = $true
-        
-        if ($Script:ProgressBar) { $Script:ProgressBar.Value = 0 }
-        if ($Script:StatusLabel) { $Script:StatusLabel.Text = "Pronto." }
-    }
-}
-
-function Install-VSPE-Combined {
-    param($Button)
-    if ($Script:IsDownloading) { 
-        [System.Windows.Forms.MessageBox]::Show("Aguarde o download atual!", "Ocupado", "OK", "Warning") | Out-Null
-        return 
-    }
-
-    Start-Download "https://www.netcontroll.com.br/util/instaladores/VSPE/VSPE.zip" "VSPE.zip" $Button
-    if ($Button.Text -eq "Erro" -or $Button.Text -eq "Erro Fatal" -or $Button.Text -eq "Cancelado") { return }
-    if ($Script:CancelRequested) { return }
-
-    $Button.Text = "Baixando Epson..."
-    $Button.BackColor = [System.Drawing.Color]::FromArgb(200, 140, 0)
-    [System.Windows.Forms.Application]::DoEvents()
-    
-    $epsonUrl = "https://github.com/VMazza10/Preparador-de-Ambiente-XMenu/releases/download/Concentrador_files/tmvirtualportdriver.zip"
-    Start-Download $epsonUrl "tmvirtualportdriver.zip" $Button
-    
-    if ($Button.Text -ne "Erro" -and $Button.Text -ne "Erro Fatal" -and $Button.Text -ne "Cancelado") {
-        $Button.Text = "VSPE + Epson (Pronto)"
-        $Button.BackColor = [System.Drawing.Color]::LimeGreen
-    }
-}
-
-function Install-SqlManual {
-    param($Button)
-    if ($Script:IsDownloading) { 
-        [System.Windows.Forms.MessageBox]::Show("Aguarde o download atual!", "Ocupado", "OK", "Warning") | Out-Null
-        return 
+    if ($Unblock) { 
+        Unblock-File -Path $destPath -ErrorAction SilentlyContinue 
     }
     
+    # --- LOGICA DE EXTRACAO ---
     try {
-        $Button.Enabled = $false
-        Start-Download "https://download.microsoft.com/download/7/f/8/7f8a9c43-8c8a-4f7c-9f92-83c18d96b681/SQL2019-SSEI-Expr.exe" "SQL2019-SSEI-Expr.exe" $Button
-        
-        if ($Script:CancelRequested) { return }
-        
-        if ($Button.Text -ne "Erro" -and $Button.Text -ne "Erro Fatal" -and $Button.Text -ne "Cancelado") {
-            Start-Download "https://aka.ms/ssms/22/release/vs_SSMS.exe" "vs_SSMS.exe" $Button
+        if ($FileName -like "*.zip") {
+            Log-Message "Detectado arquivo ZIP. Extraindo..."
+            if ($FeedbackBtn) { $FeedbackBtn.Text = "Extraindo... (Aguarde)" }
+            [System.Windows.Forms.Application]::DoEvents() # Atualiza UI
+            
+            $folderName = [System.IO.Path]::GetFileNameWithoutExtension($FileName)
+            $finalPath = Join-Path -Path $Script:DownloadFolder -ChildPath $folderName
+            $tempExtractPath = Join-Path -Path $Script:DownloadFolder -ChildPath "temp_$folderName"
+            
+            if (Test-Path $tempExtractPath) { Remove-Item $tempExtractPath -Recurse -Force }
+            if (Test-Path $finalPath) { Remove-Item $finalPath -Recurse -Force }
+            
+            Expand-Archive -LiteralPath $destPath -DestinationPath $tempExtractPath -Force
+            
+            $items = Get-ChildItem -Path $tempExtractPath
+            
+            if ($items.Count -eq 1 -and $items[0].PSIsContainer) {
+                Log-Message "Ajustando estrutura da pasta..."
+                Move-Item -Path $items[0].FullName -Destination $finalPath
+                Remove-Item $tempExtractPath -Recurse -Force
+            } else {
+                Rename-Item -Path $tempExtractPath -NewName $folderName
+            }
+            
+            Log-Message "Extraido para: $finalPath"
+            Log-Message "Abrindo pasta..."
+            Invoke-Item $finalPath
+            return $true
+        } 
+        else {
+            Log-Message "Executando instalador..."
+            Start-Process $destPath
+            return $true
         }
-        
-        if ($Script:CancelRequested) { return }
-        
-        if ($Button.Text -ne "Erro" -and $Button.Text -ne "Erro Fatal" -and $Button.Text -ne "Cancelado") {
-            $Button.Text = "SQL + SSMS (Baixados)"
-            $Button.BackColor = [System.Drawing.Color]::LimeGreen
-        }
-    } finally {
-        $Button.Enabled = $true
+    } catch {
+        Log-Error "Erro na extracao/execucao: $_"
+        return $false
     }
 }
 
-function Open-Selector {
-    param($Type, $Button)
-    $height = if ($Type -eq "PDV" -or $Type -eq "LinkXMenu") { 320 } else { 220 }
+function Download-Btn-Action {
+    param($Url, $FileName, $Btn)
+    $originalText = $Btn.Text
+    if ($originalText -like "*Instalado" -or $originalText -like "*Aberto" -or $originalText -like "*Extraido") { return }
 
-    $fSel = New-Object System.Windows.Forms.Form
-    $fSel.Text = "Versoes - $Type"; $fSel.Size = "400,$height"; $fSel.StartPosition = 'CenterParent'
-    $fSel.BackColor = [System.Drawing.Color]::FromArgb(30,30,30); $fSel.ForeColor = 'White'
-    $fSel.FormBorderStyle = 'FixedDialog'; $fSel.MaximizeBox = $false
+    # --- TRAVA DE SEGURANCA ---
+    if ($Script:IsDownloading) {
+        Log-Error "Aguarde o termino do download atual!"
+        [System.Windows.Forms.MessageBox]::Show("Aguarde o download atual terminar para iniciar outro.", "Aguarde", "OK", "Warning")
+        return
+    }
     
-    $lbl = New-Object System.Windows.Forms.Label; $lbl.Text = "Selecione da Lista:"; $lbl.Location = '20,20'; $lbl.AutoSize = $true
-    [void]$fSel.Controls.Add($lbl)
-
-    $cb = New-Object System.Windows.Forms.ComboBox
-    $cb.Location = '20,45'; $cb.Width = 340; $cb.DropDownStyle = 'DropDownList'; $cb.FlatStyle = 'Flat'
-    $cb.BackColor = [System.Drawing.Color]::FromArgb(50,50,60); $cb.ForeColor = 'White'
+    $Script:IsDownloading = $true
+    $Btn.Enabled = $false; $Btn.BackColor = [System.Drawing.Color]::Orange; $form.Refresh()
     
-    $versions = @()
-    if ($Type -eq "PDV") {
-        $versions += @{Name="NetPDV v1.3.61.0"; Url="https://netcontroll.com.br/util/instaladores/netpdv/1.3/61/0/NetPDV.zip"; File="NetPDV_1.3.61.0.zip"}
-        $versions += @{Name="NetPDV v1.3.60.0"; Url="https://netcontroll.com.br/util/instaladores/netpdv/1.3/60/0/NetPDV.zip"; File="NetPDV_1.3.60.0.zip"}
-        $versions += @{Name="NetPDV v1.3.59.0"; Url="https://netcontroll.com.br/util/instaladores/netpdv/1.3/59/0/NetPDV.zip"; File="NetPDV_1.3.59.0.zip"}
-        $versions += @{Name="NetPDV v1.3.55.0"; Url="https://netcontroll.com.br/util/instaladores/netpdv/1.3/55/0/NetPDV.zip"; File="NetPDV_1.3.55.0.zip"}
-        $versions += @{Name="NetPDV v1.3.46.0"; Url="https://netcontroll.com.br/util/instaladores/netpdv/1.3/46/0/NetPDV.zip"; File="NetPDV_1.3.46.0.zip"}
-        $versions += @{Name="NetPDV v1.3.44.0"; Url="https://netcontroll.com.br/util/instaladores/netpdv/1.3/44/0/NetPDV.zip"; File="NetPDV_1.3.44.0.zip"}
-        $versions += @{Name="NetPDV v1.3.40.0"; Url="https://netcontroll.com.br/util/instaladores/netpdv/1.3/40/0/NetPDV.zip"; File="NetPDV_1.3.40.0.zip"}
-    } elseif ($Type -eq "LinkXMenu") {
-        $versions += @{Name="Link XMenu v10.16"; Url="https://netcontroll.com.br/util/instaladores/LinkXMenu/10/16/LinkXMenu.zip"; File="LinkXMenu_10.16.zip"}
-        $versions += @{Name="Link XMenu v10.12"; Url="http://netcontroll.com.br/util/instaladores/LinkXMenu/10/12/LinkXMenu.zip"; File="LinkXMenu_10.12.zip"}
+    # Passamos o botao ($Btn) para receber o feedback de %
+    $result = Download-Core $Url $FileName $true $Btn
+    
+    if ($result) {
+        $Btn.BackColor = [System.Drawing.Color]::SeaGreen
+        if ($FileName -like "*.zip") { $Btn.Text = "Extraido (Abrir Pasta)" }
+        elseif ($FileName -like "*.rar") { $Btn.Text = "Baixado (Abrir RAR)" }
+        else { $Btn.Text = "$originalText Instalado" }
     } else {
-        $versions += @{Name="Concentrador v1.3.59.0"; Url="https://github.com/VMazza10/Preparador-de-Ambiente-XMenu/releases/download/Concentrador_files/Concentrador.1.3.59.0.zip"; File="Concentrador.1.3.59.0.zip"}
-        $versions += @{Name="Concentrador v1.3.55.0"; Url="https://github.com/VMazza10/Preparador-de-Ambiente-XMenu/releases/download/Concentrador_files/Concentrador.1.3.55.0.zip"; File="Concentrador.1.3.55.0.zip"}
-        $versions += @{Name="Concentrador v1.3.50.0"; Url="https://github.com/VMazza10/Preparador-de-Ambiente-XMenu/releases/download/Concentrador_files/Concentrador.1.3.50.0.zip"; File="Concentrador.1.3.50.0.zip"}
-        $versions += @{Name="Concentrador v1.3.46.0"; Url="https://github.com/VMazza10/Preparador-de-Ambiente-XMenu/releases/download/Concentrador_files/Concentrador.1.3.46.0.zip"; File="Concentrador.1.3.46.0.zip"}
-        $versions += @{Name="Concentrador v1.3.44.0"; Url="https://github.com/VMazza10/Preparador-de-Ambiente-XMenu/releases/download/Concentrador_files/Concentrador.1.3.44.0.zip"; File="Concentrador.1.3.44.0.zip"}
-        $versions += @{Name="Concentrador v1.3.40.0"; Url="https://github.com/VMazza10/Preparador-de-Ambiente-XMenu/releases/download/Concentrador_files/Concentrador.1.3.40.0.zip"; File="Concentrador.1.3.40.0.zip"}
+        $Btn.BackColor = $ColorError
+        $Btn.Text = "Erro (Tente Novamente)"
     }
-
-    foreach ($v in $versions) { [void]$cb.Items.Add($v.Name) }
-    $cb.SelectedIndex = 0
-    [void]$fSel.Controls.Add($cb)
-
-    $btn = New-Object System.Windows.Forms.Button
-    $btn.Text = "BAIXAR SELECIONADO"; $btn.Location = '20,80'; $btn.Size = '340,35'
-    $btn.BackColor = [System.Drawing.Color]::FromArgb(0,120,215); $btn.ForeColor = 'White'; $btn.FlatStyle = 'Flat'
-    $btn.Add_Click({
-        $fSel.Tag = $versions[$cb.SelectedIndex]
-        $fSel.DialogResult = 'OK'
-        $fSel.Close()
-    })
-    [void]$fSel.Controls.Add($btn)
-
-    if ($Type -eq "PDV" -or $Type -eq "LinkXMenu") {
-        $sep = New-Object System.Windows.Forms.Label; $sep.Text = "__________________________________________________"
-        $sep.Location = '20,125'; $sep.AutoSize = $true; $sep.ForeColor = 'Gray'
-        [void]$fSel.Controls.Add($sep)
-
-        $lblMan = New-Object System.Windows.Forms.Label; $lblMan.Text = "Ou digite a Versao Manual:"; $lblMan.Location = '20,155'; $lblMan.AutoSize = $true
-        [void]$fSel.Controls.Add($lblMan)
-
-        $lblPre = New-Object System.Windows.Forms.Label; $lblPre.Location = '20,183'; $lblPre.AutoSize = $true; $lblPre.Font = New-Object System.Drawing.Font("Consolas", 12)
-        $lblPos = New-Object System.Windows.Forms.Label; $lblPos.Location = '130,183'; $lblPos.AutoSize = $true; $lblPos.Font = New-Object System.Drawing.Font("Consolas", 12)
-        
-        $txtMan = New-Object System.Windows.Forms.TextBox
-        $txtMan.Location = '65,180'; $txtMan.Width = 60; $txtMan.Font = New-Object System.Drawing.Font("Consolas", 10)
-        $txtMan.TextAlign = 'Center'
-
-        if ($Type -eq "PDV") {
-            $lblPre.Text = "1.3."; $lblPos.Text = ".0"
-        } else {
-            $lblPre.Text = "10."; $lblPos.Text = "" 
-        }
-
-        [void]$fSel.Controls.Add($lblPre); [void]$fSel.Controls.Add($txtMan); [void]$fSel.Controls.Add($lblPos)
-
-        $btnMan = New-Object System.Windows.Forms.Button
-        $btnMan.Text = "BAIXAR MANUAL"; $btnMan.Location = '180,178'; $btnMan.Size = '180,30'
-        $btnMan.BackColor = [System.Drawing.Color]::FromArgb(46, 204, 113); $btnMan.ForeColor = 'White'; $btnMan.FlatStyle = 'Flat'
-        
-        $btnMan.Add_Click({
-            $v = $txtMan.Text.Trim()
-            if ($v -match '^\d+$') {
-                if ($Type -eq "PDV") {
-                    $fSel.Tag = @{ Url="https://netcontroll.com.br/util/instaladores/netpdv/1.3/$v/0/NetPDV.zip"; File="NetPDV_1.3.$v.0.zip" }
-                } else {
-                    $fSel.Tag = @{ Url="http://netcontroll.com.br/util/instaladores/LinkXMenu/10/$v/LinkXMenu.zip"; File="LinkXMenu_10.$v.zip" }
-                }
-                $fSel.DialogResult = 'OK'
-                $fSel.Close()
-            } else { [System.Windows.Forms.MessageBox]::Show("Digite apenas o numero da versao (Ex: 62 ou 16)", "Erro", "OK", "Warning") | Out-Null }
-        })
-        [void]$fSel.Controls.Add($btnMan)
-    }
-
-    [void]$fSel.ShowDialog()
-    if ($fSel.DialogResult -eq 'OK' -and $fSel.Tag) { Start-Download $fSel.Tag.Url $fSel.Tag.File $Button }
+    
+    $Btn.Enabled = $true
+    $Script:ProgressBar.Value = 0 # Reseta barra no final
+    $Script:IsDownloading = $false # Libera a trava
 }
 
-# -----------------------------------------------------------------------------
-# 5. CONFIGURACAO DO AMBIENTE (REGISTRY E OTIMIZACOES)
-# -----------------------------------------------------------------------------
-function Run-Config {
-    param($Btn)
-    $Btn.Enabled = $false; $Btn.Text = "AGUARDE... CONFIGURANDO"; $Btn.BackColor = [System.Drawing.Color]::Gray
+function Add-Btn {
+    param($Txt, $Url, $File, $Row, $Col)
+    $b = New-Object System.Windows.Forms.Button
+    $b.Text = $Txt
+    $b.Tag = "$Url|$File"
+    $b.Dock = "Fill" 
+    $b.Height = 45
+    $b.Margin = New-Object System.Windows.Forms.Padding(5)
+    $b.BackColor = [System.Drawing.Color]::FromArgb(60, 60, 60)
+    $b.ForeColor = [System.Drawing.Color]::White
+    $b.FlatStyle = "Flat"
+    $b.Font = $FontBtn
+    $b.Cursor = [System.Windows.Forms.Cursors]::Hand
+    
+    $b.Add_MouseEnter({ 
+        if ($this.BackColor -ne [System.Drawing.Color]::SeaGreen -and $this.BackColor -ne [System.Drawing.Color]::Orange) { 
+            $this.BackColor = [System.Drawing.Color]::FromArgb(80, 80, 80) 
+        }
+    })
+    $b.Add_MouseLeave({ 
+        if ($this.BackColor -ne [System.Drawing.Color]::SeaGreen -and $this.BackColor -ne [System.Drawing.Color]::Orange -and $this.BackColor -ne $ColorError) {
+            $this.BackColor = [System.Drawing.Color]::FromArgb(60, 60, 60) 
+        }
+    })
+    
+    $b.Add_Click({ 
+        $u = $this.Tag.Split('|')[0]
+        $f = $this.Tag.Split('|')[1]
+        Download-Btn-Action $u $f $this 
+    })
+    
+    $tblButtons.Controls.Add($b, $Col, $Row)
+    return $b
+}
+
+# --- BOTOES NORMAIS ---
+Add-Btn "SQL Server 2008 (Auto)" "https://www.netcontroll.com.br/util/instaladores/netpdv/SQL2008x64.exe" "SQL2008x64.exe" 0 0 | Out-Null
+Add-Btn "SQL Server 2019 (Auto)" "https://www.netcontroll.com.br/util/instaladores/netpdv/SQL2019.exe" "SQL2019.exe" 0 1 | Out-Null
+Add-Btn "Concentrador (Instalador)" "https://www.netcontroll.com.br/util/instaladores/netpdv/InstaladorConcentrador.exe" "Concentrador.exe" 1 0 | Out-Null
+Add-Btn "NetPDV (Instalador)" "https://netcontroll.com.br/util/instaladores/netpdv/1.3/55/0/NetPDV.exe" "NetPDV.exe" 1 1 | Out-Null
+Add-Btn "Link XMenu" "https://netcontroll.com.br/util/instaladores/LinkXMenu/10/11/LinkXMenu.exe" "LinkXMenu.exe" 2 0 | Out-Null
+Add-Btn "XBot" "https://aws.netcontroll.com.br/XBotClient/setup.exe" "XBotSetup.exe" 2 1 | Out-Null
+Add-Btn "XTag Client 2.0" "https://aws.netcontroll.com.br/XTagClient2.0/setup.exe" "XTagSetup.exe" 3 0 | Out-Null
+Add-Btn "VSPE (Serial Port)" "https://www.netcontroll.com.br/util/instaladores/VSPE/VSPE.zip" "VSPE.zip" 3 1 | Out-Null
+
+# --- BOTAO ESPECIAL: CONCENTRADOR (SELETOR ZIP) ---
+$btnConcVer = New-Object System.Windows.Forms.Button
+$btnConcVer.Text = "ZIP Versoes Concentrador (Selecionar)"
+$btnConcVer.Dock = "Fill"; $btnConcVer.Margin = New-Object System.Windows.Forms.Padding(5); $btnConcVer.Height = 45
+$btnConcVer.BackColor = [System.Drawing.Color]::FromArgb(60, 60, 60); $btnConcVer.ForeColor = [System.Drawing.Color]::White
+$btnConcVer.FlatStyle = "Flat"; $btnConcVer.Font = $FontBtn; $btnConcVer.Cursor = [System.Windows.Forms.Cursors]::Hand
+$tblButtons.Controls.Add($btnConcVer, 1, 4) # Posicao 4, 1
+
+$btnConcVer.Add_Click({
+    # --- TRAVA DE SEGURANCA ---
+    if ($Script:IsDownloading) {
+        [System.Windows.Forms.MessageBox]::Show("Aguarde o download atual terminar.", "Aguarde", "OK", "Warning")
+        return
+    }
+
+    # LISTA ATUALIZADA DO CONCENTRADOR (.ZIP)
+    $versoesConcentrador = @(
+        @{ Name = "Versao 1.3.59.0"; Url = "https://github.com/VMazza10/Preparador-de-Ambiente-XMenu/releases/download/Concentrador_files/Concentrador.1.3.59.0.zip"; File = "Concentrador.1.3.59.0.zip" },
+        @{ Name = "Versao 1.3.55.0"; Url = "https://github.com/VMazza10/Preparador-de-Ambiente-XMenu/releases/download/Concentrador_files/Concentrador.1.3.55.0.zip"; File = "Concentrador.1.3.55.0.zip" },
+        @{ Name = "Versao 1.3.50.0"; Url = "https://github.com/VMazza10/Preparador-de-Ambiente-XMenu/releases/download/Concentrador_files/Concentrador.1.3.50.0.zip"; File = "Concentrador.1.3.50.0.zip" },
+        @{ Name = "Versao 1.3.46.0"; Url = "https://github.com/VMazza10/Preparador-de-Ambiente-XMenu/releases/download/Concentrador_files/Concentrador.1.3.46.0.zip"; File = "Concentrador.1.3.46.0.zip" },
+        @{ Name = "Versao 1.3.44.0"; Url = "https://github.com/VMazza10/Preparador-de-Ambiente-XMenu/releases/download/Concentrador_files/Concentrador.1.3.44.0.zip"; File = "Concentrador.1.3.44.0.zip" },
+        @{ Name = "Versao 1.3.40.0"; Url = "https://github.com/VMazza10/Preparador-de-Ambiente-XMenu/releases/download/Concentrador_files/Concentrador.1.3.40.0.zip"; File = "Concentrador.1.3.40.0.zip" }
+    )
+    
+    $selecionado = Show-VersionSelector "Escolha a Versao do Concentrador" $versoesConcentrador
+    
+    if ($selecionado) {
+        $Script:IsDownloading = $true
+        $this.Enabled = $false; $this.BackColor = [System.Drawing.Color]::Orange; $form.Refresh()
+        
+        # Passa $this (o botao) para receber o progresso
+        $result = Download-Core $selecionado.Url $selecionado.File $true $this
+        if ($result) { 
+            $this.BackColor = [System.Drawing.Color]::SeaGreen
+            $this.Text = "Extraido (Sucesso)" 
+        } 
+        else { 
+            $this.BackColor = $ColorError
+            $this.Text = "Erro" 
+        }
+        $this.Enabled = $true
+        $Script:ProgressBar.Value = 0
+        $Script:IsDownloading = $false
+    }
+})
+
+# --- BOTAO ESPECIAL: PDV (SELETOR) ---
+$btnVersoes = New-Object System.Windows.Forms.Button
+$btnVersoes.Text = "ZIP Versoes PDV (Selecionar)"
+$btnVersoes.Dock = "Fill"; $btnVersoes.Margin = New-Object System.Windows.Forms.Padding(5); $btnVersoes.Height = 45
+$btnVersoes.BackColor = [System.Drawing.Color]::FromArgb(60, 60, 60); $btnVersoes.ForeColor = [System.Drawing.Color]::White
+$btnVersoes.FlatStyle = "Flat"; $btnVersoes.Font = $FontBtn; $btnVersoes.Cursor = [System.Windows.Forms.Cursors]::Hand
+$tblButtons.Controls.Add($btnVersoes, 0, 4) # Posicao 4, 0
+
+$btnVersoes.Add_Click({
+    # --- TRAVA DE SEGURANCA ---
+    if ($Script:IsDownloading) {
+        [System.Windows.Forms.MessageBox]::Show("Aguarde o download atual terminar.", "Aguarde", "OK", "Warning")
+        return
+    }
+
+    $versoes = @(
+        @{ Name = "Versao 1.3.61.0"; Url = "https://netcontroll.com.br/util/instaladores/netpdv/1.3/61/0/NetPDV.zip"; File = "NetPDV_1.3.61.0.zip" },
+        @{ Name = "Versao 1.3.60.0"; Url = "https://netcontroll.com.br/util/instaladores/netpdv/1.3/60/0/NetPDV.zip"; File = "NetPDV_1.3.60.0.zip" },
+        @{ Name = "Versao 1.3.59.0"; Url = "https://netcontroll.com.br/util/instaladores/netpdv/1.3/59/0/NetPDV.zip"; File = "NetPDV_1.3.59.0.zip" },
+        @{ Name = "Versao 1.3.55.0"; Url = "https://netcontroll.com.br/util/instaladores/netpdv/1.3/55/0/NetPDV.zip"; File = "NetPDV_1.3.55.0.zip" },
+        @{ Name = "Versao 1.3.46.0"; Url = "https://netcontroll.com.br/util/instaladores/netpdv/1.3/46/0/NetPDV.zip"; File = "NetPDV_1.3.46.0.zip" },
+        @{ Name = "Versao 1.3.44.0"; Url = "https://netcontroll.com.br/util/instaladores/netpdv/1.3/44/0/NetPDV.zip"; File = "NetPDV_1.3.44.0.zip" },
+        @{ Name = "Versao 1.3.40.0"; Url = "https://netcontroll.com.br/util/instaladores/netpdv/1.3/40/0/NetPDV.zip"; File = "NetPDV_1.3.40.0.zip" }
+    )
+    
+    $selecionado = Show-VersionSelector "Escolha a Versao do NetPDV" $versoes
+    
+    if ($selecionado) {
+        $Script:IsDownloading = $true
+        $this.Enabled = $false; $this.BackColor = [System.Drawing.Color]::Orange; $form.Refresh()
+        $result = Download-Core $selecionado.Url $selecionado.File $true $this
+        if ($result) { 
+            $this.BackColor = [System.Drawing.Color]::SeaGreen
+            $this.Text = "PDV Extraido (Sucesso)" 
+        } 
+        else { 
+            $this.BackColor = $ColorError
+            $this.Text = "Erro" 
+        }
+        $this.Enabled = $true
+        $Script:ProgressBar.Value = 0
+        $Script:IsDownloading = $false
+    }
+})
+
+Add-Btn "TecnoSpeed (11.1.7.27)" "http://netcontroll.com.br/util/instaladores/NFCE/11.1.7.27/InstaladorNFCe.exe" "InstaladorNFCe.exe" 5 0 | Out-Null
+Add-Btn "TeamViewer Full" "https://download.teamviewer.com/download/TeamViewer_Setup_x64.exe" "Teamviewer.exe" 5 1 | Out-Null
+Add-Btn "Google Chrome" "https://github.com/VMazza10/Preparador-de-Ambiente-XMenu/releases/download/Chrome/ChromeSetup.exe" "ChromeSetup.exe" 6 0 | Out-Null
+
+# --- SQL MANUAL ---
+$btnMan = New-Object System.Windows.Forms.Button
+$btnMan.Text = "SQL 2019 + SSMS (MANUAL)"
+$btnMan.Dock = "Fill"; $btnMan.Margin = New-Object System.Windows.Forms.Padding(5); $btnMan.Height = 45
+$btnMan.BackColor = [System.Drawing.Color]::FromArgb(60, 60, 60); $btnMan.ForeColor = [System.Drawing.Color]::White
+$btnMan.FlatStyle = "Flat"; $btnMan.Font = $FontBtn; $btnMan.Cursor = [System.Windows.Forms.Cursors]::Hand
+$tblButtons.Controls.Add($btnMan, 1, 6) # Coloquei na linha 6
+$btnMan.Add_Click({
+    if ($this.Text -like "*Instalado") { return }
+    # --- TRAVA DE SEGURANCA ---
+    if ($Script:IsDownloading) {
+        [System.Windows.Forms.MessageBox]::Show("Aguarde o download atual terminar.", "Aguarde", "OK", "Warning")
+        return
+    }
+    
+    $Script:IsDownloading = $true
+    $this.Text = "Baixando..."; $this.BackColor = [System.Drawing.Color]::Orange; $form.Refresh()
+    
+    # Passa $this para mostrar progresso
+    Download-Core "https://download.microsoft.com/download/7/f/8/7f8a9c43-8c8a-4f7c-9f92-83c18d96b681/SQL2019-SSEI-Expr.exe" "SQL2019-SSEI-Expr.exe" $true $this
+    Download-Core "https://aka.ms/ssms/22/release/vs_SSMS.exe" "vs_SSMS.exe" $true $this
+    
+    $this.Text = "SQL Manual Instalado"; $this.BackColor = [System.Drawing.Color]::SeaGreen
     $Script:ProgressBar.Value = 0
+    $Script:IsDownloading = $false
+})
+
+# --- BOTAO CONFIGURAR ---
+$btnConfig.Add_Click({
+    $this.Enabled = $false
+    $this.Text = "PROCESSANDO..."
+    $this.BackColor = [System.Drawing.Color]::Gray
+    $Script:ProgressBar.Value = 0 
     
-    Log-Message "LOG" "--- INICIANDO CONFIGURACAO ---"
-    [System.Windows.Forms.Application]::DoEvents()
-    
-    Log-Message "LOG" "1. UAC (Seguranca):"
-    Log-Message "LOG" "     Desativando EnableLUA e Prompts..."
-    Start-Process "reg.exe" -ArgumentList "ADD HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System /v EnableLUA /t REG_DWORD /d 0 /f" -NoNewWindow -Wait
-    Start-Process "reg.exe" -ArgumentList "ADD HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System /v ConsentPromptBehaviorAdmin /t REG_DWORD /d 0 /f" -NoNewWindow -Wait
-    Start-Process "reg.exe" -ArgumentList "ADD HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System /v PromptOnSecureDesktop /t REG_DWORD /d 0 /f" -NoNewWindow -Wait
-    $Script:ProgressBar.Value = 15
-    [System.Windows.Forms.Application]::DoEvents()
-    
-    Log-Message "LOG" "2. ENERGIA:"
-    Log-Message "LOG" "     Definindo Plano de Alta Performance..."
+    # 1. UAC
+    Log-Message "--- INICIANDO CONFIGURACAO ---"
+    Log-Message "1. UAC (Seguranca):"
+    Log-Message "   > Desativando EnableLUA..."
+    Start-Process "reg.exe" -ArgumentList "ADD HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System /v EnableLUA /t REG_DWORD /d 0 /f" -NoNewWindow
+    Log-Message "   > Desativando Prompt Admin..."
+    Start-Process "reg.exe" -ArgumentList "ADD HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System /v ConsentPromptBehaviorAdmin /t REG_DWORD /d 0 /f" -NoNewWindow
+    Start-Process "reg.exe" -ArgumentList "ADD HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System /v PromptOnSecureDesktop /t REG_DWORD /d 0 /f" -NoNewWindow
+    $Script:ProgressBar.Value = 20
+
+    # 2. Energia
+    Log-Message "2. ENERGIA:"
+    Log-Message "   > Definindo Plano de Alta Performance..."
     powercfg /setactive 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c | Out-Null
+    Log-Message "   > Desativando Tempo Limite de Monitor/Disco..."
     powercfg /change monitor-timeout-ac 0 | Out-Null
     powercfg /change disk-timeout-ac 0 | Out-Null
     powercfg /change standby-timeout-ac 0 | Out-Null
-    Log-Message "LOG" "     Desativando Hibernacao (FastStartup)..."
-    powercfg /h off | Out-Null
-    Start-Process "reg.exe" -ArgumentList "ADD ""HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Power"" /v HiberbootEnabled /t REG_DWORD /d 0 /f" -NoNewWindow -Wait
-    $Script:ProgressBar.Value = 30
-    [System.Windows.Forms.Application]::DoEvents()
     
-    Log-Message "LOG" "3. AJUSTES VISUAIS E EXPLORER:"
-    Log-Message "LOG" "     Data DD/MM/AAAA e Explorer..."
-    Set-ItemProperty -Path "HKCU:\Control Panel\International" -Name "sShortDate" -Value "dd/MM/yyyy" -Force -ErrorAction SilentlyContinue
-    Set-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" -Name "LaunchTo" -Value 1 -Force -ErrorAction SilentlyContinue
-    Set-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" -Name "HideFileExt" -Value 0 -Force -ErrorAction SilentlyContinue
+    # --- RESTAURADO: Desativacao de Hibernacao/FastStartup ---
+    Log-Message "   > Desativando Hibernacao (FastStartup)..."
+    Start-Process "reg.exe" -ArgumentList "ADD ""HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Power"" /v HiberbootEnabled /t REG_DWORD /d 0 /f" -NoNewWindow
     
-    Log-Message "LOG" "     Otimizando efeitos visuais (Performance)..."
-    Set-ItemProperty -Path "HKCU:\Control Panel\Desktop" -Name "MenuShowDelay" -Value "0" -Force -ErrorAction SilentlyContinue
-    Set-ItemProperty -Path "HKCU:\Control Panel\Desktop" -Name "FontSmoothing" -Value "2" -Force -ErrorAction SilentlyContinue
-    Set-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\VisualEffects" -Name "VisualFXSetting" -Value 3 -Force -ErrorAction SilentlyContinue
-    Set-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" -Name "ListviewAlphaSelect" -Value 1 -Force -ErrorAction SilentlyContinue
-    Set-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" -Name "ListviewShadow" -Value 1 -Force -ErrorAction SilentlyContinue
+    $Script:ProgressBar.Value = 40
+
+    # 3. Data e Explorer
+    Log-Message "3. AJUSTES VISUAIS E EXPLORER:"
+    Log-Message "   > Data DD/MM/AAAA..."
+    Set-ItemProperty -Path "HKCU:\Control Panel\International" -Name "sShortDate" -Value "dd/MM/yyyy" -Force
+    Log-Message "   > Explorer: Abrir em 'Meu Computador'..."
+    Set-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" -Name "LaunchTo" -Value 1 -Force
     
-    Log-Message "LOG" "     Exibindo Icones Desktop..."
+    # --- RESTAURADO: Ajustes Visuais (Delay e Suavizacao) ---
+    Log-Message "   > Otimizando efeitos visuais (MenuDelay, Fontes)..."
+    Set-ItemProperty -Path "HKCU:\Control Panel\Desktop" -Name "MenuShowDelay" -Value "0" -Force
+    Set-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\VisualEffects" -Name "VisualFXSetting" -Value 3 -Force
+    Set-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" -Name "ListviewAlphaSelect" -Value 1 -Force
+    Set-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" -Name "ListviewShadow" -Value 1 -Force
+    Set-ItemProperty -Path "HKCU:\Control Panel\Desktop" -Name "FontSmoothing" -Value "2" -Force
+
+    # --- RESTAURADO: Icones Desktop (Computador, Lixeira, Rede, Usuario) ---
+    Log-Message "   > Exibindo Icones Desktop (Computador, Lixeira, Rede, Usuario)..."
     $iconPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\HideDesktopIcons\NewStartPanel"
     if (!(Test-Path $iconPath)) { New-Item -Path $iconPath -Force | Out-Null }
-    # Ativa Computer, RecycleBin, User, Network
-    Set-ItemProperty -Path $iconPath -Name "{20D04FE0-3AEA-1069-A2D8-08002B30309D}" -Value 0 -Force -ErrorAction SilentlyContinue
-    Set-ItemProperty -Path $iconPath -Name "{645FF040-5081-101B-9F08-00AA002F954E}" -Value 0 -Force -ErrorAction SilentlyContinue
-    Set-ItemProperty -Path $iconPath -Name "{59031a47-3f72-44a7-89c5-5595fe6b30ee}" -Value 0 -Force -ErrorAction SilentlyContinue
-    Set-ItemProperty -Path $iconPath -Name "{F02C1A0D-BE21-4350-88B0-7367FC96EF3C}" -Value 0 -Force -ErrorAction SilentlyContinue
-    $Script:ProgressBar.Value = 45
-    [System.Windows.Forms.Application]::DoEvents()
-    
-    Log-Message "LOG" "4. REDE E SEGURANCA:"
-    Log-Message "LOG" "     Liberando Firewall (Arquivos) e Senhas..."
-    netsh advfirewall firewall set rule group="File and Printer Sharing" new enable=Yes | Out-Null
-    Start-Process "reg.exe" -ArgumentList "ADD HKLM\SYSTEM\CurrentControlSet\Control\Lsa /v LimitBlankPasswordUse /t REG_DWORD /d 0 /f" -NoNewWindow -Wait
-    Start-Process "reg.exe" -ArgumentList "ADD HKLM\SYSTEM\CurrentControlSet\Control\Lsa /v everyoneincludesanonymous /t REG_DWORD /d 1 /f" -NoNewWindow -Wait
-    Start-Process "reg.exe" -ArgumentList "ADD HKLM\SYSTEM\CurrentControlSet\Services\LanmanServer\Parameters /v restrictnullsessaccess /t REG_DWORD /d 0 /f" -NoNewWindow -Wait
-    
-    # --- PERFORMANCE NETWORK ---
-    Log-Message "LOG" "     Otimizando TCP/IP (Baixa Latencia)..."
-    $tcpKey = "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\Interfaces"
-    Get-ChildItem $tcpKey | ForEach-Object {
-        New-ItemProperty -Path $_.PSPath -Name "TcpAckFrequency" -Value 1 -PropertyType DWord -Force -ErrorAction SilentlyContinue | Out-Null
-        New-ItemProperty -Path $_.PSPath -Name "TCPNoDelay" -Value 1 -PropertyType DWord -Force -ErrorAction SilentlyContinue | Out-Null
-    }
-    $Script:ProgressBar.Value = 60
-    
-    Log-Message "LOG" "5. LIMPEZA E OTIMIZACAO:"
-    # --- PERFORMANCE SERVICES ---
-    Log-Message "LOG" "     Desativando SysMain (Superfetch) e Telemetria..."
-    Stop-Service "SysMain" -ErrorAction SilentlyContinue
-    Set-Service "SysMain" -StartupType Disabled -ErrorAction SilentlyContinue
-    Stop-Service "DiagTrack" -ErrorAction SilentlyContinue
-    Set-Service "DiagTrack" -StartupType Disabled -ErrorAction SilentlyContinue
+    # Computador
+    Set-ItemProperty -Path $iconPath -Name "{20D04FE0-3AEA-1069-A2D8-08002B30309D}" -Value 0 -Force
+    # Lixeira
+    Set-ItemProperty -Path $iconPath -Name "{645FF040-5081-101B-9F08-00AA002F954E}" -Value 0 -Force
+    # Arquivos do Usuario
+    Set-ItemProperty -Path $iconPath -Name "{59031a47-3f72-44a7-89c5-5595fe6b30ee}" -Value 0 -Force
+    # Rede
+    Set-ItemProperty -Path $iconPath -Name "{F02C1A0D-BE21-4350-88B0-7367FC96EF3C}" -Value 0 -Force
 
-    Log-Message "LOG" "     Removendo Bloatware (Cortana, Feeds, Chat)..."
+    # 4. Rede
+    Log-Message "4. REDE:"
+    Log-Message "   > Liberando Firewall (Arquivos)..."
+    netsh advfirewall firewall set rule group="File and Printer Sharing" new enable=Yes | Out-Null
+    Log-Message "   > Permitindo senhas"
+    Start-Process "reg.exe" -ArgumentList "ADD HKLM\SYSTEM\CurrentControlSet\Control\Lsa /v LimitBlankPasswordUse /t REG_DWORD /d 0 /f" -NoNewWindow
+    Start-Process "reg.exe" -ArgumentList "ADD HKLM\SYSTEM\CurrentControlSet\Control\Lsa /v everyoneincludesanonymous /t REG_DWORD /d 1 /f" -NoNewWindow
+    Start-Process "reg.exe" -ArgumentList "ADD HKLM\SYSTEM\CurrentControlSet\Services\LanmanServer\Parameters /v restrictnullsessaccess /t REG_DWORD /d 0 /f" -NoNewWindow
+
+    # 5. LIMPEZA
+    Log-Message "5. LIMPEZA E BARRA DE TAREFAS:"
+    Log-Message "   > Removendo Cortana e Visao de Tarefas..."
     $advKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced"
-    Set-ItemProperty -Path $advKey -Name "ShowCortanaButton" -Value 0 -Force -ErrorAction SilentlyContinue
-    Set-ItemProperty -Path $advKey -Name "ShowTaskViewButton" -Value 0 -Force -ErrorAction SilentlyContinue
-    Set-ItemProperty -Path $advKey -Name "TaskbarMn" -Value 0 -Force -ErrorAction SilentlyContinue
+    Set-ItemProperty -Path $advKey -Name "ShowCortanaButton" -Value 0 -Force
+    Set-ItemProperty -Path $advKey -Name "ShowTaskViewButton" -Value 0 -Force
     $searchKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Search"
     if (!(Test-Path $searchKey)) { New-Item -Path $searchKey -Force | Out-Null }
-    Set-ItemProperty -Path $searchKey -Name "SearchboxTaskbarMode" -Value 0 -Force -ErrorAction SilentlyContinue
-    $pplKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced\People"
-    if (!(Test-Path $pplKey)) { New-Item -Path $pplKey -Force -ErrorAction SilentlyContinue | Out-Null }
-    Set-ItemProperty -Path $pplKey -Name "PeopleBand" -Value 0 -Force -ErrorAction SilentlyContinue
+    Set-ItemProperty -Path $searchKey -Name "SearchboxTaskbarMode" -Value 0 -Force
     
+    # --- RESTAURADO: Remocao do botao Pessoas e Feeds ---
+    Log-Message "   > Removendo botao Pessoas..."
+    $peopleKeyPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced\People"
+    if (!(Test-Path $peopleKeyPath)) { New-Item -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" -Name "People" -Force | Out-Null }
+    Set-ItemProperty -Path $peopleKeyPath -Name "PeopleBand" -Value 0 -Force
+    
+    # --- NOVO (v13.3) - REMOCAO DO CHAT (Win 11) ---
+    Log-Message "   > Ocultando Chat (Win 11)..."
+    Set-ItemProperty -Path $advKey -Name "TaskbarMn" -Value 0 -Force
+
+    Log-Message "   > Desativando Feeds (Noticias e Interesses) na Barra..."
+    # 1. Configuracao do Usuario (HKCU) - Modo de Visualizacao (0=Show, 1=IconOnly, 2=Hidden)
+    # CORRECAO: Tratamento de erro caso a chave esteja bloqueada/permissao negada
     $feedsKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Feeds"
     if (!(Test-Path $feedsKey)) { New-Item -Path $feedsKey -Force | Out-Null }
-    try { Set-ItemProperty -Path $feedsKey -Name "ShellFeedsTaskbarViewMode" -Value 2 -Force -ErrorAction Stop } catch {
-        Start-Process "reg.exe" -ArgumentList "ADD HKCU\Software\Microsoft\Windows\CurrentVersion\Feeds /v ShellFeedsTaskbarViewMode /t REG_DWORD /d 2 /f" -NoNewWindow -Wait
+    
+    try {
+        # Tenta modo nativo do PowerShell
+        Set-ItemProperty -Path $feedsKey -Name "ShellFeedsTaskbarViewMode" -Type DWord -Value 2 -Force -ErrorAction Stop
+    } catch {
+        # Se falhar (acesso negado), tenta via CMD/Reg.exe de forma silenciosa e forca via Policy HKLM abaixo
+        Log-Message "   > Aviso: Permissao negada no HKCU. Tentando forcar via CMD..."
+        
+        # CORRECAO: Uso de aspas simples para os argumentos para evitar conflito de parser no PowerShell
+        $regArgs = 'ADD "HKCU\Software\Microsoft\Windows\CurrentVersion\Feeds" /v ShellFeedsTaskbarViewMode /t REG_DWORD /d 2 /f'
+        Start-Process "reg.exe" -ArgumentList $regArgs -NoNewWindow -ErrorAction SilentlyContinue
     }
-    if (!(Test-Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Windows Feeds")) { New-Item "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Windows Feeds" -Force | Out-Null }
-    Set-ItemProperty "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Windows Feeds" -Name "EnableFeeds" -Value 0 -Force -ErrorAction SilentlyContinue
-    
-    Log-Message "LOG" "     Removendo App Installer e Widgets..."
-    Get-AppxPackage -AllUsers *Microsoft.DesktopAppInstaller* | Remove-AppxPackage -ErrorAction SilentlyContinue
-    if (!(Test-Path "HKLM:\SOFTWARE\Policies\Microsoft\Dsh")) { New-Item "HKLM:\SOFTWARE\Policies\Microsoft\Dsh" -Force | Out-Null }
-    Set-ItemProperty "HKLM:\SOFTWARE\Policies\Microsoft\Dsh" -Name "AllowNewsAndInterests" -Value 0 -Force -ErrorAction SilentlyContinue
 
-    # --- LIMPEZA DE TOOLBARS E ICONES (RESTAURADA) ---
-    Log-Message "LOG" "     Resetando Toolbars e Icones da Barra..."
-    
-    # 1. Remove Toolbars (Endereco, Links, etc)
+    # --- REMOCAO DO WINGET (APP INSTALLER) ---
+    Log-Message "   > Removendo App Installer (Winget)..."
+    Get-AppxPackage -AllUsers *Microsoft.DesktopAppInstaller* | Remove-AppxPackage -ErrorAction SilentlyContinue
+
+    # --- REMOCAO DE WIDGETS (NEWS AND INTERESTS) VIA POLITICA ---
+    Log-Message "   > Bloqueando Widgets via Politica (DSH)..."
+    if (!(Test-Path "HKLM:\SOFTWARE\Policies\Microsoft\Dsh")) { New-Item -Path "HKLM:\SOFTWARE\Policies\Microsoft\Dsh" -Force | Out-Null }
+    Set-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Dsh" -Name "AllowNewsAndInterests" -Type DWord -Value 0 -Force
+    # Forcar tambem EnableFeeds para 0
+    if (!(Test-Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Windows Feeds")) { New-Item -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Windows Feeds" -Force | Out-Null }
+    Set-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Windows Feeds" -Name "EnableFeeds" -Type DWord -Value 0 -Force
+
+
+    # --- RESTAURADO: REMOCAO DE TOOLBARS (Endereco, Links, Area de Trabalho) ---
+    Log-Message "   > Resetando Toolbars da Barra de Tarefas..."
     $toolbarStreamPaths = @(
         "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Streams\Desktop",
         "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Streams\Desktop\TaskbarWinXP",
         "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Streams\Desktop\Taskband"
     )
     foreach ($p in $toolbarStreamPaths) {
-        if (Test-Path $p) { Remove-Item $p -Recurse -Force -ErrorAction SilentlyContinue | Out-Null }
+        if (Test-Path $p) {
+            Remove-Item $p -Recurse -Force -ErrorAction SilentlyContinue | Out-Null
+        }
     }
+    
+    # --- RESTAURADO: LIMPEZA DE TEMP ---
+    Log-Message "   > Limpando arquivos temporarios..."
+    Remove-Item -Path "$env:TEMP\*" -Recurse -Force -ErrorAction SilentlyContinue | Out-Null
+    Get-ChildItem -Path "$env:windir\Temp" -Force -ErrorAction SilentlyContinue | Where-Object { -not $_.PSIsContainer } | Remove-Item -Force -ErrorAction SilentlyContinue | Out-Null
 
-    # 2. Ocultar icone "Reuniao Agora" (Meet Now)
-    $policiesExplorer = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Policies\Explorer"
-    if (!(Test-Path $policiesExplorer)) { New-Item -Path $policiesExplorer -Force | Out-Null }
-    Set-ItemProperty -Path $policiesExplorer -Name "HideSCAMeetNow" -Value 1 -Force -ErrorAction SilentlyContinue
-    
-    Log-Message "LOG" "     Limpando arquivos temporarios..."
-    Remove-Item "$env:TEMP\*" -Recurse -Force -ErrorAction SilentlyContinue | Out-Null
-    Get-ChildItem -Path "$env:windir\Temp" -Force -ErrorAction SilentlyContinue | Remove-Item -Force -Recurse -ErrorAction SilentlyContinue | Out-Null
     $Script:ProgressBar.Value = 80
-    [System.Windows.Forms.Application]::DoEvents()
-    
-    Log-Message "LOG" "6. PERSONALIZACAO (ATALHO SUPORTE):"
-    Log-Message "LOG" "     Baixando e Definindo Wallpaper..."
-    $tempDir = Join-Path $env:TEMP "XmenuResources"
-    if (!(Test-Path $tempDir)) { New-Item $tempDir -ItemType Directory -Force | Out-Null }
-    $wallPath = Join-Path $tempDir "fundo.png"
+
+    # 6. PERSONALIZACAO
+    Log-Message "6. PERSONALIZACAO (ATALHO SUPORTE):"
+    $tempDir = "$env:TEMP\XmenuResources"
+    if (-not (Test-Path $tempDir)) { New-Item -Path $tempDir -ItemType Directory -Force | Out-Null }
+    $wallpaperPath = "$tempDir\fundo.png"
     
     try {
+        Log-Message "   > Baixando Wallpaper..."
         $wc = New-Object System.Net.WebClient
-        $wc.DownloadFile("$Script:RepoBase/fundo.png", $wallPath)
+        $wc.DownloadFile("$RepoBase/fundo.png".Replace(" ", "%20"), $wallpaperPath)
         Set-ItemProperty -Path "HKCU:\Control Panel\Desktop" -Name "WallpaperStyle" -Value "10" -Force
         Set-ItemProperty -Path "HKCU:\Control Panel\Desktop" -Name "TileWallPaper" -Value "0" -Force
-        Set-ItemProperty -Path "HKCU:\Control Panel\Desktop" -Name "WallPaper" -Value $wallPath -Force
-        [XMenuTools.WinAPI]::SystemParametersInfo(0x0014, 0, $wallPath, 3) | Out-Null
-    } catch { Log-Message "ERRO" "Falha no Wallpaper: $($_.Exception.Message)" }
+        Set-ItemProperty -Path "HKCU:\Control Panel\Desktop" -Name "WallPaper" -Value $wallpaperPath -Force
+        [Stuff.WinAPI]::SystemParametersInfo($SPI_SETDESKWALLPAPER, 0, $wallpaperPath, $SPIF_UPDATEINIFILE -bor $SPIF_SENDCHANGE) | Out-Null
+    } catch { Log-Error "Erro no Wallpaper." }
+
+    $targetConfigDir = "C:\Netcontroll\SuporteXmenuChat\Config"
+    if (-not (Test-Path $targetConfigDir)) { New-Item -Path $targetConfigDir -ItemType Directory -Force | Out-Null }
     
-    Log-Message "LOG" "     Configurando Atalho Suporte (Downloads)..."
-    $configDir = "C:\Netcontroll\SuporteXmenuChat\Config"
-    if (!(Test-Path $configDir)) { New-Item $configDir -ItemType Directory -Force | Out-Null }
-    
-    $filesToDownload = @(
-        @{ U="$Script:RepoBase/Config/Suporte%20Xmenu.html"; D="$configDir\Suporte Xmenu.html" },
-        @{ U="$Script:RepoBase/Config/iconeatalho.ico"; D="$configDir\iconeatalho.ico" },
-        @{ U="$Script:RepoBase/Config/faviconxmenu.ico"; D="$configDir\faviconxmenu.ico" },
-        @{ U="$Script:RepoBase/Config/iconheaderxmenu.png"; D="$configDir\iconheaderxmenu.png" },
-        @{ U="$Script:RepoBase/Config/SuporteXmenuDicas.pdf"; D="$configDir\SuporteXmenuDicas.pdf" }
-    )
-    foreach ($file in $filesToDownload) {
-        try { (New-Object System.Net.WebClient).DownloadFile($file.U, $file.D) } 
-        catch { Log-Message "ERRO" "Falha ao baixar $($file.D): $($_.Exception.Message)" }
+    # Lista atualizada de arquivos de suporte
+    $files = @("Suporte Xmenu.html", "iconeatalho.ico", "faviconxmenu.ico", "iconheaderxmenu.png", "SuporteXmenuDicas.pdf")
+    foreach ($f in $files) {
+        $u = "$RepoBase/Config/$f".Replace(" ", "%20")
+        $d = Join-Path $targetConfigDir $f
+        try { (New-Object System.Net.WebClient).DownloadFile($u, $d) } catch { Log-Error "Erro ao baixar $f" }
     }
+
+    $finalHtmlPath = Join-Path $targetConfigDir "Suporte Xmenu.html"
+    $iconPath = Join-Path $targetConfigDir "iconeatalho.ico"
     
-    try {
-        $shell = New-Object -ComObject WScript.Shell
-        $desktopPub = [Environment]::GetFolderPath('CommonDesktopDirectory')
-        $lnkPath = Join-Path $desktopPub "Suporte Xmenu.lnk"
-        $lnk = $shell.CreateShortcut($lnkPath)
-        $lnk.TargetPath = "$configDir\Suporte Xmenu.html"
-        $lnk.IconLocation = "$configDir\iconeatalho.ico"
-        $lnk.Save()
-        Log-Message "LOG" "     Atalho criado com sucesso."
-    } catch { Log-Message "ERRO" "Falha no atalho: $($_.Exception.Message)" }
+    # --- RESTAURADO: Criacao do Atalho com Logica da v8.2 ---
+    if (Test-Path $finalHtmlPath) {
+        try {
+            Log-Message "   > Criando atalho 'Suporte Xmenu' no Desktop Publico..."
+            $WshShell = New-Object -ComObject WScript.Shell
+            
+            # Atalho no Desktop Publico (Visivel para todos os usuarios)
+            $shortcutPath = [System.IO.Path]::Combine($env:PUBLIC, "Desktop", "Suporte Xmenu.lnk")
+            $Shortcut = $WshShell.CreateShortcut($shortcutPath)
+            
+            $Shortcut.TargetPath = $finalHtmlPath
+            $Shortcut.Arguments = "" # Importante para compatibilidade
+            $Shortcut.IconLocation = $iconPath
+            $Shortcut.Save()
+            
+            Log-Message "   > Atalho criado com sucesso!"
+        } catch {
+            Log-Error "Falha ao criar atalho: $_"
+        }
+    } else {
+        Log-Error "Arquivo HTML base nao encontrado. Atalho nao criado."
+    }
+
+    # 7. FIM
+    Log-Message "7. FINALIZACAO:"
     
-    Log-Message "LOG" "7. FINALIZACAO:"
-    Log-Message "LOG" "     Limpando cache e reiniciando Explorer..."
-    Get-ChildItem "$env:LOCALAPPDATA\IconCache.db" -ErrorAction SilentlyContinue | Remove-Item -Force | Out-Null
+    # --- RESTAURADO: Limpeza de Cache de Icones ---
+    Log-Message "   > Limpando cache de icones..."
+    Get-ChildItem -Path "$env:LOCALAPPDATA\IconCache.db" -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
+    Get-ChildItem -Path "$env:LOCALAPPDATA\Microsoft\Windows\Explorer\iconcache_*.db" -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
+
+    Log-Message "   > Reiniciando Explorer para aplicar..."
     Stop-Process -Name explorer -Force -ErrorAction SilentlyContinue
-    Wait-UI 2 # Espera nao travante
+    Start-Sleep -Seconds 1
     if (-not (Get-Process explorer -ErrorAction SilentlyContinue)) { Start-Process explorer.exe }
     
-    Log-Message "LOG" "--- PROCESSO CONCLUIDO ---"
-    $Btn.Text = "SUCESSO! (CONFIRA AS 4 JANELAS)"
-    $Btn.BackColor = [System.Drawing.Color]::LimeGreen
-    $Btn.Enabled = $true
-    $Script:ProgressBar.Value = 100
+    Log-Message "--- PROCESSO CONCLUIDO ---"
     
-    # 2. JANELA PERMANECE VISIVEL E ATUALIZADA
-    $Script:MainForm.Activate()
+    $Script:HeaderPanel.BackColor = $ColorSuccess
+    $Script:MainButton.BackColor = $ColorSuccess
+    $Script:MainButton.Text = "CONFIGURACAO CONCLUIDA"
+    $Script:MainButton.Enabled = $true
+    $Script:GrpLog.ForeColor = $ColorSuccess 
     
+    # JANELA FINAL (PAUSA AQUI ATE CLICAR EM OK)
     $finalForm = New-Object System.Windows.Forms.Form
     $finalForm.Text = "Configuracao Concluida"
-    $finalForm.Size = New-Object System.Drawing.Size(400, 200)
+    $finalForm.Size = New-Object System.Drawing.Size(400, 250)
     $finalForm.StartPosition = "CenterScreen"
-    $finalForm.BackColor = [System.Drawing.Color]::FromArgb(25,25,30); $finalForm.ForeColor = 'White'
-    $finalForm.FormBorderStyle = 'FixedDialog'; $finalForm.MaximizeBox = $false
-    $finalForm.TopMost = $true
-    
-    $lblFim = New-Object System.Windows.Forms.Label
-    $lblFim.Text = "Configuracao Finalizada!`n`nSerao abertas as janelas:`n- Recursos do Windows`n- Rede`n- Regiao`n- Performance"
-    $lblFim.AutoSize = $false; $lblFim.Size = New-Object System.Drawing.Size(360, 100); $lblFim.Location = '20,20'
-    [void]$finalForm.Controls.Add($lblFim)
+    $finalForm.BackColor = $ColorBg
+    $finalForm.ForeColor = $ColorText
+    $finalForm.FormBorderStyle = "FixedDialog"
+    $finalForm.MaximizeBox = $false
+    $finalForm.TopMost = $true 
+
+    $lblHead = New-Object System.Windows.Forms.Label
+    $lblHead.Text = "CONFIGURACAO FINALIZADA!"
+    $lblHead.Location = New-Object System.Drawing.Point(30, 30)
+    $lblHead.AutoSize = $true
+    $lblHead.Font = New-Object System.Drawing.Font("Segoe UI", 14, [System.Drawing.FontStyle]::Bold)
+    $lblHead.ForeColor = [System.Drawing.Color]::LimeGreen
+    $finalForm.Controls.Add($lblHead)
+
+    $lblInfo = New-Object System.Windows.Forms.Label
+    $lblInfo.Text = "Ao clicar em ENTENDIDO, as janelas de ajustes manuais (Rede, Recursos, etc.) serao abertas."
+    $lblInfo.Location = New-Object System.Drawing.Point(30, 70)
+    $lblInfo.Size = New-Object System.Drawing.Size(340, 80)
+    $lblInfo.Font = $FontSub
+    $finalForm.Controls.Add($lblInfo)
     
     $btnFim = New-Object System.Windows.Forms.Button
-    $btnFim.Text = "ENTENDIDO"; $btnFim.Location = '100,120'; $btnFim.Size = '180,30'
-    $btnFim.BackColor = [System.Drawing.Color]::LimeGreen; $btnFim.ForeColor = 'White'; $btnFim.FlatStyle = 'Flat'
+    $btnFim.Text = "ENTENDIDO, ABRIR JANELAS"
+    $btnFim.Location = New-Object System.Drawing.Point(100, 150)
+    $btnFim.Size = New-Object System.Drawing.Size(200, 40)
+    $btnFim.BackColor = $ColorBtnAction
+    $btnFim.ForeColor = [System.Drawing.Color]::White
+    $btnFim.FlatStyle = "Flat"
     
-    $btnFim.DialogResult = [System.Windows.Forms.DialogResult]::OK
-    [void]$finalForm.Controls.Add($btnFim)
-    $finalForm.AcceptButton = $btnFim
-
-    if ($finalForm.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
+    # AQUI: AS FERRAMENTAS ABREM QUANDO CLICAR NO BOTAO
+    $btnFim.Add_Click({ 
+        $finalForm.Close()
+        
         Start-Process "OptionalFeatures.exe"
         Start-Process "control.exe" -ArgumentList "/name Microsoft.NetworkAndSharingCenter /page Advanced"
         Start-Process "intl.cpl"
         Start-Process "systempropertiesperformance.exe"
-    }
-}
+    })
+    $finalForm.Controls.Add($btnFim)
+    
+    $finalForm.ShowDialog()
+})
 
-# -----------------------------------------------------------------------------
-# 6. UI WINDOWS FORMS
-# -----------------------------------------------------------------------------
-$screen = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
-$formWidth = if ($screen.Width -lt 1000) { 900 } else { 1000 }
-$formHeight = if ($screen.Height -lt 800) { 700 } else { 800 }
-
-$form = New-Object System.Windows.Forms.Form
-$form.Text = "XMenu System Manager v17.47"
-$form.Size = New-Object System.Drawing.Size($formWidth, $formHeight)
-$form.StartPosition = "CenterScreen"
-$form.BackColor = [System.Drawing.Color]::FromArgb(25,25,30); $form.ForeColor = 'White'
-$form.Font = New-Object System.Drawing.Font("Segoe UI", 10)
-$Script:MainForm = $form
-
-# HEADER
-$head = New-Object System.Windows.Forms.Panel; $head.Dock = 'Top'; $head.Height = 130
-$head.BackColor = [System.Drawing.Color]::FromArgb(0,120,215); $head.Padding = '20,20,20,0'
-[void]$form.Controls.Add($head)
-
-$hLeft = New-Object System.Windows.Forms.Panel; $hLeft.Dock = 'Fill'; $hLeft.BackColor = 'Transparent'
-[void]$head.Controls.Add($hLeft)
-$lT = New-Object System.Windows.Forms.Label; $lT.Text = "XMenu Manager"; $lT.AutoSize = $true
-$lT.Font = New-Object System.Drawing.Font("Segoe UI", 24, [System.Drawing.FontStyle]::Bold); $lT.Location = '0,10'
-[void]$hLeft.Controls.Add($lT)
-$lS = New-Object System.Windows.Forms.Label; $lS.Text = "Central de Automacao"; $lS.AutoSize = $true
-$lS.ForeColor = [System.Drawing.Color]::FromArgb(200,230,255); $lS.Location = '5,60'
-[void]$hLeft.Controls.Add($lS)
-
-$hRight = New-Object System.Windows.Forms.FlowLayoutPanel; $hRight.Dock = 'Right'; $hRight.Width = 250
-$hRight.FlowDirection = 'TopDown'; $hRight.BackColor = 'Transparent'; $hRight.WrapContents = $false
-[void]$head.Controls.Add($hRight)
-
-$sysInfo = New-Object System.Windows.Forms.Label
-$sysInfo.Text = "$env:COMPUTERNAME`n$env:USERNAME`nWindows $((Get-WmiObject Win32_OperatingSystem).Version)"
-$sysInfo.AutoSize = $true; $sysInfo.Font = New-Object System.Drawing.Font("Consolas", 9)
-$sysInfo.TextAlign = 'TopRight'; $sysInfo.Anchor = 'Right'
-[void]$hRight.Controls.Add($sysInfo)
-
-$btnIP = New-Object System.Windows.Forms.Button; $btnIP.Text = "DIAG. REDE"; $btnIP.Size = '120,30'
-$btnIP.BackColor = 'White'; $btnIP.ForeColor = [System.Drawing.Color]::FromArgb(0,120,215)
-$btnIP.FlatStyle = 'Flat'; $btnIP.Font = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold)
-$btnIP.Margin = '0,10,0,0'; $btnIP.Anchor = 'Right'
-$btnIP.Add_Click({ Show-IPs })
-[void]$hRight.Controls.Add($btnIP)
-
-# FOOTER
-$foot = New-Object System.Windows.Forms.Panel; $foot.Dock = 'Bottom'; $foot.Height = 30
-$foot.BackColor = [System.Drawing.Color]::FromArgb(40,40,45)
-[void]$form.Controls.Add($foot)
-$prog = New-Object System.Windows.Forms.ProgressBar; $prog.Dock = 'Top'; $prog.Height = 5
-[void]$foot.Controls.Add($prog); $Script:ProgressBar = $prog
-$stat = New-Object System.Windows.Forms.Label; $stat.Text = "Pronto."; $stat.Dock = 'Fill'
-$stat.TextAlign = 'MiddleLeft'; $stat.Padding = '10,0,0,0'; $stat.ForeColor = 'Gray'
-[void]$foot.Controls.Add($stat); $Script:StatusLabel = $stat
-
-# BOTAO CANCELAR (NOVO)
-$btnCancel = New-Object System.Windows.Forms.Button
-$btnCancel.Text = "X"
-$btnCancel.Size = New-Object System.Drawing.Size(30, 25)
-$btnCancel.Dock = 'Right'
-$btnCancel.BackColor = [System.Drawing.Color]::Salmon
-$btnCancel.ForeColor = 'White'
-$btnCancel.FlatStyle = 'Flat'
-$btnCancel.Visible = $false # Oculto por padrao
-$btnCancel.Add_Click({ Cancel-Download })
-[void]$foot.Controls.Add($btnCancel)
-$Script:BtnCancel = $btnCancel
-
-
-# MAIN LAYOUT
-$layout = New-Object System.Windows.Forms.TableLayoutPanel; $layout.Dock = 'Fill'; $layout.ColumnCount = 1
-$layout.Padding = '20'; $layout.RowCount = 3
-[void]$layout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Percent, 25)))
-[void]$layout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Absolute, 70)))
-[void]$layout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Percent, 75)))
-[void]$form.Controls.Add($layout); $layout.BringToFront()
-
-$gLog = New-Object System.Windows.Forms.GroupBox; $gLog.Text = "Log"; $gLog.ForeColor = 'Gray'; $gLog.Dock = 'Fill'
-[void]$layout.Controls.Add($gLog, 0, 0)
-$tLog = New-Object System.Windows.Forms.RichTextBox; $tLog.Dock = 'Fill'; $tLog.BackColor = [System.Drawing.Color]::FromArgb(20,20,20)
-$tLog.ForeColor = 'White'; $tLog.BorderStyle = 'None'; $tLog.ReadOnly = $true; $tLog.Font = New-Object System.Drawing.Font("Consolas", 9)
-[void]$gLog.Controls.Add($tLog); $Script:LogBox = $tLog
-
-$bCfg = New-Object System.Windows.Forms.Button; $bCfg.Text = "⚡ PREPARAR AMBIENTE WINDOWS"
-$bCfg.Dock = 'Fill'; $bCfg.BackColor = [System.Drawing.Color]::FromArgb(0,120,215); $bCfg.ForeColor = 'White'
-$bCfg.FlatStyle = 'Flat'; $bCfg.Font = New-Object System.Drawing.Font("Segoe UI", 12, [System.Drawing.FontStyle]::Bold)
-$bCfg.Margin = '0,10,0,10'; $bCfg.Cursor = 'Hand'
-$bCfg.Add_Click({ Run-Config $this })
-[void]$layout.Controls.Add($bCfg, 0, 1)
-
-$pScroll = New-Object System.Windows.Forms.Panel; $pScroll.Dock = 'Fill'; $pScroll.AutoScroll = $true
-[void]$layout.Controls.Add($pScroll, 0, 2)
-$tbl = New-Object System.Windows.Forms.TableLayoutPanel; $tbl.Dock = 'Top'; $tbl.AutoSize = $true
-$tbl.ColumnCount = 2; [void]$tbl.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::Percent, 50)))
-[void]$tbl.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::Percent, 50)))
-[void]$pScroll.Controls.Add($tbl)
-
-function Add-Title { param($T) 
-    $l = New-Object System.Windows.Forms.Label; $l.Text = $T; $l.AutoSize = $true
-    $l.ForeColor = [System.Drawing.Color]::FromArgb(0,120,215); $l.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
-    $l.Margin = '5,15,0,5'; [void]$tbl.Controls.Add($l, 0, -1); $tbl.SetColumnSpan($l, 2)
-    # Correct usage of Out-Null to prevent ghost output
-    $null = $l
-}
-
-function Add-Btn { param($T, $D, $U, $F, $Sel=$false, $Type="") 
-    $b = New-Object System.Windows.Forms.Button; $b.Height = 60; $b.Dock = 'Top'
-    $b.BackColor = [System.Drawing.Color]::FromArgb(40,40,45); $b.ForeColor = 'WhiteSmoke'
-    $b.FlatStyle = 'Flat'; $b.TextAlign = 'MiddleLeft'; $b.Padding = '10,0,0,0'; $b.Margin = '5'
-    $b.Text = $T; $b.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
-    $b.Cursor = 'Hand'
-    if ($Sel) { 
-        $b.BackColor = [System.Drawing.Color]::FromArgb(50,50,60); $b.Text += "  ▼"
-        $b.Tag = $Type; $b.Add_Click({ Open-Selector $this.Tag $this })
-    } else {
-        $b.Tag = "$U|$F"; $b.Add_Click({ $d=$this.Tag.Split('|'); Start-Download $d[0] $d[1] $this })
-    }
-    [void]$tbl.Controls.Add($b)
-    # Correct usage of Out-Null to prevent ghost output
-    $null = $b
-}
-
-Add-Title "BANCO DE DADOS"
-Add-Btn "SQL Server 2008 (Instalador)" "" "https://www.netcontroll.com.br/util/instaladores/netpdv/SQL2008x64_DESCONTINUADO.exe" "SQL2008x64.exe"
-Add-Btn "SQL Server 2019 (Instalador)" "" "https://www.netcontroll.com.br/util/instaladores/netpdv/SQL2019.exe" "SQL2019.exe"
-
-$bSqlMan = New-Object System.Windows.Forms.Button; $bSqlMan.Height = 60; $bSqlMan.Dock = 'Top'
-$bSqlMan.BackColor = [System.Drawing.Color]::FromArgb(40,40,45); $bSqlMan.ForeColor = 'WhiteSmoke'
-$bSqlMan.FlatStyle = 'Flat'; $bSqlMan.TextAlign = 'MiddleLeft'; $bSqlMan.Padding = '10,0,0,0'; $bSqlMan.Margin = '5'
-$bSqlMan.Text = "SQL 2019 + SSMS (Manual)"; $bSqlMan.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
-$bSqlMan.Cursor = 'Hand'
-$bSqlMan.Add_Click({ Install-SqlManual $this })
-[void]$tbl.Controls.Add($bSqlMan)
-
-Add-Title "PROGRAMAS NETCONTROLL"
-Add-Btn "Concentrador (Instalador)" "" "https://www.netcontroll.com.br/util/instaladores/netpdv/InstaladorConcentrador.exe" "Concentrador.exe"
-Add-Btn "Concentrador (ZIP)" "" "" "" $true "Concentrador"
-Add-Btn "NetPDV (Instalador)" "" "https://netcontroll.com.br/util/instaladores/netpdv/1.3/55/0/NetPDV.exe" "NetPDV.exe"
-Add-Btn "NetPDV (ZIP)" "" "" "" $true "PDV"
-Add-Btn "Link XMenu (Instalador)" "" "https://netcontroll.com.br/util/instaladores/LinkXMenu/10/11/LinkXMenu.exe" "LinkXMenu.exe"
-Add-Btn "Link XMenu (ZIP)" "" "" "" $true "LinkXMenu"
-Add-Btn "XBot" "" "https://aws.netcontroll.com.br/XBotClient/setup.exe" "XBotSetup.exe"
-Add-Btn "XTag Client 2.0" "" "https://aws.netcontroll.com.br/XTagClient2.0/setup.exe" "XTagSetup.exe"
-
-Add-Title "EXTERNOS"
-Add-Btn "TecnoSpeed NFCe (11.1.7.27)" "" "https://netcontroll.com.br/util/instaladores/NFCE/11.1.7.27/InstaladorNFCe.exe" "InstaladorNFCe.exe"
-
-$bVspe = New-Object System.Windows.Forms.Button; $bVspe.Height = 60; $bVspe.Dock = 'Top'
-$bVspe.BackColor = [System.Drawing.Color]::FromArgb(40,40,45); $bVspe.ForeColor = 'WhiteSmoke'
-$bVspe.FlatStyle = 'Flat'; $bVspe.TextAlign = 'MiddleLeft'; $bVspe.Padding = '10,0,0,0'; $bVspe.Margin = '5'
-$bVspe.Text = "VSPE + Epson Virtual Port"; $bVspe.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
-$bVspe.Cursor = 'Hand'
-$bVspe.Add_Click({ Install-VSPE-Combined $this })
-[void]$tbl.Controls.Add($bVspe)
-
-Add-Btn "TeamViewer Full" "" "https://download.teamviewer.com/download/TeamViewer_Setup_x64.exe" "Teamviewer.exe"
-Add-Btn "Google Chrome" "" "https://github.com/VMazza10/Preparador-de-Ambiente-XMenu/releases/download/Chrome/ChromeSetup.exe" "ChromeSetup.exe"
-
-Log-Message "SISTEMA" "Dashboard Carregado. Pronto."
-[void]$form.ShowDialog()
+$form.ShowDialog()
