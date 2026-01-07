@@ -1,9 +1,9 @@
 ﻿# =============================================================================
-# XMENU SYSTEM MANAGER v17.47 (STABILITY FIX)
+# XMENU SYSTEM MANAGER v17.48 (STABILITY FIX + TLS)
 # Visual: Dashboard Moderno
-# Correcoes:
-#   - CRITICO: Removido DoEvents do loop de evento de download (causava crash).
-#   - Link do Chrome atualizado para Mirror GitHub (Versao Estavel).
+# Correcoes v17.48:
+#   - FIX BAT: Protecao contra erro de "Type already exists" no Add-Type.
+#   - FIX BAT: Melhoria na definicao de TLS e variaveis de ambiente.
 # =============================================================================
 
 # -----------------------------------------------------------------------------
@@ -46,9 +46,18 @@ if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administra
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 
-# API Wallpaper
-$code = '[DllImport("user32.dll", CharSet=CharSet.Auto)] public static extern int SystemParametersInfo (UInt32 uiAction, UInt32 uiParam, string pvParam, UInt32 fWinIni);'
-Add-Type -MemberDefinition $code -Name "WinAPI" -Namespace "XMenuTools"
+# -----------------------------------------------------------------------------
+# FIX 17.48: Protecao do Add-Type para nao quebrar se rodar 2x
+# -----------------------------------------------------------------------------
+try {
+    if (-not ([System.Management.Automation.PSTypeName]'XMenuTools.WinAPI').Type) {
+        $code = '[DllImport("user32.dll", CharSet=CharSet.Auto)] public static extern int SystemParametersInfo (UInt32 uiAction, UInt32 uiParam, string pvParam, UInt32 fWinIni);'
+        Add-Type -MemberDefinition $code -Name "WinAPI" -Namespace "XMenuTools" -ErrorAction Stop
+    }
+} catch {
+    # Ignora erro se o tipo ja existir na sessao
+    Write-Host "WinAPI Type already loaded or error: $_"
+}
 
 # -----------------------------------------------------------------------------
 # 3. FUNCOES UTILITARIAS E LOGS
@@ -735,7 +744,7 @@ $formWidth = if ($screen.Width -lt 1000) { 900 } else { 1000 }
 $formHeight = if ($screen.Height -lt 800) { 700 } else { 800 }
 
 $form = New-Object System.Windows.Forms.Form
-$form.Text = "XMenu System Manager v17.47"
+$form.Text = "XMenu System Manager v17.48"
 $form.Size = New-Object System.Drawing.Size($formWidth, $formHeight)
 $form.StartPosition = "CenterScreen"
 $form.BackColor = [System.Drawing.Color]::FromArgb(25,25,30); $form.ForeColor = 'White'
