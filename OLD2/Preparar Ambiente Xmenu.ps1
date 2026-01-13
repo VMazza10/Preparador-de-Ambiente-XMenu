@@ -291,7 +291,7 @@ function Start-Download {
 
             Log-Message "SUCESSO" "Download concluido."
             $Button.BackColor = [System.Drawing.Color]::FromArgb(46, 204, 113)
-            $Button.Text = "Instalado"
+            $Button.Text = "Instalar"
             
             Unblock-File -Path $destPath -ErrorAction SilentlyContinue
 
@@ -752,7 +752,7 @@ $hLeft = New-Object System.Windows.Forms.Panel; $hLeft.Dock = 'Fill'; $hLeft.Bac
 $lT = New-Object System.Windows.Forms.Label; $lT.Text = "XMenu Manager"; $lT.AutoSize = $true
 $lT.Font = New-Object System.Drawing.Font("Segoe UI", 24, [System.Drawing.FontStyle]::Bold); $lT.Location = '0,10'
 [void]$hLeft.Controls.Add($lT)
-$lS = New-Object System.Windows.Forms.Label; $lS.Text = "Desenvolvido por Vinicius Mazaroski"; $lS.AutoSize = $true
+$lS = New-Object System.Windows.Forms.Label; $lS.Text = "Central de Automacao"; $lS.AutoSize = $true
 $lS.ForeColor = [System.Drawing.Color]::FromArgb(200,230,255); $lS.Location = '5,60'
 [void]$hLeft.Controls.Add($lS)
 
