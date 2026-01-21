@@ -433,7 +433,7 @@ function Open-Selector {
     
     $versions = @()
     if ($Type -eq "PDV") {
-        $versions += @{Name="NetPDV v1.3.61.0"; Url="https://netcontroll.com.br/util/instaladores/netpdv/1.3/61/0/NetPDV.zip"; File="NetPDV_1.3.61.0.zip"}
+        $versions += @{Name="NetPDV v1.3.63.0"; Url="https://netcontroll.com.br/util/instaladores/netpdv/1.3/63/0/NetPDV.zip"; File="NetPDV_1.3.63.0.zip"}
         $versions += @{Name="NetPDV v1.3.60.0"; Url="https://netcontroll.com.br/util/instaladores/netpdv/1.3/60/0/NetPDV.zip"; File="NetPDV_1.3.60.0.zip"}
         $versions += @{Name="NetPDV v1.3.59.0"; Url="https://netcontroll.com.br/util/instaladores/netpdv/1.3/59/0/NetPDV.zip"; File="NetPDV_1.3.59.0.zip"}
         $versions += @{Name="NetPDV v1.3.55.0"; Url="https://netcontroll.com.br/util/instaladores/netpdv/1.3/55/0/NetPDV.zip"; File="NetPDV_1.3.55.0.zip"}
