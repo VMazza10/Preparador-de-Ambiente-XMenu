@@ -743,8 +743,25 @@ $form.BackColor = [System.Drawing.Color]::FromArgb(25,25,30); $form.ForeColor = 
 $form.Font = New-Object System.Drawing.Font("Segoe UI", 10)
 $Script:MainForm = $form
 
+# === CONTEXT MENU PARA LINKS ÚTEIS (NOVO) ===
+$linkMenu = New-Object System.Windows.Forms.ContextMenuStrip
+$linkMenu.ShowImageMargin = $false
+$linkMenu.Font = New-Object System.Drawing.Font("Segoe UI", 10)
+
+function Add-CtxLink { param($Text, $Url)
+    $item = $linkMenu.Items.Add($Text)
+    $item.Tag = $Url
+    $item.Add_Click({ Start-Process $this.Tag })
+}
+
+Add-CtxLink "Manual Técnico" "https://netcontroll.gitbook.io/xmenu-tecnico"
+Add-CtxLink "Versões XMenu" "https://netcontroll.gitbook.io/xmenu-versoes"
+Add-CtxLink "ADM Master" "https://netcontroll.com.br/adm/"
+Add-CtxLink "Portal Xmenu" "https://portal.netcontroll.com.br/#/auth/login"
+# ============================================
+
 # HEADER
-$head = New-Object System.Windows.Forms.Panel; $head.Dock = 'Top'; $head.Height = 130
+$head = New-Object System.Windows.Forms.Panel; $head.Dock = 'Top'; $head.Height = 160
 $head.BackColor = [System.Drawing.Color]::FromArgb(0,120,215); $head.Padding = '20,20,20,0'
 [void]$form.Controls.Add($head)
 
@@ -773,6 +790,17 @@ $btnIP.FlatStyle = 'Flat'; $btnIP.Font = New-Object System.Drawing.Font("Segoe U
 $btnIP.Margin = '0,10,0,0'; $btnIP.Anchor = 'Right'
 $btnIP.Add_Click({ Show-IPs })
 [void]$hRight.Controls.Add($btnIP)
+
+# --- NOVO BOTAO LINKS NO HEADER ---
+$btnLinks = New-Object System.Windows.Forms.Button; $btnLinks.Text = "LINKS ÚTEIS ▼"; $btnLinks.Size = '120,30'
+$btnLinks.BackColor = 'White'; $btnLinks.ForeColor = [System.Drawing.Color]::FromArgb(0,120,215)
+$btnLinks.FlatStyle = 'Flat'; $btnLinks.Font = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold)
+$btnLinks.Margin = '0,5,0,0'; $btnLinks.Anchor = 'Right'
+$btnLinks.Add_Click({ 
+    $linkMenu.Show($btnLinks, 0, $btnLinks.Height) 
+})
+[void]$hRight.Controls.Add($btnLinks)
+# ----------------------------------
 
 # FOOTER
 $foot = New-Object System.Windows.Forms.Panel; $foot.Dock = 'Bottom'; $foot.Height = 30
