@@ -444,11 +444,11 @@ function Open-Selector {
         $versions += @{Name="Link XMenu v10.16"; Url="https://netcontroll.com.br/util/instaladores/LinkXMenu/10/16/LinkXMenu.zip"; File="LinkXMenu_10.16.zip"}
         $versions += @{Name="Link XMenu v10.12"; Url="http://netcontroll.com.br/util/instaladores/LinkXMenu/10/12/LinkXMenu.zip"; File="LinkXMenu_10.12.zip"}
     } elseif ($Type -eq "Tablet") {
+        $versions += @{Name="Cardapio Tablet 1.1.16.0"; Url="https://github.com/VMazza10/Preparador-de-Ambiente-XMenu/releases/download/Tablet_totem/TABLET.1.1.16.0.zip"; File="CardapioTablet_1.1.16.0.zip"}
         $versions += @{Name="Cardapio Tablet 1.1.15.0"; Url="https://github.com/VMazza10/Preparador-de-Ambiente-XMenu/releases/download/Tablet_totem/TABLET.1.1.15.0.zip"; File="CardapioTablet_1.1.15.0.zip"}
-        $versions += @{Name="Cardapio Tablet v1.0 (Exemplo)"; Url="insira o link do zip aqui"; File="CardapioTablet_1.0.zip"}
     } elseif ($Type -eq "Totem") {
-        $versions += @{Name="Totem v2.0 (Exemplo)"; Url="insira o link do zip aqui"; File="Totem_2.0.zip"}
-        $versions += @{Name="Totem v1.0 (Exemplo)"; Url="insira o link do zip aqui"; File="Totem_1.0.zip"}
+        $versions += @{Name="Totem 1.0.88.50"; Url="https://github.com/VMazza10/Preparador-de-Ambiente-XMenu/releases/download/Tablet_totem/Totem.1.0.88.50.zip"; File="Totem_1.0.88.50.zip"}
+        $versions += @{Name="Totem 1.0.88.44"; Url="https://github.com/VMazza10/Preparador-de-Ambiente-XMenu/releases/download/Tablet_totem/Totem.1.0.88.44.zip"; File="Totem_1.0.88.44.zip"}
     } else {
         $versions += @{Name="Concentrador v1.3.63.0"; Url="https://github.com/VMazza10/Preparador-de-Ambiente-XMenu/releases/download/Concentrador_files/Concentrador.1.3.63.0.zip"; File="Concentrador.1.3.63.0.zip"}
         $versions += @{Name="Concentrador v1.3.59.0"; Url="https://github.com/VMazza10/Preparador-de-Ambiente-XMenu/releases/download/Concentrador_files/Concentrador.1.3.59.0.zip"; File="Concentrador.1.3.59.0.zip"}
