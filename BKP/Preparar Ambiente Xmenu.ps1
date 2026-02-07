@@ -1,10 +1,9 @@
 ﻿# =============================================================================
-# XMENU SYSTEM MANAGER - VERSAO REVENDA
-# Baseado na v17.47 (STABILITY FIX)
-# Alteracoes Revenda:
-#   - Wallpaper: fundo_revenda.png
-#   - Removido: Atalhos de Suporte e Pasta Netcontroll
-#   - Layout: Botoes de Links movidos para Menu no Header (Altura Corrigida)
+# XMENU SYSTEM MANAGER v17.47 (STABILITY FIX)
+# Visual: Dashboard Moderno
+# Correcoes:
+#   - CRITICO: Removido DoEvents do loop de evento de download (causava crash).
+#   - Link do Chrome atualizado para Mirror GitHub (Versao Estavel).
 # =============================================================================
 
 # -----------------------------------------------------------------------------
@@ -444,12 +443,6 @@ function Open-Selector {
     } elseif ($Type -eq "LinkXMenu") {
         $versions += @{Name="Link XMenu v10.16"; Url="https://netcontroll.com.br/util/instaladores/LinkXMenu/10/16/LinkXMenu.zip"; File="LinkXMenu_10.16.zip"}
         $versions += @{Name="Link XMenu v10.12"; Url="http://netcontroll.com.br/util/instaladores/LinkXMenu/10/12/LinkXMenu.zip"; File="LinkXMenu_10.12.zip"}
-    } elseif ($Type -eq "Tablet") {
-        $versions += @{Name="Cardapio Tablet 1.1.15.0"; Url="https://github.com/VMazza10/Preparador-de-Ambiente-XMenu/releases/download/Tablet_totem/TABLET.1.1.15.0.zip"; File="CardapioTablet_1.1.15.0.zip"}
-        $versions += @{Name="Cardapio Tablet v1.0 (Exemplo)"; Url="insira o link do zip aqui"; File="CardapioTablet_1.0.zip"}
-    } elseif ($Type -eq "Totem") {
-        $versions += @{Name="Totem v2.0 (Exemplo)"; Url="insira o link do zip aqui"; File="Totem_2.0.zip"}
-        $versions += @{Name="Totem v1.0 (Exemplo)"; Url="insira o link do zip aqui"; File="Totem_1.0.zip"}
     } else {
         $versions += @{Name="Concentrador v1.3.63.0"; Url="https://github.com/VMazza10/Preparador-de-Ambiente-XMenu/releases/download/Concentrador_files/Concentrador.1.3.63.0.zip"; File="Concentrador.1.3.63.0.zip"}
         $versions += @{Name="Concentrador v1.3.59.0"; Url="https://github.com/VMazza10/Preparador-de-Ambiente-XMenu/releases/download/Concentrador_files/Concentrador.1.3.59.0.zip"; File="Concentrador.1.3.59.0.zip"}
@@ -648,24 +641,47 @@ function Run-Config {
     $Script:ProgressBar.Value = 80
     [System.Windows.Forms.Application]::DoEvents()
     
-    Log-Message "LOG" "6. PERSONALIZACAO REVENDA:"
+    Log-Message "LOG" "6. PERSONALIZACAO (ATALHO SUPORTE):"
     Log-Message "LOG" "     Baixando e Definindo Wallpaper..."
     $tempDir = Join-Path $env:TEMP "XmenuResources"
     if (!(Test-Path $tempDir)) { New-Item $tempDir -ItemType Directory -Force | Out-Null }
-    
-    # --- MODIFICACAO REVENDA: NOME DO ARQUIVO ALTERADO PARA 'fundo_revenda.png' ---
-    $wallPath = Join-Path $tempDir "fundo_revenda.png"
+    $wallPath = Join-Path $tempDir "fundo.png"
     
     try {
         $wc = New-Object System.Net.WebClient
-        $wc.DownloadFile("$Script:RepoBase/fundo_revenda.png", $wallPath)
+        $wc.DownloadFile("$Script:RepoBase/fundo.png", $wallPath)
         Set-ItemProperty -Path "HKCU:\Control Panel\Desktop" -Name "WallpaperStyle" -Value "10" -Force
         Set-ItemProperty -Path "HKCU:\Control Panel\Desktop" -Name "TileWallPaper" -Value "0" -Force
         Set-ItemProperty -Path "HKCU:\Control Panel\Desktop" -Name "WallPaper" -Value $wallPath -Force
         [XMenuTools.WinAPI]::SystemParametersInfo(0x0014, 0, $wallPath, 3) | Out-Null
     } catch { Log-Message "ERRO" "Falha no Wallpaper: $($_.Exception.Message)" }
     
-    # --- MODIFICACAO REVENDA: BLOCO DE CRIACAO DE ATALHO SUPORTE REMOVIDO ---
+    Log-Message "LOG" "     Configurando Atalho Suporte (Downloads)..."
+    $configDir = "C:\Netcontroll\SuporteXmenuChat\Config"
+    if (!(Test-Path $configDir)) { New-Item $configDir -ItemType Directory -Force | Out-Null }
+    
+    $filesToDownload = @(
+        @{ U="$Script:RepoBase/Config/Suporte%20Xmenu.html"; D="$configDir\Suporte Xmenu.html" },
+        @{ U="$Script:RepoBase/Config/iconeatalho.ico"; D="$configDir\iconeatalho.ico" },
+        @{ U="$Script:RepoBase/Config/faviconxmenu.ico"; D="$configDir\faviconxmenu.ico" },
+        @{ U="$Script:RepoBase/Config/iconheaderxmenu.png"; D="$configDir\iconheaderxmenu.png" },
+        @{ U="$Script:RepoBase/Config/SuporteXmenuDicas.pdf"; D="$configDir\SuporteXmenuDicas.pdf" }
+    )
+    foreach ($file in $filesToDownload) {
+        try { (New-Object System.Net.WebClient).DownloadFile($file.U, $file.D) } 
+        catch { Log-Message "ERRO" "Falha ao baixar $($file.D): $($_.Exception.Message)" }
+    }
+    
+    try {
+        $shell = New-Object -ComObject WScript.Shell
+        $desktopPub = [Environment]::GetFolderPath('CommonDesktopDirectory')
+        $lnkPath = Join-Path $desktopPub "Suporte Xmenu.lnk"
+        $lnk = $shell.CreateShortcut($lnkPath)
+        $lnk.TargetPath = "$configDir\Suporte Xmenu.html"
+        $lnk.IconLocation = "$configDir\iconeatalho.ico"
+        $lnk.Save()
+        Log-Message "LOG" "     Atalho criado com sucesso."
+    } catch { Log-Message "ERRO" "Falha no atalho: $($_.Exception.Message)" }
     
     Log-Message "LOG" "7. FINALIZACAO:"
     Log-Message "LOG" "     Limpando cache e reiniciando Explorer..."
@@ -720,7 +736,7 @@ $formWidth = if ($screen.Width -lt 1000) { 900 } else { 1000 }
 $formHeight = if ($screen.Height -lt 800) { 700 } else { 800 }
 
 $form = New-Object System.Windows.Forms.Form
-$form.Text = "XMenu System Manager v17.47 - REVENDA"
+$form.Text = "XMenu System Manager v17.47"
 $form.Size = New-Object System.Drawing.Size($formWidth, $formHeight)
 $form.StartPosition = "CenterScreen"
 $form.BackColor = [System.Drawing.Color]::FromArgb(25,25,30); $form.ForeColor = 'White'
@@ -884,8 +900,6 @@ Add-Btn "Link XMenu (Instalador)" "" "https://netcontroll.com.br/util/instalador
 Add-Btn "Link XMenu (ZIP)" "" "" "" $true "LinkXMenu"
 Add-Btn "XBot" "" "https://aws.netcontroll.com.br/XBotClient/setup.exe" "XBotSetup.exe"
 Add-Btn "XTag Client 2.0" "" "https://aws.netcontroll.com.br/XTagClient2.0/setup.exe" "XTagSetup.exe"
-Add-Btn "Cardápio Tablet (ZIP)" "" "" "" $true "Tablet"
-Add-Btn "Totem Auto-Atendimento (ZIP)" "" "" "" $true "Totem"
 
 Add-Title "EXTERNOS"
 Add-Btn "TecnoSpeed NFCe (11.1.7.27)" "" "https://netcontroll.com.br/util/instaladores/NFCE/11.1.7.27/InstaladorNFCe.exe" "InstaladorNFCe.exe"

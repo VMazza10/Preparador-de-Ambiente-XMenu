@@ -444,12 +444,6 @@ function Open-Selector {
     } elseif ($Type -eq "LinkXMenu") {
         $versions += @{Name="Link XMenu v10.16"; Url="https://netcontroll.com.br/util/instaladores/LinkXMenu/10/16/LinkXMenu.zip"; File="LinkXMenu_10.16.zip"}
         $versions += @{Name="Link XMenu v10.12"; Url="http://netcontroll.com.br/util/instaladores/LinkXMenu/10/12/LinkXMenu.zip"; File="LinkXMenu_10.12.zip"}
-    } elseif ($Type -eq "Tablet") {
-        $versions += @{Name="Cardapio Tablet 1.1.15.0"; Url="https://github.com/VMazza10/Preparador-de-Ambiente-XMenu/releases/download/Tablet_totem/TABLET.1.1.15.0.zip"; File="CardapioTablet_1.1.15.0.zip"}
-        $versions += @{Name="Cardapio Tablet v1.0 (Exemplo)"; Url="insira o link do zip aqui"; File="CardapioTablet_1.0.zip"}
-    } elseif ($Type -eq "Totem") {
-        $versions += @{Name="Totem v2.0 (Exemplo)"; Url="insira o link do zip aqui"; File="Totem_2.0.zip"}
-        $versions += @{Name="Totem v1.0 (Exemplo)"; Url="insira o link do zip aqui"; File="Totem_1.0.zip"}
     } else {
         $versions += @{Name="Concentrador v1.3.63.0"; Url="https://github.com/VMazza10/Preparador-de-Ambiente-XMenu/releases/download/Concentrador_files/Concentrador.1.3.63.0.zip"; File="Concentrador.1.3.63.0.zip"}
         $versions += @{Name="Concentrador v1.3.59.0"; Url="https://github.com/VMazza10/Preparador-de-Ambiente-XMenu/releases/download/Concentrador_files/Concentrador.1.3.59.0.zip"; File="Concentrador.1.3.59.0.zip"}
@@ -884,8 +878,6 @@ Add-Btn "Link XMenu (Instalador)" "" "https://netcontroll.com.br/util/instalador
 Add-Btn "Link XMenu (ZIP)" "" "" "" $true "LinkXMenu"
 Add-Btn "XBot" "" "https://aws.netcontroll.com.br/XBotClient/setup.exe" "XBotSetup.exe"
 Add-Btn "XTag Client 2.0" "" "https://aws.netcontroll.com.br/XTagClient2.0/setup.exe" "XTagSetup.exe"
-Add-Btn "Cardápio Tablet (ZIP)" "" "" "" $true "Tablet"
-Add-Btn "Totem Auto-Atendimento (ZIP)" "" "" "" $true "Totem"
 
 Add-Title "EXTERNOS"
 Add-Btn "TecnoSpeed NFCe (11.1.7.27)" "" "https://netcontroll.com.br/util/instaladores/NFCE/11.1.7.27/InstaladorNFCe.exe" "InstaladorNFCe.exe"
