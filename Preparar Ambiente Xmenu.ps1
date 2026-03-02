@@ -94,6 +94,15 @@ function Log-Message {
         if ($Tag -ne "") { $Script:LogBox.AppendText("${Tag}: ") }
         $Script:LogBox.AppendText("$Msg`r`n")
         $Script:LogBox.ScrollToCaret()
+
+        # Gravação em arquivo de log
+        try {
+            $logPath = "C:\Arquivos Xmenu\Logs"
+            if (!(Test-Path $logPath)) { New-Item -ItemType Directory -Path $logPath -Force | Out-Null }
+            $logFile = Join-Path $logPath "log_preparar_ambiente_$((Get-Date).ToString('yyyy-MM-dd')).txt"
+            "[$((Get-Date).ToString('HH:mm:ss'))] [$Tag] $Msg" | Out-File -FilePath $logFile -Append -Encoding UTF8
+        }
+        catch {}
         
         $Script:MainForm.Refresh()
         [System.Windows.Forms.Application]::DoEvents()
@@ -1090,6 +1099,44 @@ function Run-Config {
     Log-Message "LOG" "--- INICIANDO OTIMIZAÇÃO DO SISTEMA ---"
     [System.Windows.Forms.Application]::DoEvents()
     
+    # NEW: Language and Region Settings
+    Log-Message "LOG" "IDIOMA E REGIÃO:"
+    Log-Message "LOG" "     Verificando se o idioma está em Português (Brasil)..."
+    try {
+        $currentLocale = Get-WinSystemLocale
+        if ($currentLocale.Name -ne "pt-BR") {
+            Log-Message "CMD" "COMANDO: Set-WinSystemLocale -SystemLocale pt-BR"
+            Set-WinSystemLocale -SystemLocale pt-BR
+            Log-Message "INFO" "Idioma do sistema (non-Unicode) configurado para pt-BR."
+        }
+        else {
+            Log-Message "INFO" "Idioma do sistema já está em pt-BR."
+        }
+
+        Log-Message "LOG" "     Resetando padrões de número, moeda, hora e data (Padrão pt-BR)..."
+        Log-Message "CMD" "COMANDO: Set-Culture pt-BR"
+        Set-Culture pt-BR
+        Set-WinHomeLocation -GeoId 32 # Brasil
+        Set-WinUserLanguageList pt-BR -Force
+
+        # Força o reset via Registry para garantir que overrides manuais sejam removidos (Igual ao botão 'Redefinir' da tela)
+        $regPath = "HKCU:\Control Panel\International"
+        $regValues = @{
+            "sDecimal" = ","; "sThousand" = "."; "sList" = ";"; 
+            "sCurrency" = "R$"; "sMonDecimalSep" = ","; "sMonThousandSep" = ".";
+            "sShortDate" = "dd/MM/yyyy"; "sTimeFormat" = "HH:mm:ss"; "sShortTime" = "HH:mm";
+            "iDate" = "1"; "iTime" = "1"; "iCurrency" = "0"
+        }
+        foreach ($name in $regValues.Keys) {
+            Set-ItemProperty -Path $regPath -Name $name -Value $regValues[$name] -Force -ErrorAction SilentlyContinue
+        }
+
+        Log-Message "SUCESSO" "Formatos regionais (Moeda, Números, Data) resetados com sucesso."
+    }
+    catch {
+        Log-Message "ERRO" "Falha ao configurar Idioma/Região: $($_.Exception.Message)"
+    }
+    
     Log-Message "LOG" "1. SEGURANÇA E ACESSO (UAC):"
     Log-Message "LOG" "     Ajustando permissões para evitar avisos técnicos constantes..."
     Log-Message "CMD" "COMANDO: reg ADD HKLM\...\System /v EnableLUA /t REG_DWORD /d 0 /f"
@@ -1128,12 +1175,8 @@ function Run-Config {
     Log-Message "CMD" "COMANDO: Set-ItemProperty ... HideFileExt 0"
     Set-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" -Name "HideFileExt" -Value 0 -Force -ErrorAction SilentlyContinue
     
-    Log-Message "LOG" "     Otimizando efeitos visuais para maior rapidez..."
-    Set-ItemProperty -Path "HKCU:\Control Panel\Desktop" -Name "MenuShowDelay" -Value "0" -Force -ErrorAction SilentlyContinue
-    Set-ItemProperty -Path "HKCU:\Control Panel\Desktop" -Name "FontSmoothing" -Value "2" -Force -ErrorAction SilentlyContinue
-    Set-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\VisualEffects" -Name "VisualFXSetting" -Value 3 -Force -ErrorAction SilentlyContinue
-    Set-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" -Name "ListviewAlphaSelect" -Value 1 -Force -ErrorAction SilentlyContinue
-    Set-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" -Name "ListviewShadow" -Value 1 -Force -ErrorAction SilentlyContinue
+    Log-Message "LOG" "     Otimizacoes visuais preparadas (Ajuste Final Manual)."
+    $Script:ProgressBar.Value = 45
     
     Log-Message "LOG" "     Exibindo ícones principais na Área de Trabalho..."
     $iconPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\HideDesktopIcons\NewStartPanel"
@@ -1146,16 +1189,31 @@ function Run-Config {
     $Script:ProgressBar.Value = 45
     [System.Windows.Forms.Application]::DoEvents()
     
-    Log-Message "LOG" "4. REDE E COMPARTILHAMENTO:"
-    Log-Message "LOG" "     Liberando acesso a arquivos e pastas na rede local..."
-    Log-Message "CMD" "COMANDO: netsh advfirewall firewall set rule group='File and Printer Sharing' new enable=Yes"
-    netsh advfirewall firewall set rule group="File and Printer Sharing" new enable=Yes | Out-Null
-    Log-Message "CMD" "COMANDO: reg ADD HKLM\...\Lsa /v LimitBlankPasswordUse /t REG_DWORD /d 0 /f"
-    Start-Process "reg.exe" -ArgumentList "ADD HKLM\SYSTEM\CurrentControlSet\Control\Lsa /v LimitBlankPasswordUse /t REG_DWORD /d 0 /f" -NoNewWindow -Wait
-    Log-Message "CMD" "COMANDO: reg ADD HKLM\...\Lsa /v everyoneincludesanonymous /t REG_DWORD /d 1 /f"
-    Start-Process "reg.exe" -ArgumentList "ADD HKLM\SYSTEM\CurrentControlSet\Control\Lsa /v everyoneincludesanonymous /t REG_DWORD /d 1 /f" -NoNewWindow -Wait
-    Log-Message "CMD" "COMANDO: reg ADD HKLM\...\LanmanServer /v restrictnullsessaccess /t REG_DWORD /d 0 /f"
-    Start-Process "reg.exe" -ArgumentList "ADD HKLM\SYSTEM\CurrentControlSet\Services\LanmanServer\Parameters /v restrictnullsessaccess /t REG_DWORD /d 0 /f" -NoNewWindow -Wait
+    Log-Message "LOG" "4. REDE E SEGURANÇA:"
+    Log-Message "LOG" "     Preparando registros de rede para ajuste manual..."
+    
+    # 1. Forca Perfil de Rede PARTICULAR (Se estiver Publica, o Windows ignora a mudanca de senha)
+    try { Get-NetConnectionProfile | Set-NetConnectionProfile -NetworkCategory Private -ErrorAction SilentlyContinue } catch {}
+
+    # 2. Registro Master (LSA e Lanman)
+    $lsa = "HKLM:\SYSTEM\CurrentControlSet\Control\Lsa"
+    Set-ItemProperty -Path $lsa -Name "everyoneincludesanonymous" -Value 1 -Force -ErrorAction SilentlyContinue
+    Set-ItemProperty -Path $lsa -Name "LimitBlankPasswordUse" -Value 0 -Force -ErrorAction SilentlyContinue
+    Set-ItemProperty -Path $lsa -Name "ForceGuest" -Value 1 -Force -ErrorAction SilentlyContinue
+    Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\LanmanServer\Parameters" -Name "restrictnullsessaccess" -Value 0 -Force -ErrorAction SilentlyContinue
+    
+    # 3. Localizacao Dinamica da Conta Guest/Convidado e Ativacao Hard
+    # REMOVIDO: Ativacao automatica da conta Guest. Sera feito manualmente.
+
+    # 4. Reinicia Servicos de Rede (Crucial para o Painel de Controle atualizar)
+    try {
+        Restart-Service Server, LanmanWorkstation -Force -ErrorAction SilentlyContinue
+    }
+    catch {
+        Log-Message "LOG" "Aguardando consolidacao de rede..."
+    }
+    
+    Log-Message "SUCESSO" "Registros de rede aplicados. Ajuste final sera manual."
     
     # --- PERFORMANCE NETWORK ---
     Log-Message "LOG" "     Acelerando a comunicação de rede para o PDV (Baixa Latência)..."
@@ -1280,42 +1338,92 @@ function Run-Config {
     Wait-UI 2 # Espera nao travante
     if (-not (Get-Process explorer -ErrorAction SilentlyContinue)) { Start-Process explorer.exe }
     
-    Log-Message "LOG" "--- TUDO PRONTO! SISTEMA OTIMIZADO ---"
-    $Btn.Text = "SUCESSO! (CONFIRA AS 4 JANELAS)"
-    $Btn.BackColor = [System.Drawing.Color]::LimeGreen
-    $Btn.Enabled = $true
+    Log-Message "LOG" "--- TUDO PRONTO! ---"
+    
+    # Limpa cliques anteriores e configura o novo texto (solicitacao usuario)
+    $Btn.remove_Click( { Invoke-Preparo }.GetNewClosure() ) 
+    $Btn.Text = "REALIZAR AJUSTES MANUAIS"; $Btn.BackColor = [System.Drawing.Color]::FromArgb(46, 204, 113); $Btn.Enabled = $true
     $Script:ProgressBar.Value = 100
     
-    # 2. JANELA PERMANECE VISIVEL E ATUALIZADA
     $Script:MainForm.Activate()
     
-    $finalForm = New-Object System.Windows.Forms.Form
-    $finalForm.Text = "Configuracao Concluida"
-    $finalForm.Size = New-Object System.Drawing.Size(400, 200)
-    $finalForm.StartPosition = "CenterScreen"
-    $finalForm.BackColor = [System.Drawing.Color]::FromArgb(25, 25, 30); $finalForm.ForeColor = 'White'
-    $finalForm.FormBorderStyle = 'FixedDialog'; $finalForm.MaximizeBox = $false
-    $finalForm.TopMost = $true
-    
-    $lblFim = New-Object System.Windows.Forms.Label
-    $lblFim.Text = "Configuracao Finalizada!`n`nSerao abertas as janelas:`n- Recursos do Windows`n- Rede`n- Regiao`n- Performance"
-    $lblFim.AutoSize = $false; $lblFim.Size = New-Object System.Drawing.Size(360, 100); $lblFim.Location = '20,20'
-    [void]$finalForm.Controls.Add($lblFim)
-    
-    $btnFim = New-Object System.Windows.Forms.Button
-    $btnFim.Text = "ENTENDIDO"; $btnFim.Location = '100,120'; $btnFim.Size = '180,30'
-    $btnFim.BackColor = [System.Drawing.Color]::LimeGreen; $btnFim.ForeColor = 'White'; $btnFim.FlatStyle = 'Flat'
-    
-    $btnFim.DialogResult = [System.Windows.Forms.DialogResult]::OK
-    [void]$finalForm.Controls.Add($btnFim)
-    $finalForm.AcceptButton = $btnFim
+    # --- FUNCAO PARA CRIAR JANELA DE INSTRUCOES INDEPENDENTE ---
+    function Show-ManualGuide {
+        # ... (conteudo da funcao mantido, apenas mudando o ShowDialog para garantir foco)
+        $finalForm = New-Object System.Windows.Forms.Form
+        $finalForm.Text = "XMenu - Guia de Configuração Manual"
+        $finalForm.Size = New-Object System.Drawing.Size(550, 500)
+        $finalForm.StartPosition = "CenterScreen"
+        $finalForm.BackColor = [System.Drawing.Color]::FromArgb(30, 30, 35); $finalForm.ForeColor = 'White'
+        $finalForm.FormBorderStyle = 'FixedDialog'; $finalForm.MaximizeBox = $false; $finalForm.TopMost = $true
+        
+        $lblTitle = New-Object System.Windows.Forms.Label
+        $lblTitle.Text = "Siga os passos abaixo:"; $lblTitle.Font = New-Object System.Drawing.Font("Segoe UI", 14, [System.Drawing.FontStyle]::Bold)
+        $lblTitle.ForeColor = [System.Drawing.Color]::Gold; $lblTitle.Location = '20,15'; $lblTitle.Size = '320,30'
+        [void]$finalForm.Controls.Add($lblTitle)
 
-    if ($finalForm.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
-        Start-Process "OptionalFeatures.exe"
+        $txtInst = New-Object System.Windows.Forms.RichTextBox
+        $txtInst.Location = '20,55'; $txtInst.Size = '495,310'; $txtInst.ReadOnly = $true; $txtInst.BorderStyle = 'None'
+        $txtInst.BackColor = [System.Drawing.Color]::FromArgb(40, 40, 45); $txtInst.ForeColor = 'White'
+        $txtInst.Font = New-Object System.Drawing.Font("Segoe UI", 10)
+        
+        $instrucoes = @"
+1. NA TELA DE REDE:
+   - Marque: "Desativar compartilhamento protegido por senha"
+   - Clique em "Salvar alterações".
+
+2. NA TELA DE DESEMPENHO:
+   - Escolha: "Ajustar para obter um melhor desempenho"
+   - Em seguida, MARQUE APENAS estas 5 opções:
+     [ ] Mostrar retângulo de seleção translúcido
+     [ ] Mostrar sombras sob o ponteiro do mouse
+     [ ] Salvar visualizações de miniaturas da barra de tarefas
+     [ ] Usar fontes de tela com cantos arredondados
+     [ ] Usar sombras subjacentes para rótulos de ícones desktop
+
+3. NA TELA DE RECURSOS: Ative estas duas opções:
+   - .NET Framework 3.5 (inclui .NET 2.0 e 3.0)
+   - .NET Framework 4.8 Advanced Services
+
+4. NA TELA DE REGIÃO: Apenas clique em OK para confirmar o formato pt-BR.
+"@
+        $txtInst.Text = $instrucoes
+        [void]$finalForm.Controls.Add($txtInst)
+        
+        $Script:FinalCountdown = 300 # Fecha em 5 minutos (silencioso)
+        $timerG = New-Object System.Windows.Forms.Timer
+        $timerG.Interval = 1000
+        $timerG.Add_Tick({
+                $Script:FinalCountdown--
+                if ($Script:FinalCountdown -le 0) { $timerG.Stop(); $finalForm.Close() }
+            })
+
+        $btnClose = New-Object System.Windows.Forms.Button
+        $btnClose.Text = "FECHAR GUIA"; $btnClose.Location = '100,385'; $btnClose.Size = '350,45'
+        $btnClose.BackColor = [System.Drawing.Color]::FromArgb(46, 204, 113); $btnClose.ForeColor = 'White'; $btnClose.FlatStyle = 'Flat'
+        $btnClose.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
+        $btnClose.Add_Click({ 
+                $timerG.Stop()
+                $finalForm.Close() 
+            })
+        [void]$finalForm.Controls.Add($btnClose)
+
+        $timerG.Start()
+        
+        # ABERTURA AUTOMATICA DAS JANELAS (SOLICITACAO USUARIO)
         Start-Process "control.exe" -ArgumentList "/name Microsoft.NetworkAndSharingCenter /page Advanced"
-        Start-Process "intl.cpl"
         Start-Process "systempropertiesperformance.exe"
+        Start-Process "OptionalFeatures.exe"
+        Start-Process "intl.cpl"
+
+        [void]$finalForm.ShowDialog() # ShowDialog impede o fechamento prematuro
     }
+
+    # BOTAO MANUAL (Para caso feche e queira abrir de novo)
+    $Btn.Add_Click({ Show-ManualGuide })
+
+    # ABERTURA AUTOMATICA AO FINAL DA PREPARACAO
+    Show-ManualGuide
 }
 
 # -----------------------------------------------------------------------------
