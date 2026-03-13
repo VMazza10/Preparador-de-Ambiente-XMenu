@@ -33,6 +33,7 @@ $Script:IsDownloading = $false
 $Script:CurrentWebClient = $null 
 $Script:CancelRequested = $false
 $Script:ToolTip = $null
+$Script:DeployMode = $false
 
 # -----------------------------------------------------------------------------
 # 2. VERIFICACAO DE PERMISSOES
@@ -692,6 +693,105 @@ function Show-PingTester {
 }
 
 # -----------------------------------------------------------------------------
+# 3.5 DEPLOY COM BACKUP AUTOMATICO (PDV / LinkXMenu)
+# -----------------------------------------------------------------------------
+function Deploy-WithBackup {
+    param($SourcePath, $Type, $Version)
+    
+    $destPath = ""
+    $backupName = ""
+    
+    if ($Type -eq "PDV") {
+        $destPath = "C:\netcontroll\NetPDV"
+        $backupName = "NetPDV.OLD"
+    }
+    elseif ($Type -eq "LinkXMenu") {
+        $destPath = "C:\XMenu"
+        $backupName = "XMenu.OLD"
+    }
+    else { return }
+    
+    $parentDir = Split-Path $destPath
+    $backupPath = Join-Path $parentDir $backupName
+    
+    # Verifica se o programa esta aberto (arquivos travados)
+    $processNames = @()
+    if ($Type -eq "PDV") { $processNames = @("NetPDV") }
+    elseif ($Type -eq "LinkXMenu") { $processNames = @("LinkXMenu", "XMenu") }
+    
+    foreach ($procName in $processNames) {
+        $running = Get-Process -Name $procName -ErrorAction SilentlyContinue
+        if ($running) {
+            Log-Message "ERRO" "O programa $procName esta aberto! Feche-o antes de atualizar."
+            [System.Windows.Forms.MessageBox]::Show(
+                "O programa '$procName' esta aberto!`n`nFeche o $Type completamente antes de atualizar.`nO deploy foi cancelado para evitar problemas.",
+                "Programa Aberto - Deploy Cancelado", "OK", "Warning") | Out-Null
+            return
+        }
+    }
+    
+    try {
+        Log-Message "INFO" "Iniciando deploy com backup para $Type (Versao: $Version)..."
+        
+        # Remove backup antigo se existir
+        if (Test-Path $backupPath) {
+            Log-Message "LOG" "Removendo backup antigo: $backupPath"
+            Remove-Item $backupPath -Recurse -Force -ErrorAction SilentlyContinue
+        }
+        
+        # Faz backup (COPIA a pasta atual para .OLD, mantendo a original)
+        if (Test-Path $destPath) {
+            Log-Message "INFO" "Criando backup: $destPath -> $backupPath"
+            Copy-Item -Path $destPath -Destination $backupPath -Recurse -Force
+            Log-Message "SUCESSO" "Backup criado com sucesso: $backupPath"
+        }
+        else {
+            Log-Message "INFO" "Pasta destino nao existe ainda, sera criada: $destPath"
+            if (!(Test-Path $parentDir)) {
+                New-Item -Path $parentDir -ItemType Directory -Force | Out-Null
+            }
+            New-Item -Path $destPath -ItemType Directory -Force | Out-Null
+        }
+        
+        # Copia novos arquivos POR CIMA da pasta existente (merge/atualizacao)
+        # Substitui arquivos iguais, mantem os que nao existem no ZIP
+        Log-Message "INFO" "Copiando arquivos novos para: $destPath (substituindo existentes)..."
+        $newFiles = Get-ChildItem -Path $SourcePath -Recurse -File
+        $count = 0
+        foreach ($file in $newFiles) {
+            $relativePath = $file.FullName.Substring($SourcePath.Length)
+            $targetFile = Join-Path $destPath $relativePath
+            $targetDir = Split-Path $targetFile
+            if (!(Test-Path $targetDir)) {
+                New-Item -Path $targetDir -ItemType Directory -Force | Out-Null
+            }
+            Copy-Item -Path $file.FullName -Destination $targetFile -Force
+            $count++
+        }
+        Log-Message "SUCESSO" "$Type atualizado para $Version ($count arquivos copiados)"
+        
+        [System.Windows.Forms.MessageBox]::Show(
+            "ATUALIZACAO CONCLUIDA`n--------------------------------------`nPrograma: $Type`nVersao: $Version`nArquivos atualizados: $count`n--------------------------------------`nDestino: $destPath`nBackup: $backupPath",
+            "Atualizado com Sucesso", "OK", "Information") | Out-Null
+    }
+    catch {
+        Log-Message "ERRO" "Falha no deploy: $($_.Exception.Message)"
+        
+        # Tenta restaurar backup se o deploy falhou
+        if (Test-Path $backupPath) {
+            Log-Message "INFO" "Restaurando backup apos falha..."
+            if (Test-Path $destPath) { Remove-Item $destPath -Recurse -Force -ErrorAction SilentlyContinue }
+            Copy-Item -Path $backupPath -Destination $destPath -Recurse -Force
+            Log-Message "INFO" "Backup restaurado."
+        }
+        
+        [System.Windows.Forms.MessageBox]::Show(
+            "Falha no deploy!`n$($_.Exception.Message)`n`nO backup foi restaurado.",
+            "Erro Deploy", "OK", "Error") | Out-Null
+    }
+}
+
+# -----------------------------------------------------------------------------
 # 4. MOTOR DE DOWNLOAD E INSTALACAO
 # -----------------------------------------------------------------------------
 
@@ -872,8 +972,13 @@ function Start-Download {
                         Rename-Item -Path $tempPath -NewName $folderName
                     }
                     
-                    Invoke-Item $finalPath
-                    $Button.Text = "Pasta Aberta"
+                    if (-not $Script:DeployMode) {
+                        Invoke-Item $finalPath
+                        $Button.Text = "Pasta Aberta"
+                    }
+                    else {
+                        $Button.Text = "Extraido"
+                    }
                     Log-Message "SUCESSO" "Extraido com sucesso para: $folderName"
                 }
                 catch {
@@ -979,7 +1084,7 @@ function Install-SqlManual {
 
 function Open-Selector {
     param($Type, $Button)
-    $height = if ($Type -eq "PDV" -or $Type -eq "LinkXMenu") { 320 } else { 220 }
+    $height = if ($Type -eq "PDV" -or $Type -eq "LinkXMenu") { 380 } else { 220 }
 
     $fSel = New-Object System.Windows.Forms.Form
     $fSel.Text = "Versoes - $Type"; $fSel.Size = "400,$height"; $fSel.StartPosition = 'CenterParent'
@@ -1004,6 +1109,7 @@ function Open-Selector {
         $versions += @{Name = "NetPDV v1.3.40.0"; Url = "https://netcontroll.com.br/util/instaladores/netpdv/1.3/40/0/NetPDV.zip"; File = "NetPDV_1.3.40.0.zip" }
     }
     elseif ($Type -eq "LinkXMenu") {
+        $versions += @{Name = "Link XMenu v10.17"; Url = "https://netcontroll.com.br/util/instaladores/LinkXMenu/10/17/LinkXMenu.zip"; File = "LinkXMenu_10.17.zip" }
         $versions += @{Name = "Link XMenu v10.16"; Url = "https://netcontroll.com.br/util/instaladores/LinkXMenu/10/16/LinkXMenu.zip"; File = "LinkXMenu_10.16.zip" }
         $versions += @{Name = "Link XMenu v10.12"; Url = "http://netcontroll.com.br/util/instaladores/LinkXMenu/10/12/LinkXMenu.zip"; File = "LinkXMenu_10.12.zip" }
     }
@@ -1033,12 +1139,16 @@ function Open-Selector {
     $btn.Text = "BAIXAR SELECIONADO"; $btn.Location = '20,80'; $btn.Size = '340,35'
     $btn.BackColor = [System.Drawing.Color]::FromArgb(0, 120, 215); $btn.ForeColor = 'White'; $btn.FlatStyle = 'Flat'
     $btn.Add_Click({
-            $fSel.Tag = $versions[$cb.SelectedIndex]
+            $selected = $versions[$cb.SelectedIndex]
+            $deployFlag = if ($null -ne $chkDeploy) { $chkDeploy.Checked } else { $false }
+            $fSel.Tag = @{ Url = $selected.Url; File = $selected.File; Name = $selected.Name; Deploy = $deployFlag }
             $fSel.DialogResult = 'OK'
             $fSel.Close()
         })
     [void]$fSel.Controls.Add($btn)
 
+    # Checkbox de deploy automatico (visivel apenas para PDV e LinkXMenu)
+    $chkDeploy = $null
     if ($Type -eq "PDV" -or $Type -eq "LinkXMenu") {
         $sep = New-Object System.Windows.Forms.Label; $sep.Text = "__________________________________________________"
         $sep.Location = '20,125'; $sep.AutoSize = $true; $sep.ForeColor = 'Gray'
@@ -1071,10 +1181,10 @@ function Open-Selector {
                 $v = $txtMan.Text.Trim()
                 if ($v -match '^\d+$') {
                     if ($Type -eq "PDV") {
-                        $fSel.Tag = @{ Url = "https://netcontroll.com.br/util/instaladores/netpdv/1.3/$v/0/NetPDV.zip"; File = "NetPDV_1.3.$v.0.zip" }
+                        $fSel.Tag = @{ Url = "https://netcontroll.com.br/util/instaladores/netpdv/1.3/$v/0/NetPDV.zip"; File = "NetPDV_1.3.$v.0.zip"; Deploy = $chkDeploy.Checked }
                     }
                     else {
-                        $fSel.Tag = @{ Url = "http://netcontroll.com.br/util/instaladores/LinkXMenu/10/$v/LinkXMenu.zip"; File = "LinkXMenu_10.$v.zip" }
+                        $fSel.Tag = @{ Url = "http://netcontroll.com.br/util/instaladores/LinkXMenu/10/$v/LinkXMenu.zip"; File = "LinkXMenu_10.$v.zip"; Deploy = $chkDeploy.Checked }
                     }
                     $fSel.DialogResult = 'OK'
                     $fSel.Close()
@@ -1082,10 +1192,48 @@ function Open-Selector {
                 else { [System.Windows.Forms.MessageBox]::Show("Digite apenas o numero da versao (Ex: 62 ou 16)", "Erro", "OK", "Warning") | Out-Null }
             })
         [void]$fSel.Controls.Add($btnMan)
+
+        # Separador e Checkbox de deploy
+        $sep2 = New-Object System.Windows.Forms.Label; $sep2.Text = "__________________________________________________"
+        $sep2.Location = '20,218'; $sep2.AutoSize = $true; $sep2.ForeColor = 'Gray'
+        [void]$fSel.Controls.Add($sep2)
+
+        $destLabel = if ($Type -eq "PDV") { "C:\netcontroll\NetPDV" } else { "C:\XMenu" }
+        $chkDeploy = New-Object System.Windows.Forms.CheckBox
+        $chkDeploy.Text = "Atualizar pasta do programa (cria backup .OLD)"
+        $chkDeploy.Location = '20,248'; $chkDeploy.AutoSize = $true; $chkDeploy.Checked = $true
+        $chkDeploy.Font = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold)
+        [void]$fSel.Controls.Add($chkDeploy)
+
+        $lblDest = New-Object System.Windows.Forms.Label
+        $lblDest.Text = "Pasta: $destLabel"; $lblDest.Location = '38,272'; $lblDest.AutoSize = $true
+        $lblDest.ForeColor = [System.Drawing.Color]::Gray; $lblDest.Font = New-Object System.Drawing.Font("Segoe UI", 8)
+        [void]$fSel.Controls.Add($lblDest)
     }
 
     [void]$fSel.ShowDialog()
-    if ($fSel.DialogResult -eq 'OK' -and $fSel.Tag) { Start-Download $fSel.Tag.Url $fSel.Tag.File $Button }
+    if ($fSel.DialogResult -eq 'OK' -and $fSel.Tag) {
+        # Ativa modo deploy para nao abrir pasta automaticamente
+        $Script:DeployMode = $fSel.Tag.Deploy -and ($Type -eq "PDV" -or $Type -eq "LinkXMenu")
+        
+        Start-Download $fSel.Tag.Url $fSel.Tag.File $Button
+        
+        # Deploy automatico com backup se checkbox marcado
+        if ($Script:DeployMode) {
+            if ($Button.Text -ne "Erro" -and $Button.Text -ne "Erro Fatal" -and $Button.Text -ne "Cancelado" -and $Button.Text -ne "Erro ZIP") {
+                $folderName = [System.IO.Path]::GetFileNameWithoutExtension($fSel.Tag.File)
+                $extractedPath = Join-Path $Script:DownloadFolder $folderName
+                if (Test-Path $extractedPath) {
+                    $versionName = $fSel.Tag.File -replace '\.(zip|rar)$', '' -replace '_', ' '
+                    Deploy-WithBackup $extractedPath $Type $versionName
+                }
+                else {
+                    Log-Message "ERRO" "Pasta extraida nao encontrada para deploy: $extractedPath"
+                }
+            }
+        }
+        $Script:DeployMode = $false
+    }
 }
 
 # -----------------------------------------------------------------------------
