@@ -200,7 +200,34 @@ function Invoke-NetworkReset {
         netsh winsock reset | Out-Null
         Log-Message "CMD" "COMANDO: netsh int ip reset"
         netsh int ip reset | Out-Null
-        Log-Message "SUCESSO" "DNS e Stack de rede resetados! (Recomendado reiniciar)"
+
+        # Renovacao de IP (resolve problemas de rota)
+        Log-Message "INFO" "========================================================="
+        Log-Message "INFO" "ATENCAO: O IP DA MAQUINA SERA ALTERADO/RENOVADO!"
+        Log-Message "INFO" "Os comandos a seguir liberam e renovam o endereco IP."
+        Log-Message "INFO" "Isso corrige problemas de rota e conectividade."
+        Log-Message "INFO" "========================================================="
+        [System.Windows.Forms.Application]::DoEvents()
+
+        Log-Message "CMD" "COMANDO: ipconfig /release (Liberando IP atual...)"
+        ipconfig /release | Out-Null
+        Log-Message "INFO" "IP liberado com sucesso. Obtendo novo endereco..."
+        [System.Windows.Forms.Application]::DoEvents()
+
+        Log-Message "CMD" "COMANDO: ipconfig /renew (Renovando IP...)"
+        ipconfig /renew | Out-Null
+        Log-Message "INFO" "Novo IP obtido com sucesso!"
+
+        # Exibe o novo IP no log para conferencia
+        try {
+            $novoIP = (Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object { $_.IPAddress -ne '127.0.0.1' -and $_.PrefixOrigin -ne 'WellKnown' } | Select-Object -First 1).IPAddress
+            if ($novoIP) {
+                Log-Message "INFO" ">>> NOVO IP DA MAQUINA: $novoIP <<<"
+            }
+        }
+        catch {}
+
+        Log-Message "SUCESSO" "DNS e Stack de rede resetados + IP renovado! (Recomendado reiniciar)"
     }
     catch {
         Log-Message "ERRO" "Erro no reset de rede: $_"
@@ -1882,7 +1909,7 @@ $bNetR.BackColor = [System.Drawing.Color]::FromArgb(50, 55, 60); $bNetR.ForeColo
 $bNetR.FlatStyle = 'Flat'; $bNetR.TextAlign = 'MiddleLeft'; $bNetR.Padding = '10,0,0,0'; $bNetR.Margin = '5'
 $bNetR.Text = "Reset de Rede e DNS"; $bNetR.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
 $bNetR.Cursor = 'Hand'; 
-$Script:ToolTip.SetToolTip($bNetR, "Executa 'ipconfig /flushdns', 'netsh winsock reset' e 'netsh int ip reset' para restaurar toda a pilha de rede.")
+$Script:ToolTip.SetToolTip($bNetR, "Executa 'ipconfig /flushdns', 'netsh winsock reset', 'netsh int ip reset', 'ipconfig /release' e 'ipconfig /renew' para restaurar toda a pilha de rede e renovar o IP.")
 $bNetR.Add_Click({ Invoke-NetworkReset })
 [void]$tbl.Controls.Add($bNetR)
 
