@@ -200,7 +200,34 @@ function Invoke-NetworkReset {
         netsh winsock reset | Out-Null
         Log-Message "CMD" "COMANDO: netsh int ip reset"
         netsh int ip reset | Out-Null
-        Log-Message "SUCESSO" "DNS e Stack de rede resetados! (Recomendado reiniciar)"
+
+        # Renovacao de IP (resolve problemas de rota)
+        Log-Message "INFO" "========================================================="
+        Log-Message "INFO" "ATENCAO: O IP DA MAQUINA SERA ALTERADO/RENOVADO!"
+        Log-Message "INFO" "Os comandos a seguir liberam e renovam o endereco IP."
+        Log-Message "INFO" "Isso corrige problemas de rota e conectividade."
+        Log-Message "INFO" "========================================================="
+        [System.Windows.Forms.Application]::DoEvents()
+
+        Log-Message "CMD" "COMANDO: ipconfig /release (Liberando IP atual...)"
+        ipconfig /release | Out-Null
+        Log-Message "INFO" "IP liberado com sucesso. Obtendo novo endereco..."
+        [System.Windows.Forms.Application]::DoEvents()
+
+        Log-Message "CMD" "COMANDO: ipconfig /renew (Renovando IP...)"
+        ipconfig /renew | Out-Null
+        Log-Message "INFO" "Novo IP obtido com sucesso!"
+
+        # Exibe o novo IP no log para conferencia
+        try {
+            $novoIP = (Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object { $_.IPAddress -ne '127.0.0.1' -and $_.PrefixOrigin -ne 'WellKnown' } | Select-Object -First 1).IPAddress
+            if ($novoIP) {
+                Log-Message "INFO" ">>> NOVO IP DA MAQUINA: $novoIP <<<"
+            }
+        }
+        catch {}
+
+        Log-Message "SUCESSO" "DNS e Stack de rede resetados + IP renovado! (Recomendado reiniciar)"
     }
     catch {
         Log-Message "ERRO" "Erro no reset de rede: $_"
