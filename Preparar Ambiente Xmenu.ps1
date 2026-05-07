@@ -1639,7 +1639,7 @@ Add-CtxLink "Portal Xmenu" "https://portal.netcontroll.com.br/#/auth/login"
 
 # HEADER
 $head = New-Object System.Windows.Forms.Panel; $head.Dock = 'Top'; $head.Height = 160
-$head.BackColor = [System.Drawing.Color]::FromArgb(0, 120, 215); $head.Padding = '20,20,20,0'
+$head.BackColor = [System.Drawing.Color]::FromArgb(0, 120, 215); $head.Padding = New-Object System.Windows.Forms.Padding(20,20,20,0)
 [void]$form.Controls.Add($head)
 
 $hLeft = New-Object System.Windows.Forms.Panel; $hLeft.Dock = 'Fill'; $hLeft.BackColor = 'Transparent'
@@ -1689,7 +1689,7 @@ $foot.BackColor = [System.Drawing.Color]::FromArgb(40, 40, 45)
 $prog = New-Object System.Windows.Forms.ProgressBar; $prog.Dock = 'Top'; $prog.Height = 5
 [void]$foot.Controls.Add($prog); $Script:ProgressBar = $prog
 $stat = New-Object System.Windows.Forms.Label; $stat.Text = "Pronto."; $stat.Dock = 'Fill'
-$stat.TextAlign = 'MiddleLeft'; $stat.Padding = '10,0,0,0'; $stat.ForeColor = 'Gray'
+$stat.TextAlign = 'MiddleLeft'; $stat.Padding = New-Object System.Windows.Forms.Padding(10,0,0,0); $stat.ForeColor = 'Gray'
 [void]$foot.Controls.Add($stat); $Script:StatusLabel = $stat
 
 # BOTAO CANCELAR (NOVO)
@@ -1708,7 +1708,7 @@ $Script:BtnCancel = $btnCancel
 
 # MAIN LAYOUT
 $layout = New-Object System.Windows.Forms.TableLayoutPanel; $layout.Dock = 'Fill'; $layout.ColumnCount = 1
-$layout.Padding = '20'; $layout.RowCount = 3
+$layout.Padding = New-Object System.Windows.Forms.Padding(20); $layout.RowCount = 3
 [void]$layout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Percent, 20)))
 [void]$layout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Absolute, 70)))
 [void]$layout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Percent, 80)))
@@ -1756,7 +1756,7 @@ function Add-Btn {
     $b = New-Object System.Windows.Forms.Button; $b.Height = 50; $b.Dock = 'Top'
     $b.BackColor = if ($Color) { $Color } else { [System.Drawing.Color]::FromArgb(30, 45, 75) }
     $b.ForeColor = 'WhiteSmoke'
-    $b.FlatStyle = 'Flat'; $b.TextAlign = 'MiddleLeft'; $b.Padding = '10,0,0,0'; $b.Margin = '5'
+    $b.FlatStyle = 'Flat'; $b.TextAlign = 'MiddleLeft'; $b.Padding = New-Object System.Windows.Forms.Padding(10,0,0,0); $b.Margin = '5'
     $b.Text = $T; $b.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
     $b.Cursor = 'Hand'
 
@@ -1783,7 +1783,7 @@ Add-Btn "SQL Server 2019 (Instalador)" "" "https://www.netcontroll.com.br/util/i
 
 $bSqlMan = New-Object System.Windows.Forms.Button; $bSqlMan.Height = 50; $bSqlMan.Dock = 'Top'
 $bSqlMan.BackColor = [System.Drawing.Color]::FromArgb(30, 45, 75); $bSqlMan.ForeColor = 'WhiteSmoke'
-$bSqlMan.FlatStyle = 'Flat'; $bSqlMan.TextAlign = 'MiddleLeft'; $bSqlMan.Padding = '10,0,0,0'; $bSqlMan.Margin = '5'
+$bSqlMan.FlatStyle = 'Flat'; $bSqlMan.TextAlign = 'MiddleLeft'; $bSqlMan.Padding = New-Object System.Windows.Forms.Padding(10,0,0,0); $bSqlMan.Margin = '5'
 $bSqlMan.Text = "SQL 2019 + SSMS (Manual)"; $bSqlMan.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
 $bSqlMan.Cursor = 'Hand'
 $Script:ToolTip.SetToolTip($bSqlMan, "Baixa o instalador do SQL 2019 e a ferramenta de gerenciamento SSMS separadamente.")
@@ -1807,7 +1807,7 @@ Add-Btn "TecnoSpeed NFCe (11.1.7.27)" "" "https://netcontroll.com.br/util/instal
 
 $bVspe = New-Object System.Windows.Forms.Button; $bVspe.Height = 50; $bVspe.Dock = 'Top'
 $bVspe.BackColor = [System.Drawing.Color]::FromArgb(30, 45, 75); $bVspe.ForeColor = 'WhiteSmoke'
-$bVspe.FlatStyle = 'Flat'; $bVspe.TextAlign = 'MiddleLeft'; $bVspe.Padding = '10,0,0,0'; $bVspe.Margin = '5'
+$bVspe.FlatStyle = 'Flat'; $bVspe.TextAlign = 'MiddleLeft'; $bVspe.Padding = New-Object System.Windows.Forms.Padding(10,0,0,0); $bVspe.Margin = '5'
 $bVspe.Text = "VSPE + Epson Virtual Port"; $bVspe.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
 $bVspe.Cursor = 'Hand'
 $Script:ToolTip.SetToolTip($bVspe, "Instala o emulador de porta serial VSPE e os drivers de porta virtual da Epson.")
@@ -1827,7 +1827,7 @@ Add-Title "SUPORTE E DIAGNÓSTICO"
 # --- DIAGNÓSTICOS (VERDE) ---
 $bInfo = New-Object System.Windows.Forms.Button; $bInfo.Height = 50; $bInfo.Dock = 'Top'
 $bInfo.BackColor = $colorDiag; $bInfo.ForeColor = 'WhiteSmoke'
-$bInfo.FlatStyle = 'Flat'; $bInfo.TextAlign = 'MiddleLeft'; $bInfo.Padding = '10,0,0,0'; $bInfo.Margin = '5'
+$bInfo.FlatStyle = 'Flat'; $bInfo.TextAlign = 'MiddleLeft'; $bInfo.Padding = New-Object System.Windows.Forms.Padding(10,0,0,0); $bInfo.Margin = '5'
 $bInfo.Text = "Avaliação de Hardware"; $bInfo.Font = New-Object System.Drawing.Font("Segoe UI", 11, [System.Drawing.FontStyle]::Bold)
 $bInfo.Cursor = 'Hand'; 
 $Script:ToolTip.SetToolTip($bInfo, "Analisa CPU, RAM e SSD usando WMI (Win32_Processor, Win32_LogicalDisk) e compara com requisitos XMenu.")
@@ -1836,7 +1836,7 @@ $bInfo.Add_Click({ Show-SystemInfo })
 
 $bScan = New-Object System.Windows.Forms.Button; $bScan.Height = 50; $bScan.Dock = 'Top'
 $bScan.BackColor = $colorDiag; $bScan.ForeColor = 'WhiteSmoke'
-$bScan.FlatStyle = 'Flat'; $bScan.TextAlign = 'MiddleLeft'; $bScan.Padding = '10,0,0,0'; $bScan.Margin = '5'
+$bScan.FlatStyle = 'Flat'; $bScan.TextAlign = 'MiddleLeft'; $bScan.Padding = New-Object System.Windows.Forms.Padding(10,0,0,0); $bScan.Margin = '5'
 $bScan.Text = "Scanner de Impressoras (IP Scan)"; $bScan.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
 $bScan.Cursor = 'Hand'; 
 $Script:ToolTip.SetToolTip($bScan, "Executa 'arp -a' e varredura de sockets (TCP 9100, 515, 631) para identificar impressoras e IPs na rede.")
@@ -1845,7 +1845,7 @@ $bScan.Add_Click({ Show-PrinterScanner })
 
 $bPing = New-Object System.Windows.Forms.Button; $bPing.Height = 50; $bPing.Dock = 'Top'
 $bPing.BackColor = $colorDiag; $bPing.ForeColor = 'WhiteSmoke'
-$bPing.FlatStyle = 'Flat'; $bPing.TextAlign = 'MiddleLeft'; $bPing.Padding = '10,0,0,0'; $bPing.Margin = '5'
+$bPing.FlatStyle = 'Flat'; $bPing.TextAlign = 'MiddleLeft'; $bPing.Padding = New-Object System.Windows.Forms.Padding(10,0,0,0); $bPing.Margin = '5'
 $bPing.Text = "Teste de Ping Contínuo (com Log)"; $bPing.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
 $bPing.Cursor = 'Hand'; 
 $Script:ToolTip.SetToolTip($bPing, "Executa 'Test-Connection' continuamente para o IP alvo, permitindo monitorar perdas de pacotes com log local.")
@@ -1854,7 +1854,7 @@ $bPing.Add_Click({ Show-PingTester })
 
 $bRes = New-Object System.Windows.Forms.Button; $bRes.Height = 50; $bRes.Dock = 'Top'
 $bRes.BackColor = $colorDiag; $bRes.ForeColor = 'WhiteSmoke'
-$bRes.FlatStyle = 'Flat'; $bRes.TextAlign = 'MiddleLeft'; $bRes.Padding = '10,0,0,0'; $bRes.Margin = '5'
+$bRes.FlatStyle = 'Flat'; $bRes.TextAlign = 'MiddleLeft'; $bRes.Padding = New-Object System.Windows.Forms.Padding(10,0,0,0); $bRes.Margin = '5'
 $bRes.Text = "Monitorar CPU e RAM"; $bRes.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
 $bRes.Cursor = 'Hand'; 
 $Script:ToolTip.SetToolTip($bRes, "Utiliza 'Get-Process' para listar os 5 processos com maior consumo de CPU e Memória RAM em tempo real.")
@@ -1864,7 +1864,7 @@ $bRes.Add_Click({ Show-ResourceMonitor })
 # --- REPAROS E RESETS (VERMELHO) ---
 $bSfc = New-Object System.Windows.Forms.Button; $bSfc.Height = 50; $bSfc.Dock = 'Top'
 $bSfc.BackColor = $colorFix; $bSfc.ForeColor = 'WhiteSmoke'
-$bSfc.FlatStyle = 'Flat'; $bSfc.TextAlign = 'MiddleLeft'; $bSfc.Padding = '10,0,0,0'; $bSfc.Margin = '5'
+$bSfc.FlatStyle = 'Flat'; $bSfc.TextAlign = 'MiddleLeft'; $bSfc.Padding = New-Object System.Windows.Forms.Padding(10,0,0,0); $bSfc.Margin = '5'
 $bSfc.Text = "SFC /Scannow (Reparar Sistema)"; $bSfc.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
 $bSfc.Cursor = 'Hand'; 
 $Script:ToolTip.SetToolTip($bSfc, "Executa o comando 'sfc /scannow' em uma nova janela para verificar e reparar arquivos corrompidos da instalação do Windows.")
@@ -1873,7 +1873,7 @@ $bSfc.Add_Click({ Invoke-SFC })
 
 $bDism = New-Object System.Windows.Forms.Button; $bDism.Height = 50; $bDism.Dock = 'Top'
 $bDism.BackColor = $colorFix; $bDism.ForeColor = 'WhiteSmoke'
-$bDism.FlatStyle = 'Flat'; $bDism.TextAlign = 'MiddleLeft'; $bDism.Padding = '10,0,0,0'; $bDism.Margin = '5'
+$bDism.FlatStyle = 'Flat'; $bDism.TextAlign = 'MiddleLeft'; $bDism.Padding = New-Object System.Windows.Forms.Padding(10,0,0,0); $bDism.Margin = '5'
 $bDism.Text = "Reparar Imagem (DISM)"; $bDism.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
 $bDism.Cursor = 'Hand'; 
 $Script:ToolTip.SetToolTip($bDism, "Executa 'dism /online /cleanup-image /restorehealth' para corrigir erros profundos na imagem do sistema operacional.")
@@ -1882,7 +1882,7 @@ $bDism.Add_Click({ Invoke-DISM })
 
 $bClean = New-Object System.Windows.Forms.Button; $bClean.Height = 50; $bClean.Dock = 'Top'
 $bClean.BackColor = $colorFix; $bClean.ForeColor = 'WhiteSmoke'
-$bClean.FlatStyle = 'Flat'; $bClean.TextAlign = 'MiddleLeft'; $bClean.Padding = '10,0,0,0'; $bClean.Margin = '5'
+$bClean.FlatStyle = 'Flat'; $bClean.TextAlign = 'MiddleLeft'; $bClean.Padding = New-Object System.Windows.Forms.Padding(10,0,0,0); $bClean.Margin = '5'
 $bClean.Text = "Limpeza de Disco Profunda"; $bClean.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
 $bClean.Cursor = 'Hand'; 
 $Script:ToolTip.SetToolTip($bClean, "Limpa pastas TEMP, Prefetch, Logs do Windows e executa 'cleanmgr.exe /sagerun:1' para liberar espaço em disco.")
@@ -1891,7 +1891,7 @@ $bClean.Add_Click({ Invoke-DeepClean })
 
 $bWinUp = New-Object System.Windows.Forms.Button; $bWinUp.Height = 50; $bWinUp.Dock = 'Top'
 $bWinUp.BackColor = $colorFix; $bWinUp.ForeColor = 'WhiteSmoke'
-$bWinUp.FlatStyle = 'Flat'; $bWinUp.TextAlign = 'MiddleLeft'; $bWinUp.Padding = '10,0,0,0'; $bWinUp.Margin = '5'
+$bWinUp.FlatStyle = 'Flat'; $bWinUp.TextAlign = 'MiddleLeft'; $bWinUp.Padding = New-Object System.Windows.Forms.Padding(10,0,0,0); $bWinUp.Margin = '5'
 $bWinUp.Text = "Reparar Windows Update"; $bWinUp.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
 $bWinUp.Cursor = 'Hand'; 
 $Script:ToolTip.SetToolTip($bWinUp, "Interrompe wuauserv/bits, limpa a pasta SoftwareDistribution e reinicia os serviços de atualização.")
@@ -1900,7 +1900,7 @@ $bWinUp.Add_Click({ Invoke-WindowsUpdateReset })
 
 $bSpool = New-Object System.Windows.Forms.Button; $bSpool.Height = 50; $bSpool.Dock = 'Top'
 $bSpool.BackColor = [System.Drawing.Color]::FromArgb(50, 55, 60); $bSpool.ForeColor = 'WhiteSmoke'
-$bSpool.FlatStyle = 'Flat'; $bSpool.TextAlign = 'MiddleLeft'; $bSpool.Padding = '10,0,0,0'; $bSpool.Margin = '5'
+$bSpool.FlatStyle = 'Flat'; $bSpool.TextAlign = 'MiddleLeft'; $bSpool.Padding = New-Object System.Windows.Forms.Padding(10,0,0,0); $bSpool.Margin = '5'
 $bSpool.Text = "Reiniciar Spooler de Impressão"; $bSpool.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
 $bSpool.Cursor = 'Hand'; 
 $Script:ToolTip.SetToolTip($bSpool, "Comando 'Stop-Service Spooler', deleta conteúdo de C:\Windows\System32\spool\PRINTERS\* e reinicia o serviço.")
@@ -1909,7 +1909,7 @@ $bSpool.Add_Click({ Invoke-SpoolerReset })
 
 $bNetR = New-Object System.Windows.Forms.Button; $bNetR.Height = 50; $bNetR.Dock = 'Top'
 $bNetR.BackColor = [System.Drawing.Color]::FromArgb(50, 55, 60); $bNetR.ForeColor = 'WhiteSmoke'
-$bNetR.FlatStyle = 'Flat'; $bNetR.TextAlign = 'MiddleLeft'; $bNetR.Padding = '10,0,0,0'; $bNetR.Margin = '5'
+$bNetR.FlatStyle = 'Flat'; $bNetR.TextAlign = 'MiddleLeft'; $bNetR.Padding = New-Object System.Windows.Forms.Padding(10,0,0,0); $bNetR.Margin = '5'
 $bNetR.Text = "Reset de Rede e DNS"; $bNetR.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
 $bNetR.Cursor = 'Hand'; 
 $Script:ToolTip.SetToolTip($bNetR, "Executa 'ipconfig /flushdns', 'netsh winsock reset', 'netsh int ip reset', 'ipconfig /release' e 'ipconfig /renew' para restaurar toda a pilha de rede e renovar o IP.")
