@@ -1100,6 +1100,7 @@ function Open-Selector {
     
     $versions = @()
     if ($Type -eq "PDV") {
+        $versions += @{Name = "NetPDV v1.3.64.0"; Url = "https://netcontroll.com.br/util/instaladores/netpdv/1.3/64/0/NetPDV.zip"; File = "NetPDV_1.3.64.0.zip" }
         $versions += @{Name = "NetPDV v1.3.63.0"; Url = "https://netcontroll.com.br/util/instaladores/netpdv/1.3/63/0/NetPDV.zip"; File = "NetPDV_1.3.63.0.zip" }
         $versions += @{Name = "NetPDV v1.3.60.0"; Url = "https://netcontroll.com.br/util/instaladores/netpdv/1.3/60/0/NetPDV.zip"; File = "NetPDV_1.3.60.0.zip" }
         $versions += @{Name = "NetPDV v1.3.59.0"; Url = "https://netcontroll.com.br/util/instaladores/netpdv/1.3/59/0/NetPDV.zip"; File = "NetPDV_1.3.59.0.zip" }
@@ -1114,10 +1115,12 @@ function Open-Selector {
         $versions += @{Name = "Link XMenu v10.12"; Url = "http://netcontroll.com.br/util/instaladores/LinkXMenu/10/12/LinkXMenu.zip"; File = "LinkXMenu_10.12.zip" }
     }
     elseif ($Type -eq "Tablet") {
+        $versions += @{Name = "Cardapio Tablet 1.1.17.0"; Url = "https://github.com/VMazza10/Preparador-de-Ambiente-XMenu/releases/download/Tablet_totem/Tablet.1.1.17.0.zip"; File = "CardapioTablet_1.1.17.0.zip" }
         $versions += @{Name = "Cardapio Tablet 1.1.16.0"; Url = "https://github.com/VMazza10/Preparador-de-Ambiente-XMenu/releases/download/Tablet_totem/TABLET.1.1.16.0.zip"; File = "CardapioTablet_1.1.16.0.zip" }
         $versions += @{Name = "Cardapio Tablet 1.1.15.0"; Url = "https://github.com/VMazza10/Preparador-de-Ambiente-XMenu/releases/download/Tablet_totem/TABLET.1.1.15.0.zip"; File = "CardapioTablet_1.1.15.0.zip" }
     }
     elseif ($Type -eq "Totem") {
+        $versions += @{Name = "Totem 1.0.88.51"; Url = "https://github.com/VMazza10/Preparador-de-Ambiente-XMenu/releases/download/Tablet_totem/Totem.1.0.88.51.zip"; File = "Totem_1.0.88.51.zip" }
         $versions += @{Name = "Totem 1.0.88.50"; Url = "https://github.com/VMazza10/Preparador-de-Ambiente-XMenu/releases/download/Tablet_totem/Totem.1.0.88.50.zip"; File = "Totem_1.0.88.50.zip" }
         $versions += @{Name = "Totem 1.0.88.44"; Url = "https://github.com/VMazza10/Preparador-de-Ambiente-XMenu/releases/download/Tablet_totem/Totem.1.0.88.44.zip"; File = "Totem_1.0.88.44.zip" }
     }
