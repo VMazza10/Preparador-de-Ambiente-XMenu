@@ -1,10 +1,9 @@
 ﻿# =============================================================================
-# XMENU SYSTEM MANAGER - VERSAO REVENDA
-# Baseado na v17.58
-# Alteracoes Revenda:
-#   - Wallpaper: fundo_revenda.png
-#   - Removido: Atalhos de Suporte e Pasta Netcontroll
-#   - Layout: Botoes de Links movidos para Menu no Header (Altura Corrigida)
+# XMENU SYSTEM MANAGER v17.58
+# Visual: Dashboard Moderno
+# Correcoes:
+#   - CRITICO: Removido DoEvents do loop de evento de download (causava crash).
+#   - Link do Chrome atualizado para Mirror GitHub (Versao Estavel).
 # =============================================================================
 
 # -----------------------------------------------------------------------------
@@ -33,6 +32,7 @@ $Script:DownloadError = $null
 $Script:IsDownloading = $false
 $Script:CurrentWebClient = $null 
 $Script:CancelRequested = $false
+$Script:ToolTip = $null
 $Script:DeployMode = $false
 
 # -----------------------------------------------------------------------------
@@ -100,7 +100,7 @@ function Log-Message {
         try {
             $logPath = "C:\Arquivos Xmenu\Logs"
             if (!(Test-Path $logPath)) { New-Item -ItemType Directory -Path $logPath -Force | Out-Null }
-            $logFile = Join-Path $logPath "log_preparar_ambiente_revenda_$((Get-Date).ToString('yyyy-MM-dd')).txt"
+            $logFile = Join-Path $logPath "log_preparar_ambiente_$((Get-Date).ToString('yyyy-MM-dd')).txt"
             "[$((Get-Date).ToString('HH:mm:ss'))] [$Tag] $Msg" | Out-File -FilePath $logFile -Append -Encoding UTF8
         }
         catch {}
@@ -120,9 +120,8 @@ function Show-IPs {
             $gateway = if ($netConfig) { $netConfig.IPv4DefaultGateway.NextHop } else { "Nao detectado" }
             $dnsServers = if ($netConfig) { $netConfig.DNSServer.ServerAddresses -join ", " } else { "Nao detectado" }
             
-            $pingObj = New-Object System.Net.NetworkInformation.Ping
-            $internetStatus = try { if (($pingObj.Send("8.8.8.8", 1500)).Status -eq "Success") { "Conectado (Online)" } else { "Sem Acesso (Offline)" } } catch { "Sem Acesso (Offline)" }
-            $pingAdm2 = try { if (($pingObj.Send("adm2.netcontroll.com.br", 1500)).Status -eq "Success") { "OK (Acessivel)" } else { "FALHA (Inacessivel)" } } catch { "FALHA (Inacessivel)" }
+            $internetStatus = if (Test-Connection 8.8.8.8 -Count 1 -Quiet) { "Conectado (Online)" } else { "Sem Acesso (Offline)" }
+            $pingAdm2 = if (Test-Connection "adm2.netcontroll.com.br" -Count 1 -Quiet) { "OK (Acessivel)" } else { "FALHA (Inacessivel)" }
             
             if ($ips) {
                 if ($ips -is [string]) { $ips = @($ips) }
@@ -131,7 +130,7 @@ function Show-IPs {
                 
                 Clear-DnsClientCache
                 
-                Log-Message "INFO" "XMenu Manager v17.58 Carregado!"
+                Log-Message "INFO" "Diagnostico de Rede Detalhado:"
                 Log-Message "INFO" "   > Endereco IP.....: $txtIPs"
                 Log-Message "INFO" "   > Gateway Padrao..: $gateway"
                 Log-Message "INFO" "   > Servidores DNS..: $dnsServers"
@@ -338,6 +337,7 @@ function Show-SystemInfo {
         $freeGB = [Math]::Round($drive.FreeSpace / 1GB, 1)
         $cpuName = $cpu.Name.Trim()
 
+        # Tabela de Benchmarks Conhecidos
         $benchTable = @{
             "AMD Ryzen 3 3200GE"  = 7309
             "AMD Ryzen 3 3200G"   = 7131
@@ -351,9 +351,11 @@ function Show-SystemInfo {
             if ($cpuName -match [regex]::Escape($key)) { $score = $benchTable[$key]; break }
         }
 
+        # Lógica de Cores e Status
         $passRAM = $ramGB -ge 15.5
         $passDisk = $diskGB -ge 210
         $passOS = $os.Caption -match "Windows 10|Windows 11"
+        $passBench = if ($score -is [int]) { $score -ge 3500 } else { $true } # Se nao souber, assume ok p/ nao alarmar
 
         $fEval = New-Object System.Windows.Forms.Form
         $fEval.Text = "Avaliacao de Hardware XMenu"; $fEval.Size = "550,500"; $fEval.StartPosition = 'CenterParent'
@@ -368,7 +370,7 @@ function Show-SystemInfo {
             param($txt, $val, $pass, $y)
             $lblT = New-Object System.Windows.Forms.Label; $lblT.Text = $txt; $lblT.Location = "25,$y"; $lblT.AutoSize = $true
             $lblV = New-Object System.Windows.Forms.Label; $lblV.Text = $val; $lblV.Location = "180,$y"; $lblV.AutoSize = $true
-            $lblV.Width = 330
+            $lblV.Width = 330 # Largura fixa para nao cortar texto longo
             $lblV.ForeColor = if ($pass) { [System.Drawing.Color]::PaleGreen } else { [System.Drawing.Color]::Salmon }
             $lblV.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
             [void]$fEval.Controls.Add($lblT); [void]$fEval.Controls.Add($lblV)
@@ -380,6 +382,7 @@ function Show-SystemInfo {
         &$AddLabel "Processador:" "$cpuName" $true 190
         &$AddLabel "Benchmark Est.:" "$score" ($score -ge 3500) 235
 
+        # Gerar Link Dinamico
         $cleanCpu = $cpuName -replace '\s+', '+'
         $benchUrl = "https://www.cpubenchmark.net/cpu.php?cpu=$cleanCpu"
 
@@ -396,7 +399,7 @@ function Show-SystemInfo {
         $btnCopy.Cursor = 'Hand'
         
         $passBench = if ($score -is [int]) { $score -ge 3500 } else { $true }
-
+        
         $infoText = @"
 Processador:
 $cpuName $(if($passBench){"✔️"}else{"❌"})
@@ -430,12 +433,14 @@ function Get-VendorName {
     try {
         $mac = ""
         $targetTable = if ($null -ne $ArpTable) { $ArpTable } else { arp -a }
+        
         foreach ($line in $targetTable) {
             if ($line -match "^\s+$IP\s+([0-9a-fA-F-]+)") {
                 $mac = $matches[1].Replace('-', ':').ToUpper()
                 break
             }
         }
+        
         if ($mac -match '([0-9a-fA-F:]{17})') {
             $oui = $mac.Substring(0, 8)
             $vendors = @{
@@ -474,7 +479,6 @@ function Show-PrinterScanner {
         $Script:ScannerBtnPing = New-Object System.Windows.Forms.Button; $Script:ScannerBtnPing.Text = "TESTAR PING"; $Script:ScannerBtnPing.Location = '170,20'; $Script:ScannerBtnPing.Width = 110
         $Script:ScannerBtnPing.BackColor = [System.Drawing.Color]::FromArgb(60, 60, 65); $Script:ScannerBtnPing.FlatStyle = 'Flat'; $Script:ScannerBtnPing.Font = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold)
         [void]$Script:ScannerForm.Controls.Add($Script:ScannerBtnPing)
-
         $Script:ScannerLblStat = New-Object System.Windows.Forms.Label; $Script:ScannerLblStat.Text = "Pronto."; $Script:ScannerLblStat.Location = '300,25'; $Script:ScannerLblStat.AutoSize = $true
         [void]$Script:ScannerForm.Controls.Add($Script:ScannerLblStat)
 
@@ -512,14 +516,6 @@ function Show-PrinterScanner {
                 try {
                     $myIps = [System.Net.Dns]::GetHostAddresses([System.Net.Dns]::GetHostName()) | Where-Object { $_.AddressFamily -eq 'InterNetwork' } | ForEach-Object { $_.IPAddressToString }
                     $localIP = $myIps[0]
-                    
-                    # Detecta IP do Gateway (Roteador principal)
-                    $gwIP = $null
-                    try {
-                        $netConfig = Get-NetIPConfiguration | Where-Object { $_.IPv4DefaultGateway -ne $null } | Select-Object -First 1
-                        if ($netConfig) { $gwIP = $netConfig.IPv4DefaultGateway.NextHop }
-                    } catch {}
-
                     if ($localIP -match '^(\d{1,3}\.\d{1,3}\.\d{1,3})\.') {
                         $subnet = $matches[1]
                         $Script:ScannerLblStat.Text = "Descoberta Ativa ($subnet.0/24)..."
@@ -565,43 +561,25 @@ function Show-PrinterScanner {
                                 $hn = "Desconhecido"
                                 try { $hn = [System.Net.Dns]::GetHostEntry($ip).HostName } catch {}
                                 
-                                $ports = @()
+                                $ports = @(); $isP = $false; $isW = $false
                                 $ipAddr = [System.Net.IPAddress]::Parse($ip)
                                 
                                 foreach ($p in @(9100, 515, 631, 80, 443, 445, 135, 3389)) {
                                     $socket = New-Object System.Net.Sockets.TcpClient
                                     try {
                                         $res = $socket.BeginConnect($ipAddr, $p, $null, $null)
-                                        if ($res.AsyncWaitHandle.WaitOne(120, $false)) {
-                                            $socket.EndConnect($res)
-                                            $ports += $p
+                                        if ($res.AsyncWaitHandle.WaitOne(125, $false)) {
+                                            $socket.EndConnect($res); $ports += $p; if ($p -gt 500 -and $p -lt 10000) { $isP = $true } else { $isW = $true }
                                         }
                                     }
                                     catch {}
-                                    $socket.Close()
+                                    $socket.Close(); if ($isP) { break }
                                 }
 
                                 $vendor = Get-VendorName $ip $arpOutput
-                                
-                                # Classificação Inteligente de Dispositivo
+                                $isPC = ($ports -contains 445 -or $ports -contains 135 -or $ports -contains 3389)
                                 $isLocal = ($ip -in $myIps)
-                                $isGateway = ($null -ne $gwIP -and $ip -eq $gwIP)
-                                $isPrinter = ($ports -contains 9100 -or $ports -contains 515 -or $ports -contains 631 -or $vendor -in @("EPSON", "ELGIN", "BEMATECH", "DARUMA", "TANCA", "ZEBRA"))
-                                $isPC = ($ports -contains 445 -or $ports -contains 135 -or $ports -contains 3389 -or $hn -match "pc|note|desktop|laptop|workstation|server")
-                                $isWeb = ($ports -contains 80 -or $ports -contains 443)
-                                
-                                $type = "Dispositivo"
-                                if ($isLocal) {
-                                    $type = "MAQUINA ATUAL"
-                                } elseif ($isGateway) {
-                                    $type = "ROTEADOR (GATEWAY)"
-                                } elseif ($isPrinter) {
-                                    $type = "IMPRESSORA"
-                                } elseif ($isPC) {
-                                    $type = "COMPUTADOR"
-                                } elseif ($isWeb) {
-                                    $type = "ROTEADOR/DISP. WEB"
-                                }
+                                $type = if ($isLocal) { "MAQUINA ATUAL" } elseif ($isP) { "IMPRESSORA" } elseif ($isW) { "ROTEADOR" } elseif ($isPC) { "COMPUTADOR" } else { "Dispositivo" }
                                 
                                 $row = New-Object System.Windows.Forms.ListViewItem($ip)
                                 $row.SubItems.Add($vendor) | Out-Null
@@ -609,20 +587,10 @@ function Show-PrinterScanner {
                                 $row.SubItems.Add($type) | Out-Null
                                 $row.SubItems.Add(($ports -join ", ")) | Out-Null
                                 
-                                if ($isLocal) { 
-                                    $row.ForeColor = [System.Drawing.Color]::Yellow
-                                    $row.Font = New-Object System.Drawing.Font($Script:ScannerLV.Font, [System.Drawing.FontStyle]::Bold) 
-                                }
-                                elseif ($type -eq "IMPRESSORA") { 
-                                    $row.ForeColor = [System.Drawing.Color]::PaleGreen
-                                    $count++ 
-                                }
-                                elseif ($type -eq "ROTEADOR (GATEWAY)" -or $type -eq "ROTEADOR/DISP. WEB") { 
-                                    $row.ForeColor = [System.Drawing.Color]::LightSkyBlue 
-                                }
-                                elseif ($type -eq "COMPUTADOR") { 
-                                    $row.ForeColor = [System.Drawing.Color]::Wheat 
-                                }
+                                if ($isLocal) { $row.ForeColor = [System.Drawing.Color]::Yellow; $row.Font = New-Object System.Drawing.Font($Script:ScannerLV.Font, [System.Drawing.FontStyle]::Bold) }
+                                elseif ($isP) { $row.ForeColor = [System.Drawing.Color]::PaleGreen; $count++ }
+                                elseif ($isW) { $row.ForeColor = [System.Drawing.Color]::LightSkyBlue }
+                                elseif ($isPC) { $row.ForeColor = [System.Drawing.Color]::Wheat }
                                 
                                 [void]$Script:ScannerLV.Items.Add($row)
                             }
@@ -644,11 +612,14 @@ function Show-PrinterScanner {
     }
 }
 
+
+
 function Show-PingTester {
     param([string]$InitialIP = "")
     if ($null -ne $Script:PingForm -and $Script:PingForm.Visible) {
         if ($InitialIP) { $Script:PingTxtIP.Text = $InitialIP }
-        $Script:PingForm.Activate(); return
+        $Script:PingForm.Activate()
+        return
     }
 
     $Script:PingForm = New-Object System.Windows.Forms.Form
@@ -675,30 +646,29 @@ function Show-PingTester {
     $Script:PingRtb.BackColor = [System.Drawing.Color]::Black; $Script:PingRtb.ForeColor = 'Lime'; $Script:PingRtb.ReadOnly = $true; $Script:PingRtb.BorderStyle = 'None'
     [void]$Script:PingForm.Controls.Add($Script:PingRtb)
 
-    $Script:PingTimerObj = New-Object System.Windows.Forms.Timer; $Script:PingTimerObj.Interval = 1000
+    $Script:PingTimerObj = New-Object System.Windows.Forms.Timer
+    $Script:PingTimerObj.Interval = 1000
 
     $Script:PingTimerObj.Add_Tick({
             $target = $Script:PingTxtIP.Text.Trim()
             if ([string]::IsNullOrEmpty($target)) { return }
 
-            # Usa Ping .NET com timeout fixo de 800ms para nao travar a UI
-            $pingObj = New-Object System.Net.NetworkInformation.Ping
-            $pingReply = $null
-            try { $pingReply = $pingObj.Send($target, 800) } catch {}
+            $res = Test-Connection $target -Count 1 -ErrorAction SilentlyContinue
             $time = Get-Date -Format "HH:mm:ss"
             $msg = ""
-
-            if ($pingReply -ne $null -and $pingReply.Status -eq [System.Net.NetworkInformation.IPStatus]::Success) {
-                $msg = "[$time] Resposta de ${target}: tempo=$($pingReply.RoundtripTime)ms`n"
+        
+            if ($res) {
+                $msg = "[$time] Resposta de ${target}: tempo=$($res.ResponseTime)ms`n"
                 $Script:PingRtb.SelectionColor = [System.Drawing.Color]::Lime
             }
             else {
-                $statusDesc = if ($pingReply -ne $null) { $pingReply.Status } else { "Timeout" }
-                $msg = "[$time] FALHA ($statusDesc): Host inacessivel.`n"
+                $msg = "[$time] FALHA: Host inacessivel ou timeout.`n"
                 $Script:PingRtb.SelectionColor = [System.Drawing.Color]::Salmon
             }
+        
+            $Script:PingRtb.AppendText($msg)
+            $Script:PingRtb.ScrollToCaret()
 
-            $Script:PingRtb.AppendText($msg); $Script:PingRtb.ScrollToCaret()
             if ($Script:PingChkLog.Checked -and $Script:PingLogPath -ne "") {
                 $msg.Trim() | Out-File $Script:PingLogPath -Append -Encoding utf8
             }
@@ -708,13 +678,17 @@ function Show-PingTester {
             if ($Script:PingTimerObj.Enabled) {
                 $Script:PingTimerObj.Stop()
                 $Script:PingBtnRun.Text = "INICIAR"; $Script:PingBtnRun.BackColor = [System.Drawing.Color]::FromArgb(0, 120, 215)
-                $Script:PingTxtIP.Enabled = $true; $Script:PingChkLog.Enabled = $true
+                $Script:PingTxtIP.Enabled = $true
+                $Script:PingChkLog.Enabled = $true
             }
             else {
                 $target = $Script:PingTxtIP.Text.Trim()
                 if ([string]::IsNullOrEmpty($target)) { return }
+
                 $Script:PingBtnRun.Text = "PARAR"; $Script:PingBtnRun.BackColor = [System.Drawing.Color]::Salmon
-                $Script:PingTxtIP.Enabled = $false; $Script:PingChkLog.Enabled = $false
+                $Script:PingTxtIP.Enabled = $false
+                $Script:PingChkLog.Enabled = $false
+            
                 if ($Script:PingChkLog.Checked) {
                     $Script:PingLogPath = Join-Path $Script:DesktopPath "PingLog_$($target.Replace('.', '_')).txt"
                     "--- Iniciando Log de Ping: $(Get-Date) Target: $target ---" | Out-File $Script:PingLogPath -Encoding utf8
@@ -728,11 +702,20 @@ function Show-PingTester {
     $Script:PingForm.Add_FormClosing({
             param($s, $e)
             $res = [System.Windows.Forms.MessageBox]::Show("O teste de ping sera interrompido. Deseja realmente fechar?", "Confirmar Saida", [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Question)
-            if ($res -eq [System.Windows.Forms.DialogResult]::No) { $e.Cancel = $true }
-            else { $Script:PingTimerObj.Stop(); $Script:PingTimerObj.Dispose(); $Script:PingForm = $null }
+            if ($res -eq [System.Windows.Forms.DialogResult]::No) {
+                $e.Cancel = $true
+            }
+            else {
+                $Script:PingTimerObj.Stop()
+                $Script:PingTimerObj.Dispose()
+                $Script:PingForm = $null
+            }
         })
 
-    $Script:PingForm.Add_Shown({ if ($InitialIP) { $Script:PingBtnRun.PerformClick() } })
+    $Script:PingForm.Add_Shown({
+            if ($InitialIP) { $Script:PingBtnRun.PerformClick() }
+        })
+
     $Script:PingForm.Show()
 }
 
@@ -776,42 +759,43 @@ function Deploy-WithBackup {
     
     try {
         Log-Message "INFO" "Iniciando deploy com backup para $Type (Versao: $Version)..."
-        [System.Windows.Forms.Application]::DoEvents()
         
         # Remove backup antigo se existir
         if (Test-Path $backupPath) {
             Log-Message "LOG" "Removendo backup antigo: $backupPath"
             Remove-Item $backupPath -Recurse -Force -ErrorAction SilentlyContinue
-            [System.Windows.Forms.Application]::DoEvents()
         }
         
-        # Faz backup usando robocopy /MIR /MT:8 (multithread)
+        # Faz backup (COPIA a pasta atual para .OLD, mantendo a original)
         if (Test-Path $destPath) {
-            Log-Message "INFO" "Criando backup (robocopy): $destPath -> $backupPath"
-            [System.Windows.Forms.Application]::DoEvents()
-            $roboBackup = Start-Process "robocopy.exe" -ArgumentList "`"$destPath`" `"$backupPath`" /MIR /MT:8 /NFL /NDL /NJH /NJS" -NoNewWindow -Wait -PassThru
-            if ($roboBackup.ExitCode -lt 8) {
-                Log-Message "SUCESSO" "Backup criado com sucesso: $backupPath"
-            } else {
-                Log-Message "ERRO" "Backup retornou codigo $($roboBackup.ExitCode) - pode ter falhado parcialmente."
-            }
-            [System.Windows.Forms.Application]::DoEvents()
+            Log-Message "INFO" "Criando backup: $destPath -> $backupPath"
+            Copy-Item -Path $destPath -Destination $backupPath -Recurse -Force
+            Log-Message "SUCESSO" "Backup criado com sucesso: $backupPath"
         }
         else {
             Log-Message "INFO" "Pasta destino nao existe ainda, sera criada: $destPath"
-            if (!(Test-Path $parentDir)) { New-Item -Path $parentDir -ItemType Directory -Force | Out-Null }
+            if (!(Test-Path $parentDir)) {
+                New-Item -Path $parentDir -ItemType Directory -Force | Out-Null
+            }
             New-Item -Path $destPath -ItemType Directory -Force | Out-Null
         }
         
-        # Copia novos arquivos com robocopy /MT:8 (multithread paralelo)
-        Log-Message "INFO" "Copiando arquivos com robocopy..."
-        [System.Windows.Forms.Application]::DoEvents()
-        $roboCopy = Start-Process "robocopy.exe" -ArgumentList "`"$SourcePath`" `"$destPath`" /E /MT:8 /IS /IT /NFL /NDL /NJH /NJS" -NoNewWindow -Wait -PassThru
-        [System.Windows.Forms.Application]::DoEvents()
-        
-        # Conta arquivos da fonte (ZIP) que foram copiados
-        $count = (Get-ChildItem -Path $SourcePath -Recurse -File -ErrorAction SilentlyContinue).Count
-        Log-Message "SUCESSO" "$Type atualizado para $Version ($count arquivos atualizados)"
+        # Copia novos arquivos POR CIMA da pasta existente (merge/atualizacao)
+        # Substitui arquivos iguais, mantem os que nao existem no ZIP
+        Log-Message "INFO" "Copiando arquivos novos para: $destPath (substituindo existentes)..."
+        $newFiles = Get-ChildItem -Path $SourcePath -Recurse -File
+        $count = 0
+        foreach ($file in $newFiles) {
+            $relativePath = $file.FullName.Substring($SourcePath.Length)
+            $targetFile = Join-Path $destPath $relativePath
+            $targetDir = Split-Path $targetFile
+            if (!(Test-Path $targetDir)) {
+                New-Item -Path $targetDir -ItemType Directory -Force | Out-Null
+            }
+            Copy-Item -Path $file.FullName -Destination $targetFile -Force
+            $count++
+        }
+        Log-Message "SUCESSO" "$Type atualizado para $Version ($count arquivos copiados)"
         
         [System.Windows.Forms.MessageBox]::Show(
             "ATUALIZACAO CONCLUIDA`n--------------------------------------`nPrograma: $Type`nVersao: $Version`nArquivos atualizados: $count`n--------------------------------------`nDestino: $destPath`nBackup: $backupPath",
@@ -820,10 +804,11 @@ function Deploy-WithBackup {
     catch {
         Log-Message "ERRO" "Falha no deploy: $($_.Exception.Message)"
         
+        # Tenta restaurar backup se o deploy falhou
         if (Test-Path $backupPath) {
             Log-Message "INFO" "Restaurando backup apos falha..."
             if (Test-Path $destPath) { Remove-Item $destPath -Recurse -Force -ErrorAction SilentlyContinue }
-            Start-Process "robocopy.exe" -ArgumentList "`"$backupPath`" `"$destPath`" /MIR /MT:8 /NFL /NDL /NJH /NJS" -NoNewWindow -Wait | Out-Null
+            Copy-Item -Path $backupPath -Destination $destPath -Recurse -Force
             Log-Message "INFO" "Backup restaurado."
         }
         
@@ -996,25 +981,19 @@ function Start-Download {
                 [System.Windows.Forms.Application]::DoEvents()
                 
                 try {
-                    # Usa ZipFile do .NET diretamente - mais rapido que Expand-Archive
-                    Add-Type -AssemblyName System.IO.Compression.FileSystem
-                    
                     $folderName = [System.IO.Path]::GetFileNameWithoutExtension($FileName)
                     $finalPath = Join-Path $Script:DownloadFolder $folderName
-                    $tempPath  = Join-Path $Script:DownloadFolder "temp_$folderName"
+                    $tempPath = Join-Path $Script:DownloadFolder "temp_$folderName"
                     
-                    if (Test-Path $tempPath)  { Remove-Item $tempPath  -Recurse -Force | Out-Null }
+                    if (Test-Path $tempPath) { Remove-Item $tempPath -Recurse -Force | Out-Null }
                     if (Test-Path $finalPath) { Remove-Item $finalPath -Recurse -Force | Out-Null }
-                    [System.Windows.Forms.Application]::DoEvents()
                     
-                    # Extrai com ZipFile (nativo .NET)
-                    [System.IO.Compression.ZipFile]::ExtractToDirectory($destPath, $tempPath)
-                    [System.Windows.Forms.Application]::DoEvents()
+                    Expand-Archive -LiteralPath $destPath -DestinationPath $tempPath -Force
                     
                     $items = Get-ChildItem -Path $tempPath
                     if ($items.Count -eq 1 -and $items[0].PSIsContainer) {
                         Move-Item -Path $items[0].FullName -Destination $finalPath
-                        Remove-Item $tempPath -Recurse -Force -ErrorAction SilentlyContinue | Out-Null
+                        Remove-Item $tempPath -Recurse -Force | Out-Null
                     }
                     else {
                         Rename-Item -Path $tempPath -NewName $folderName
@@ -1030,7 +1009,7 @@ function Start-Download {
                     Log-Message "SUCESSO" "Extraido com sucesso para: $folderName"
                 }
                 catch {
-                    Log-Message "ERRO" "Falha ao extrair ZIP: $($_.Exception.Message)"
+                    Log-Message "ERRO" "Falha ao extrair ZIP."
                     $Button.Text = "Erro ZIP"
                     $Button.BackColor = [System.Drawing.Color]::Salmon
                 }
@@ -1295,7 +1274,7 @@ function Run-Config {
     $Btn.Enabled = $false; $Btn.Text = "AGUARDE... CONFIGURANDO"; $Btn.BackColor = [System.Drawing.Color]::Gray
     $Script:ProgressBar.Value = 0
     
-    Log-Message "LOG" "--- INICIANDO CONFIGURACAO ---"
+    Log-Message "LOG" "--- INICIANDO OTIMIZAÇÃO DO SISTEMA ---"
     [System.Windows.Forms.Application]::DoEvents()
     
     # NEW: Language and Region Settings
@@ -1324,7 +1303,7 @@ function Run-Config {
             "sDecimal" = ","; "sThousand" = "."; "sList" = ";"; 
             "sCurrency" = "R$"; "sMonDecimalSep" = ","; "sMonThousandSep" = ".";
             "sShortDate" = "dd/MM/yyyy"; "sTimeFormat" = "HH:mm:ss"; "sShortTime" = "HH:mm";
-            "iDate" = "1"; "iTime" = "1"; "iCurrency" = "2"
+            "iDate" = "1"; "iTime" = "1"; "iCurrency" = "0"
         }
         foreach ($name in $regValues.Keys) {
             Set-ItemProperty -Path $regPath -Name $name -Value $regValues[$name] -Force -ErrorAction SilentlyContinue
@@ -1357,7 +1336,7 @@ function Run-Config {
     powercfg /change disk-timeout-ac 0 | Out-Null
     Log-Message "CMD" "COMANDO: powercfg /change standby-timeout-ac 0"
     powercfg /change standby-timeout-ac 0 | Out-Null
-    Log-Message "LOG" "     Desativando hibernação para um boot mais rápido e limpo..."
+    Log-Message "LOG" "     Garantindo um desligamento real e boot limpo..."
     Log-Message "CMD" "COMANDO: powercfg /h off"
     powercfg /h off | Out-Null
     Log-Message "CMD" "COMANDO: reg ADD HKLM\...\Power /v HiberbootEnabled /t REG_DWORD /d 0 /f"
@@ -1366,7 +1345,7 @@ function Run-Config {
     [System.Windows.Forms.Application]::DoEvents()
     
     Log-Message "LOG" "3. EXPLORER E AJUSTES VISUAIS:"
-    Log-Message "LOG" "     Padronizando Data (DD/MM/AAAA) e Extensões de Arquivos..."
+    Log-Message "LOG" "     Padronizando formato de data e exibição de arquivos..."
     Log-Message "CMD" "COMANDO: Set-ItemProperty ... sShortDate dd/MM/yyyy"
     Set-ItemProperty -Path "HKCU:\Control Panel\International" -Name "sShortDate" -Value "dd/MM/yyyy" -Force -ErrorAction SilentlyContinue
     Log-Message "CMD" "COMANDO: Set-ItemProperty ... LaunchTo 1"
@@ -1377,7 +1356,7 @@ function Run-Config {
     Log-Message "LOG" "     Otimizacoes visuais preparadas (Ajuste Final Manual)."
     $Script:ProgressBar.Value = 45
     
-    Log-Message "LOG" "     Exibindo Icones Desktop..."
+    Log-Message "LOG" "     Exibindo ícones principais na Área de Trabalho..."
     $iconPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\HideDesktopIcons\NewStartPanel"
     if (!(Test-Path $iconPath)) { New-Item -Path $iconPath -Force | Out-Null }
     # Ativa Computer, RecycleBin, User, Network
@@ -1391,17 +1370,31 @@ function Run-Config {
     Log-Message "LOG" "4. REDE E SEGURANÇA:"
     Log-Message "LOG" "     Preparando registros de rede para ajuste manual..."
     
-    # Pre-sets de Registro (Ajudam o Windows a aceitar a mudanca manual)
+    # 1. Forca Perfil de Rede PARTICULAR (Se estiver Publica, o Windows ignora a mudanca de senha)
+    try { Get-NetConnectionProfile | Set-NetConnectionProfile -NetworkCategory Private -ErrorAction SilentlyContinue } catch {}
+
+    # 2. Registro Master (LSA e Lanman)
     $lsa = "HKLM:\SYSTEM\CurrentControlSet\Control\Lsa"
     Set-ItemProperty -Path $lsa -Name "everyoneincludesanonymous" -Value 1 -Force -ErrorAction SilentlyContinue
     Set-ItemProperty -Path $lsa -Name "LimitBlankPasswordUse" -Value 0 -Force -ErrorAction SilentlyContinue
     Set-ItemProperty -Path $lsa -Name "ForceGuest" -Value 1 -Force -ErrorAction SilentlyContinue
     Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\LanmanServer\Parameters" -Name "restrictnullsessaccess" -Value 0 -Force -ErrorAction SilentlyContinue
     
+    # 3. Localizacao Dinamica da Conta Guest/Convidado e Ativacao Hard
+    # REMOVIDO: Ativacao automatica da conta Guest. Sera feito manualmente.
+
+    # 4. Reinicia Servicos de Rede (Crucial para o Painel de Controle atualizar)
+    try {
+        Restart-Service Server, LanmanWorkstation -Force -ErrorAction SilentlyContinue
+    }
+    catch {
+        Log-Message "LOG" "Aguardando consolidacao de rede..."
+    }
+    
     Log-Message "SUCESSO" "Registros de rede aplicados. Ajuste final sera manual."
     
     # --- PERFORMANCE NETWORK ---
-    Log-Message "LOG" "     Otimizando TCP/IP (Baixa Latencia)..."
+    Log-Message "LOG" "     Acelerando a comunicação de rede para o PDV (Baixa Latência)..."
     $tcpKey = "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\Interfaces"
     Get-ChildItem $tcpKey | ForEach-Object {
         New-ItemProperty -Path $_.PSPath -Name "TcpAckFrequency" -Value 1 -PropertyType DWord -Force -ErrorAction SilentlyContinue | Out-Null
@@ -1409,20 +1402,24 @@ function Run-Config {
     }
     $Script:ProgressBar.Value = 60
     
-    Log-Message "LOG" "5. LIMPEZA E OTIMIZACAO:"
-    # --- PERFORMANCE SERVICES ---
+    Log-Message "LOG" "5. LIMPEZA E DESEMPENHO:"
+    Log-Message "LOG" "     Desativando serviços de telemetria e coleta de dados..."
+    Log-Message "CMD" "COMANDO: Stop-Service SysMain"
+    Stop-Service "SysMain" -ErrorAction SilentlyContinue
+    Log-Message "CMD" "COMANDO: Set-Service SysMain -StartupType Disabled"
+    Set-Service "SysMain" -StartupType Disabled -ErrorAction SilentlyContinue
+    Log-Message "CMD" "COMANDO: Stop-Service DiagTrack"
+    Stop-Service "DiagTrack" -ErrorAction SilentlyContinue
+    Log-Message "CMD" "COMANDO: Set-Service DiagTrack -StartupType Disabled"
+    Set-Service "DiagTrack" -StartupType Disabled -ErrorAction SilentlyContinue
+
     Log-Message "LOG" "     Limpando aplicativos inúteis que pesam no PC (Bloatware)..."
-    Log-Message "CMD" "COMANDO: Set-ItemProperty ... ShowCortanaButton 0"
     $advKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced"
     Set-ItemProperty -Path $advKey -Name "ShowCortanaButton" -Value 0 -Force -ErrorAction SilentlyContinue
-    Log-Message "CMD" "COMANDO: Set-ItemProperty ... ShowTaskViewButton 0"
     Set-ItemProperty -Path $advKey -Name "ShowTaskViewButton" -Value 0 -Force -ErrorAction SilentlyContinue
-    Log-Message "CMD" "COMANDO: Set-ItemProperty ... TaskbarMn 0"
     Set-ItemProperty -Path $advKey -Name "TaskbarMn" -Value 0 -Force -ErrorAction SilentlyContinue
     $searchKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Search"
     if (!(Test-Path $searchKey)) { New-Item -Path $searchKey -Force | Out-Null }
-    Log-Message "CMD" "COMANDO: Set-ItemProperty ... SearchboxTaskbarMode 0"
-    Set-ItemProperty -Path $searchKey -Name "SearchboxTaskbarMode" -Value 0 -Force -ErrorAction SilentlyContinue
     Set-ItemProperty -Path $searchKey -Name "SearchboxTaskbarMode" -Value 0 -Force -ErrorAction SilentlyContinue
     $pplKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced\People"
     if (!(Test-Path $pplKey)) { New-Item -Path $pplKey -Force -ErrorAction SilentlyContinue | Out-Null }
@@ -1436,13 +1433,14 @@ function Run-Config {
     if (!(Test-Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Windows Feeds")) { New-Item "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Windows Feeds" -Force | Out-Null }
     Set-ItemProperty "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Windows Feeds" -Name "EnableFeeds" -Value 0 -Force -ErrorAction SilentlyContinue
     
-    Log-Message "LOG" "     Removendo App Installer e Widgets..."
+    Log-Message "LOG" "     Desativando Widgets e instaladores automáticos..."
+    Log-Message "CMD" "COMANDO: Get-AppxPackage ... | Remove-AppxPackage"
     Get-AppxPackage -AllUsers *Microsoft.DesktopAppInstaller* | Remove-AppxPackage -ErrorAction SilentlyContinue
     if (!(Test-Path "HKLM:\SOFTWARE\Policies\Microsoft\Dsh")) { New-Item "HKLM:\SOFTWARE\Policies\Microsoft\Dsh" -Force | Out-Null }
     Set-ItemProperty "HKLM:\SOFTWARE\Policies\Microsoft\Dsh" -Name "AllowNewsAndInterests" -Value 0 -Force -ErrorAction SilentlyContinue
 
     # --- LIMPEZA DE TOOLBARS E ICONES (RESTAURADA) ---
-    Log-Message "LOG" "     Resetando Toolbars e Icones da Barra..."
+    Log-Message "LOG" "     Limpando e organizando a Barra de Tarefas..."
     
     # 1. Remove Toolbars (Endereco, Links, etc)
     $toolbarStreamPaths = @(
@@ -1459,7 +1457,7 @@ function Run-Config {
     if (!(Test-Path $policiesExplorer)) { New-Item -Path $policiesExplorer -Force | Out-Null }
     Set-ItemProperty -Path $policiesExplorer -Name "HideSCAMeetNow" -Value 1 -Force -ErrorAction SilentlyContinue
     
-    Log-Message "LOG" "     Eliminando lixo digital e arquivos temporários..."
+    Log-Message "LOG" "     Eliminando lixo e arquivos temporários..."
     Log-Message "CMD" "COMANDO: Remove-Item $env:TEMP\*"
     Remove-Item "$env:TEMP\*" -Recurse -Force -ErrorAction SilentlyContinue | Out-Null
     Log-Message "CMD" "COMANDO: Remove-Item $env:windir\Temp\*"
@@ -1467,17 +1465,15 @@ function Run-Config {
     $Script:ProgressBar.Value = 80
     [System.Windows.Forms.Application]::DoEvents()
     
-    Log-Message "LOG" "6. PERSONALIZACAO REVENDA:"
-    Log-Message "LOG" "     Baixando e Definindo Wallpaper..."
+    Log-Message "LOG" "6. PERSONALIZAÇÃO E SUPORTE:"
+    Log-Message "LOG" "     Aplicando papel de parede padrão XMenu..."
     $tempDir = Join-Path $env:TEMP "XmenuResources"
     if (!(Test-Path $tempDir)) { New-Item $tempDir -ItemType Directory -Force | Out-Null }
-    
-    # --- MODIFICACAO REVENDA: NOME DO ARQUIVO ALTERADO PARA 'fundo_revenda.png' ---
-    $wallPath = Join-Path $tempDir "fundo_revenda.png"
+    $wallPath = Join-Path $tempDir "fundo.png"
     
     try {
         $wc = New-Object System.Net.WebClient
-        $wc.DownloadFile("$Script:RepoBase/fundo_revenda.png", $wallPath)
+        $wc.DownloadFile("$Script:RepoBase/fundo.png", $wallPath)
         Set-ItemProperty -Path "HKCU:\Control Panel\Desktop" -Name "WallpaperStyle" -Value "10" -Force
         Set-ItemProperty -Path "HKCU:\Control Panel\Desktop" -Name "TileWallPaper" -Value "0" -Force
         Set-ItemProperty -Path "HKCU:\Control Panel\Desktop" -Name "WallPaper" -Value $wallPath -Force
@@ -1485,7 +1481,40 @@ function Run-Config {
     }
     catch { Log-Message "ERRO" "Falha no Wallpaper: $($_.Exception.Message)" }
     
-    # --- MODIFICACAO REVENDA: BLOCO DE CRIACAO DE ATALHO SUPORTE REMOVIDO ---
+    Log-Message "LOG" "     Gerando atalho de suporte na Área de Trabalho..."
+    $configDir = "C:\Netcontroll\SuporteXmenuChat\Config"
+    if (!(Test-Path $configDir)) { New-Item $configDir -ItemType Directory -Force | Out-Null }
+    
+    $filesToDownload = @(
+        @{ U = "$Script:RepoBase/Config/Suporte%20Xmenu.html"; D = "$configDir\Suporte Xmenu.html" },
+        @{ U = "$Script:RepoBase/Config/iconeatalho.ico"; D = "$configDir\iconeatalho.ico" },
+        @{ U = "$Script:RepoBase/Config/faviconxmenu.ico"; D = "$configDir\faviconxmenu.ico" },
+        @{ U = "$Script:RepoBase/Config/iconheaderxmenu.png"; D = "$configDir\iconheaderxmenu.png" },
+        @{ U = "$Script:RepoBase/Config/SuporteXmenuDicas.pdf"; D = "$configDir\SuporteXmenuDicas.pdf" }
+    )
+    foreach ($file in $filesToDownload) {
+        try { (New-Object System.Net.WebClient).DownloadFile($file.U, $file.D) } 
+        catch { Log-Message "ERRO" "Falha ao baixar $($file.D): $($_.Exception.Message)" }
+    }
+    
+    try {
+        $shell = New-Object -ComObject WScript.Shell
+        $desktopPub = [Environment]::GetFolderPath('CommonDesktopDirectory')
+        $lnkPath = Join-Path $desktopPub "Suporte Xmenu.lnk"
+        $lnk = $shell.CreateShortcut($lnkPath)
+        $lnk.TargetPath = "$configDir\Suporte Xmenu.html"
+        $lnk.IconLocation = "$configDir\iconeatalho.ico"
+        $lnk.Save()
+        Log-Message "LOG" "     Atalho criado com sucesso."
+    }
+    catch { Log-Message "ERRO" "Falha no atalho: $($_.Exception.Message)" }
+    
+    Log-Message "LOG" "7. FINALIZAÇÃO:"
+    Log-Message "LOG" "     Atualizando interface do Windows (Explorer)..."
+    Get-ChildItem "$env:LOCALAPPDATA\IconCache.db" -ErrorAction SilentlyContinue | Remove-Item -Force | Out-Null
+    Stop-Process -Name explorer -Force -ErrorAction SilentlyContinue
+    Wait-UI 2 # Espera nao travante
+    if (-not (Get-Process explorer -ErrorAction SilentlyContinue)) { Start-Process explorer.exe }
     
     Log-Message "LOG" "--- TUDO PRONTO! ---"
     
@@ -1498,6 +1527,7 @@ function Run-Config {
     
     # --- FUNCAO PARA CRIAR JANELA DE INSTRUCOES INDEPENDENTE ---
     function Show-ManualGuide {
+        # ... (conteudo da funcao mantido, apenas mudando o ShowDialog para garantir foco)
         $finalForm = New-Object System.Windows.Forms.Form
         $finalForm.Text = "XMenu - Guia de Configuração Manual"
         $finalForm.Size = New-Object System.Drawing.Size(550, 500)
@@ -1578,11 +1608,11 @@ function Run-Config {
 # 6. UI WINDOWS FORMS
 # -----------------------------------------------------------------------------
 $screen = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
-$formWidth = if ($screen.Width -lt 1000) { 900 } else { 1000 }
-$formHeight = if ($screen.Height -lt 800) { 700 } else { 800 }
+$formWidth = if ($screen.Width -lt 1200) { $screen.Width - 50 } else { 1200 }
+$formHeight = if ($screen.Height -lt 900) { $screen.Height - 50 } else { 900 }
 
 $form = New-Object System.Windows.Forms.Form
-$form.Text = "XMenu System Manager v17.58 - REVENDA"
+$form.Text = "XMenu System Manager v17.58"
 $form.Size = New-Object System.Drawing.Size($formWidth, $formHeight)
 $form.StartPosition = "CenterScreen"
 $form.BackColor = [System.Drawing.Color]::FromArgb(25, 25, 30); $form.ForeColor = 'White'
@@ -1639,7 +1669,8 @@ try {
     $physDisk = Get-PhysicalDisk -ErrorAction SilentlyContinue | Select-Object -First 1
     if ($physDisk.MediaType -match 'SSD') { $diskType = "SSD" }
     elseif ($physDisk.MediaType -match 'HDD') { $diskType = "HD" }
-} catch {}
+}
+catch {}
 
 $lHw1 = New-Object System.Windows.Forms.Label
 $lHw1.Text = "[ Host: $env:COMPUTERNAME   |   IP Local: $localIP   |   Usuario: $env:USERNAME ]"
@@ -1723,9 +1754,9 @@ $Script:BtnCancel = $btnCancel
 # MAIN LAYOUT
 $layout = New-Object System.Windows.Forms.TableLayoutPanel; $layout.Dock = 'Fill'; $layout.ColumnCount = 1
 $layout.Padding = '20'; $layout.RowCount = 3
-[void]$layout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Percent, 25)))
+[void]$layout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Percent, 20)))
 [void]$layout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Absolute, 70)))
-[void]$layout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Percent, 75)))
+[void]$layout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Percent, 80)))
 [void]$form.Controls.Add($layout); $layout.BringToFront()
 
 $gLog = New-Object System.Windows.Forms.GroupBox; $gLog.Text = "Log"; $gLog.ForeColor = 'Gray'; $gLog.Dock = 'Fill'
@@ -1739,6 +1770,7 @@ $bCfg.Dock = 'Fill'; $bCfg.BackColor = [System.Drawing.Color]::FromArgb(0, 120, 
 $bCfg.FlatStyle = 'Flat'; $bCfg.Font = New-Object System.Drawing.Font("Segoe UI", 12, [System.Drawing.FontStyle]::Bold)
 $bCfg.Margin = '0,10,0,10'; $bCfg.Cursor = 'Hand'
 
+# TOOLTIP (NOVO)
 if ($null -eq $Script:ToolTip) {
     $Script:ToolTip = New-Object System.Windows.Forms.ToolTip
     $Script:ToolTip.InitialDelay = 500
@@ -1766,7 +1798,7 @@ function Add-Title {
 
 function Add-Btn {
     param($T, $D, $U, $F, $Sel = $false, $Type = "", $Color = $null, $Help = "") 
-    $b = New-Object System.Windows.Forms.Button; $b.Height = 60; $b.Dock = 'Top'
+    $b = New-Object System.Windows.Forms.Button; $b.Height = 50; $b.Dock = 'Top'
     $b.BackColor = if ($Color) { $Color } else { [System.Drawing.Color]::FromArgb(30, 45, 75) }
     $b.ForeColor = 'WhiteSmoke'
     $b.FlatStyle = 'Flat'; $b.TextAlign = 'MiddleLeft'; $b.Padding = '10,0,0,0'; $b.Margin = '5'
@@ -1794,7 +1826,7 @@ Add-Title "BANCO DE DADOS"
 Add-Btn "SQL Server 2008 (Instalador)" "" "https://www.netcontroll.com.br/util/instaladores/netpdv/SQL2008x64_DESCONTINUADO.exe" "SQL2008x64.exe" -Color $colorBlue -Help "Instalador clássico do SQL 2008 R2 (Padrão NetControll)"
 Add-Btn "SQL Server 2019 (Instalador)" "" "https://www.netcontroll.com.br/util/instaladores/netpdv/SQL2019.exe" "SQL2019.exe" -Color $colorBlue -Help "Instalador automático do SQL Server 2019 Express."
 
-$bSqlMan = New-Object System.Windows.Forms.Button; $bSqlMan.Height = 60; $bSqlMan.Dock = 'Top'
+$bSqlMan = New-Object System.Windows.Forms.Button; $bSqlMan.Height = 50; $bSqlMan.Dock = 'Top'
 $bSqlMan.BackColor = [System.Drawing.Color]::FromArgb(30, 45, 75); $bSqlMan.ForeColor = 'WhiteSmoke'
 $bSqlMan.FlatStyle = 'Flat'; $bSqlMan.TextAlign = 'MiddleLeft'; $bSqlMan.Padding = '10,0,0,0'; $bSqlMan.Margin = '5'
 $bSqlMan.Text = "SQL 2019 + SSMS (Manual)"; $bSqlMan.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
@@ -1818,7 +1850,7 @@ Add-Btn "Totem Auto-Atendimento (ZIP)" "" "" "" $true "Totem" -Help "Versões co
 Add-Title "EXTERNOS"
 Add-Btn "TecnoSpeed NFCe (11.1.7.27)" "" "https://netcontroll.com.br/util/instaladores/NFCE/11.1.7.27/InstaladorNFCe.exe" "InstaladorNFCe.exe" -Help "Instalador do componente TecnoSpeed para NFC-e."
 
-$bVspe = New-Object System.Windows.Forms.Button; $bVspe.Height = 60; $bVspe.Dock = 'Top'
+$bVspe = New-Object System.Windows.Forms.Button; $bVspe.Height = 50; $bVspe.Dock = 'Top'
 $bVspe.BackColor = [System.Drawing.Color]::FromArgb(30, 45, 75); $bVspe.ForeColor = 'WhiteSmoke'
 $bVspe.FlatStyle = 'Flat'; $bVspe.TextAlign = 'MiddleLeft'; $bVspe.Padding = '10,0,0,0'; $bVspe.Margin = '5'
 $bVspe.Text = "VSPE + Epson Virtual Port"; $bVspe.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
@@ -1837,6 +1869,7 @@ $colorDiag = [System.Drawing.Color]::FromArgb(30, 80, 30)
 $colorFix = [System.Drawing.Color]::FromArgb(100, 30, 30)
 
 Add-Title "SUPORTE E DIAGNÓSTICO"
+
 # --- DIAGNÓSTICOS (VERDE) ---
 $bInfo = New-Object System.Windows.Forms.Button; $bInfo.Height = 50; $bInfo.Dock = 'Top'
 $bInfo.BackColor = $colorDiag; $bInfo.ForeColor = 'WhiteSmoke'
@@ -1856,14 +1889,14 @@ $Script:ToolTip.SetToolTip($bScan, "Executa 'arp -a' e varredura de sockets (TCP
 $bScan.Add_Click({ Show-PrinterScanner })
 [void]$tbl.Controls.Add($bScan)
 
-$bPingT = New-Object System.Windows.Forms.Button; $bPingT.Height = 50; $bPingT.Dock = 'Top'
-$bPingT.BackColor = $colorDiag; $bPingT.ForeColor = 'WhiteSmoke'
-$bPingT.FlatStyle = 'Flat'; $bPingT.TextAlign = 'MiddleLeft'; $bPingT.Padding = '10,0,0,0'; $bPingT.Margin = '5'
-$bPingT.Text = "Teste de Ping Contínuo (com Log)"; $bPingT.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
-$bPingT.Cursor = 'Hand'; 
-$Script:ToolTip.SetToolTip($bPingT, "Executa 'Test-Connection' continuamente para o IP alvo, permitindo monitorar perdas de pacotes com log local.")
-$bPingT.Add_Click({ Show-PingTester })
-[void]$tbl.Controls.Add($bPingT)
+$bPing = New-Object System.Windows.Forms.Button; $bPing.Height = 50; $bPing.Dock = 'Top'
+$bPing.BackColor = $colorDiag; $bPing.ForeColor = 'WhiteSmoke'
+$bPing.FlatStyle = 'Flat'; $bPing.TextAlign = 'MiddleLeft'; $bPing.Padding = '10,0,0,0'; $bPing.Margin = '5'
+$bPing.Text = "Teste de Ping Contínuo (com Log)"; $bPing.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
+$bPing.Cursor = 'Hand'; 
+$Script:ToolTip.SetToolTip($bPing, "Executa 'Test-Connection' continuamente para o IP alvo, permitindo monitorar perdas de pacotes com log local.")
+$bPing.Add_Click({ Show-PingTester })
+[void]$tbl.Controls.Add($bPing)
 
 $bRes = New-Object System.Windows.Forms.Button; $bRes.Height = 50; $bRes.Dock = 'Top'
 $bRes.BackColor = $colorDiag; $bRes.ForeColor = 'WhiteSmoke'
@@ -1925,11 +1958,11 @@ $bNetR.BackColor = [System.Drawing.Color]::FromArgb(50, 55, 60); $bNetR.ForeColo
 $bNetR.FlatStyle = 'Flat'; $bNetR.TextAlign = 'MiddleLeft'; $bNetR.Padding = '10,0,0,0'; $bNetR.Margin = '5'
 $bNetR.Text = "Reset de Rede e DNS"; $bNetR.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
 $bNetR.Cursor = 'Hand'; 
-$Script:ToolTip.SetToolTip($bNetR, "Executa 'ipconfig /flushdns', 'netsh winsock reset' e 'netsh int ip reset' para restaurar toda a pilha de rede.")
+$Script:ToolTip.SetToolTip($bNetR, "Executa 'ipconfig /flushdns', 'netsh winsock reset', 'netsh int ip reset', 'ipconfig /release' e 'ipconfig /renew' para restaurar toda a pilha de rede e renovar o IP.")
 $bNetR.Add_Click({ Invoke-NetworkReset })
 [void]$tbl.Controls.Add($bNetR)
 
-Log-Message "INFO" "XMenu System Manager v17.58 - REVENDA"
+Log-Message "INFO" "XMenu System Manager v17.58 - Central de Preparo e Suporte"
 Log-Message "LOG" "==============================================================="
 Log-Message "LOG" "Este utilitário automatiza a configuração de ambientes XMenu,"
 Log-Message "LOG" "garantindo que o Windows esteja otimizado para máxima performance."

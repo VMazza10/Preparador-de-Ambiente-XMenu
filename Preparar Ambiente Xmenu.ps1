@@ -120,8 +120,9 @@ function Show-IPs {
             $gateway = if ($netConfig) { $netConfig.IPv4DefaultGateway.NextHop } else { "Nao detectado" }
             $dnsServers = if ($netConfig) { $netConfig.DNSServer.ServerAddresses -join ", " } else { "Nao detectado" }
             
-            $internetStatus = if (Test-Connection 8.8.8.8 -Count 1 -Quiet) { "Conectado (Online)" } else { "Sem Acesso (Offline)" }
-            $pingAdm2 = if (Test-Connection "adm2.netcontroll.com.br" -Count 1 -Quiet) { "OK (Acessivel)" } else { "FALHA (Inacessivel)" }
+            $pingObj = New-Object System.Net.NetworkInformation.Ping
+            $internetStatus = try { if (($pingObj.Send("8.8.8.8", 1500)).Status -eq "Success") { "Conectado (Online)" } else { "Sem Acesso (Offline)" } } catch { "Sem Acesso (Offline)" }
+            $pingAdm2 = try { if (($pingObj.Send("adm2.netcontroll.com.br", 1500)).Status -eq "Success") { "OK (Acessivel)" } else { "FALHA (Inacessivel)" } } catch { "FALHA (Inacessivel)" }
             
             if ($ips) {
                 if ($ips -is [string]) { $ips = @($ips) }
@@ -516,6 +517,14 @@ function Show-PrinterScanner {
                 try {
                     $myIps = [System.Net.Dns]::GetHostAddresses([System.Net.Dns]::GetHostName()) | Where-Object { $_.AddressFamily -eq 'InterNetwork' } | ForEach-Object { $_.IPAddressToString }
                     $localIP = $myIps[0]
+                    
+                    # Detecta IP do Gateway (Roteador principal)
+                    $gwIP = $null
+                    try {
+                        $netConfig = Get-NetIPConfiguration | Where-Object { $_.IPv4DefaultGateway -ne $null } | Select-Object -First 1
+                        if ($netConfig) { $gwIP = $netConfig.IPv4DefaultGateway.NextHop }
+                    } catch {}
+
                     if ($localIP -match '^(\d{1,3}\.\d{1,3}\.\d{1,3})\.') {
                         $subnet = $matches[1]
                         $Script:ScannerLblStat.Text = "Descoberta Ativa ($subnet.0/24)..."
@@ -561,25 +570,43 @@ function Show-PrinterScanner {
                                 $hn = "Desconhecido"
                                 try { $hn = [System.Net.Dns]::GetHostEntry($ip).HostName } catch {}
                                 
-                                $ports = @(); $isP = $false; $isW = $false
+                                $ports = @()
                                 $ipAddr = [System.Net.IPAddress]::Parse($ip)
                                 
                                 foreach ($p in @(9100, 515, 631, 80, 443, 445, 135, 3389)) {
                                     $socket = New-Object System.Net.Sockets.TcpClient
                                     try {
                                         $res = $socket.BeginConnect($ipAddr, $p, $null, $null)
-                                        if ($res.AsyncWaitHandle.WaitOne(125, $false)) {
-                                            $socket.EndConnect($res); $ports += $p; if ($p -gt 500 -and $p -lt 10000) { $isP = $true } else { $isW = $true }
+                                        if ($res.AsyncWaitHandle.WaitOne(120, $false)) {
+                                            $socket.EndConnect($res)
+                                            $ports += $p
                                         }
                                     }
                                     catch {}
-                                    $socket.Close(); if ($isP) { break }
+                                    $socket.Close()
                                 }
 
                                 $vendor = Get-VendorName $ip $arpOutput
-                                $isPC = ($ports -contains 445 -or $ports -contains 135 -or $ports -contains 3389)
+                                
+                                # Classificação Inteligente de Dispositivo
                                 $isLocal = ($ip -in $myIps)
-                                $type = if ($isLocal) { "MAQUINA ATUAL" } elseif ($isP) { "IMPRESSORA" } elseif ($isW) { "ROTEADOR" } elseif ($isPC) { "COMPUTADOR" } else { "Dispositivo" }
+                                $isGateway = ($null -ne $gwIP -and $ip -eq $gwIP)
+                                $isPrinter = ($ports -contains 9100 -or $ports -contains 515 -or $ports -contains 631 -or $vendor -in @("EPSON", "ELGIN", "BEMATECH", "DARUMA", "TANCA", "ZEBRA"))
+                                $isPC = ($ports -contains 445 -or $ports -contains 135 -or $ports -contains 3389 -or $hn -match "pc|note|desktop|laptop|workstation|server")
+                                $isWeb = ($ports -contains 80 -or $ports -contains 443)
+                                
+                                $type = "Dispositivo"
+                                if ($isLocal) {
+                                    $type = "MAQUINA ATUAL"
+                                } elseif ($isGateway) {
+                                    $type = "ROTEADOR (GATEWAY)"
+                                } elseif ($isPrinter) {
+                                    $type = "IMPRESSORA"
+                                } elseif ($isPC) {
+                                    $type = "COMPUTADOR"
+                                } elseif ($isWeb) {
+                                    $type = "ROTEADOR/DISP. WEB"
+                                }
                                 
                                 $row = New-Object System.Windows.Forms.ListViewItem($ip)
                                 $row.SubItems.Add($vendor) | Out-Null
@@ -587,10 +614,20 @@ function Show-PrinterScanner {
                                 $row.SubItems.Add($type) | Out-Null
                                 $row.SubItems.Add(($ports -join ", ")) | Out-Null
                                 
-                                if ($isLocal) { $row.ForeColor = [System.Drawing.Color]::Yellow; $row.Font = New-Object System.Drawing.Font($Script:ScannerLV.Font, [System.Drawing.FontStyle]::Bold) }
-                                elseif ($isP) { $row.ForeColor = [System.Drawing.Color]::PaleGreen; $count++ }
-                                elseif ($isW) { $row.ForeColor = [System.Drawing.Color]::LightSkyBlue }
-                                elseif ($isPC) { $row.ForeColor = [System.Drawing.Color]::Wheat }
+                                if ($isLocal) { 
+                                    $row.ForeColor = [System.Drawing.Color]::Yellow
+                                    $row.Font = New-Object System.Drawing.Font($Script:ScannerLV.Font, [System.Drawing.FontStyle]::Bold) 
+                                }
+                                elseif ($type -eq "IMPRESSORA") { 
+                                    $row.ForeColor = [System.Drawing.Color]::PaleGreen
+                                    $count++ 
+                                }
+                                elseif ($type -eq "ROTEADOR (GATEWAY)" -or $type -eq "ROTEADOR/DISP. WEB") { 
+                                    $row.ForeColor = [System.Drawing.Color]::LightSkyBlue 
+                                }
+                                elseif ($type -eq "COMPUTADOR") { 
+                                    $row.ForeColor = [System.Drawing.Color]::Wheat 
+                                }
                                 
                                 [void]$Script:ScannerLV.Items.Add($row)
                             }
@@ -653,19 +690,23 @@ function Show-PingTester {
             $target = $Script:PingTxtIP.Text.Trim()
             if ([string]::IsNullOrEmpty($target)) { return }
 
-            $res = Test-Connection $target -Count 1 -ErrorAction SilentlyContinue
+            # Usa Ping .NET com timeout fixo de 800ms para nao travar a UI
+            $pingObj = New-Object System.Net.NetworkInformation.Ping
+            $pingReply = $null
+            try { $pingReply = $pingObj.Send($target, 800) } catch {}
             $time = Get-Date -Format "HH:mm:ss"
             $msg = ""
-        
-            if ($res) {
-                $msg = "[$time] Resposta de ${target}: tempo=$($res.ResponseTime)ms`n"
+
+            if ($pingReply -ne $null -and $pingReply.Status -eq [System.Net.NetworkInformation.IPStatus]::Success) {
+                $msg = "[$time] Resposta de ${target}: tempo=$($pingReply.RoundtripTime)ms`n"
                 $Script:PingRtb.SelectionColor = [System.Drawing.Color]::Lime
             }
             else {
-                $msg = "[$time] FALHA: Host inacessivel ou timeout.`n"
+                $statusDesc = if ($pingReply -ne $null) { $pingReply.Status } else { "Timeout" }
+                $msg = "[$time] FALHA ($statusDesc): Host inacessivel.`n"
                 $Script:PingRtb.SelectionColor = [System.Drawing.Color]::Salmon
             }
-        
+
             $Script:PingRtb.AppendText($msg)
             $Script:PingRtb.ScrollToCaret()
 
@@ -759,43 +800,43 @@ function Deploy-WithBackup {
     
     try {
         Log-Message "INFO" "Iniciando deploy com backup para $Type (Versao: $Version)..."
+        [System.Windows.Forms.Application]::DoEvents()
         
-        # Remove backup antigo se existir
+        # Remove backup antigo se existir (rapido via robocopy /PURGE)
         if (Test-Path $backupPath) {
             Log-Message "LOG" "Removendo backup antigo: $backupPath"
             Remove-Item $backupPath -Recurse -Force -ErrorAction SilentlyContinue
+            [System.Windows.Forms.Application]::DoEvents()
         }
         
-        # Faz backup (COPIA a pasta atual para .OLD, mantendo a original)
+        # Faz backup usando robocopy /MIR /MT:8 (multithread, muito mais rapido)
         if (Test-Path $destPath) {
-            Log-Message "INFO" "Criando backup: $destPath -> $backupPath"
-            Copy-Item -Path $destPath -Destination $backupPath -Recurse -Force
-            Log-Message "SUCESSO" "Backup criado com sucesso: $backupPath"
+            Log-Message "INFO" "Criando backup (robocopy): $destPath -> $backupPath"
+            [System.Windows.Forms.Application]::DoEvents()
+            $roboBackup = Start-Process "robocopy.exe" -ArgumentList "`"$destPath`" `"$backupPath`" /MIR /MT:8 /NFL /NDL /NJH /NJS" -NoNewWindow -Wait -PassThru
+            # robocopy: exit code < 8 = sucesso
+            if ($roboBackup.ExitCode -lt 8) {
+                Log-Message "SUCESSO" "Backup criado com sucesso: $backupPath"
+            } else {
+                Log-Message "ERRO" "Backup retornou codigo $($roboBackup.ExitCode) - pode ter falhado parcialmente."
+            }
+            [System.Windows.Forms.Application]::DoEvents()
         }
         else {
             Log-Message "INFO" "Pasta destino nao existe ainda, sera criada: $destPath"
-            if (!(Test-Path $parentDir)) {
-                New-Item -Path $parentDir -ItemType Directory -Force | Out-Null
-            }
+            if (!(Test-Path $parentDir)) { New-Item -Path $parentDir -ItemType Directory -Force | Out-Null }
             New-Item -Path $destPath -ItemType Directory -Force | Out-Null
         }
         
-        # Copia novos arquivos POR CIMA da pasta existente (merge/atualizacao)
-        # Substitui arquivos iguais, mantem os que nao existem no ZIP
-        Log-Message "INFO" "Copiando arquivos novos para: $destPath (substituindo existentes)..."
-        $newFiles = Get-ChildItem -Path $SourcePath -Recurse -File
-        $count = 0
-        foreach ($file in $newFiles) {
-            $relativePath = $file.FullName.Substring($SourcePath.Length)
-            $targetFile = Join-Path $destPath $relativePath
-            $targetDir = Split-Path $targetFile
-            if (!(Test-Path $targetDir)) {
-                New-Item -Path $targetDir -ItemType Directory -Force | Out-Null
-            }
-            Copy-Item -Path $file.FullName -Destination $targetFile -Force
-            $count++
-        }
-        Log-Message "SUCESSO" "$Type atualizado para $Version ($count arquivos copiados)"
+        # Copia novos arquivos com robocopy /MT:8 (multithread paralelo)
+        Log-Message "INFO" "Copiando arquivos com robocopy..."
+        [System.Windows.Forms.Application]::DoEvents()
+        $roboCopy = Start-Process "robocopy.exe" -ArgumentList "`"$SourcePath`" `"$destPath`" /E /MT:8 /IS /IT /NFL /NDL /NJH /NJS" -NoNewWindow -Wait -PassThru
+        [System.Windows.Forms.Application]::DoEvents()
+        
+        # Conta arquivos da fonte (ZIP) que foram copiados
+        $count = (Get-ChildItem -Path $SourcePath -Recurse -File -ErrorAction SilentlyContinue).Count
+        Log-Message "SUCESSO" "$Type atualizado para $Version ($count arquivos atualizados)"
         
         [System.Windows.Forms.MessageBox]::Show(
             "ATUALIZACAO CONCLUIDA`n--------------------------------------`nPrograma: $Type`nVersao: $Version`nArquivos atualizados: $count`n--------------------------------------`nDestino: $destPath`nBackup: $backupPath",
@@ -808,7 +849,7 @@ function Deploy-WithBackup {
         if (Test-Path $backupPath) {
             Log-Message "INFO" "Restaurando backup apos falha..."
             if (Test-Path $destPath) { Remove-Item $destPath -Recurse -Force -ErrorAction SilentlyContinue }
-            Copy-Item -Path $backupPath -Destination $destPath -Recurse -Force
+            Start-Process "robocopy.exe" -ArgumentList "`"$backupPath`" `"$destPath`" /MIR /MT:8 /NFL /NDL /NJH /NJS" -NoNewWindow -Wait | Out-Null
             Log-Message "INFO" "Backup restaurado."
         }
         
@@ -981,19 +1022,26 @@ function Start-Download {
                 [System.Windows.Forms.Application]::DoEvents()
                 
                 try {
+                    # Usa ZipFile do .NET diretamente — muito mais rapido que Expand-Archive
+                    Add-Type -AssemblyName System.IO.Compression.FileSystem
+                    
                     $folderName = [System.IO.Path]::GetFileNameWithoutExtension($FileName)
                     $finalPath = Join-Path $Script:DownloadFolder $folderName
-                    $tempPath = Join-Path $Script:DownloadFolder "temp_$folderName"
+                    $tempPath  = Join-Path $Script:DownloadFolder "temp_$folderName"
                     
-                    if (Test-Path $tempPath) { Remove-Item $tempPath -Recurse -Force | Out-Null }
+                    if (Test-Path $tempPath)  { Remove-Item $tempPath  -Recurse -Force | Out-Null }
                     if (Test-Path $finalPath) { Remove-Item $finalPath -Recurse -Force | Out-Null }
+                    [System.Windows.Forms.Application]::DoEvents()
                     
-                    Expand-Archive -LiteralPath $destPath -DestinationPath $tempPath -Force
+                    # Extrai com ZipFile (nativo .NET - rapido e nao trava)
+                    [System.IO.Compression.ZipFile]::ExtractToDirectory($destPath, $tempPath)
+                    [System.Windows.Forms.Application]::DoEvents()
                     
+                    # Se o ZIP tem uma pasta raiz unica, sobe um nivel
                     $items = Get-ChildItem -Path $tempPath
                     if ($items.Count -eq 1 -and $items[0].PSIsContainer) {
                         Move-Item -Path $items[0].FullName -Destination $finalPath
-                        Remove-Item $tempPath -Recurse -Force | Out-Null
+                        Remove-Item $tempPath -Recurse -Force -ErrorAction SilentlyContinue | Out-Null
                     }
                     else {
                         Rename-Item -Path $tempPath -NewName $folderName
@@ -1009,7 +1057,7 @@ function Start-Download {
                     Log-Message "SUCESSO" "Extraido com sucesso para: $folderName"
                 }
                 catch {
-                    Log-Message "ERRO" "Falha ao extrair ZIP."
+                    Log-Message "ERRO" "Falha ao extrair ZIP: $($_.Exception.Message)"
                     $Button.Text = "Erro ZIP"
                     $Button.BackColor = [System.Drawing.Color]::Salmon
                 }
@@ -1303,7 +1351,7 @@ function Run-Config {
             "sDecimal" = ","; "sThousand" = "."; "sList" = ";"; 
             "sCurrency" = "R$"; "sMonDecimalSep" = ","; "sMonThousandSep" = ".";
             "sShortDate" = "dd/MM/yyyy"; "sTimeFormat" = "HH:mm:ss"; "sShortTime" = "HH:mm";
-            "iDate" = "1"; "iTime" = "1"; "iCurrency" = "0"
+            "iDate" = "1"; "iTime" = "1"; "iCurrency" = "2"
         }
         foreach ($name in $regValues.Keys) {
             Set-ItemProperty -Path $regPath -Name $name -Value $regValues[$name] -Force -ErrorAction SilentlyContinue
@@ -1502,10 +1550,11 @@ function Run-Config {
         $desktopPub = [Environment]::GetFolderPath('CommonDesktopDirectory')
         $lnkPath = Join-Path $desktopPub "Suporte Xmenu.lnk"
         $lnk = $shell.CreateShortcut($lnkPath)
-        $lnk.TargetPath = "$configDir\Suporte Xmenu.html"
+        $lnk.TargetPath = "C:\Program Files\Google\Chrome\Application\chrome.exe"
+        $lnk.Arguments = "--app=`"file:///C:/Netcontroll/SuporteXmenuChat/Config/Suporte%20Xmenu.html`""
         $lnk.IconLocation = "$configDir\iconeatalho.ico"
         $lnk.Save()
-        Log-Message "LOG" "     Atalho criado com sucesso."
+        Log-Message "LOG" "     Atalho criado com sucesso (modo App Chrome)."
     }
     catch { Log-Message "ERRO" "Falha no atalho: $($_.Exception.Message)" }
     
