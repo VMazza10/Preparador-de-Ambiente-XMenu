@@ -1560,7 +1560,7 @@ Add-CtxLink "Portal Xmenu" "https://portal.netcontroll.com.br/#/auth/login"
 # ============================================
 
 # HEADER
-$head = New-Object System.Windows.Forms.Panel; $head.Dock = 'Top'; $head.Height = 160
+$head = New-Object System.Windows.Forms.Panel; $head.Dock = 'Top'; $head.Height = 200
 $head.BackColor = [System.Drawing.Color]::FromArgb(0, 120, 215); $head.Padding = '20,20,20,0'
 [void]$form.Controls.Add($head)
 
@@ -1576,28 +1576,72 @@ $lS.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontSt
 $lS.Location = '5,60'
 [void]$hLeft.Controls.Add($lS)
 
-$hRight = New-Object System.Windows.Forms.FlowLayoutPanel; $hRight.Dock = 'Right'; $hRight.Width = 250
+$os = Get-CimInstance Win32_OperatingSystem
+$cpu = Get-CimInstance Win32_Processor | Select-Object -First 1
+$ram = Get-CimInstance Win32_ComputerSystem
+$disk = Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='C:'"
+$gpu = Get-CimInstance Win32_VideoController | Select-Object -First 1
+$gpuName = if ($gpu) { $gpu.Name } else { "N/A" }
+
+$localIP = (Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object { $_.IPAddress -notmatch '^127\.|^169\.254\.' } | Select-Object -First 1).IPAddress
+if (-not $localIP) { $localIP = "Offline" }
+
+$diskType = "Disco"
+try {
+    $physDisk = Get-PhysicalDisk -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($physDisk.MediaType -match 'SSD') { $diskType = "SSD" }
+    elseif ($physDisk.MediaType -match 'HDD') { $diskType = "HD" }
+} catch {}
+
+$lHw1 = New-Object System.Windows.Forms.Label
+$lHw1.Text = "[ Host: $env:COMPUTERNAME   |   IP Local: $localIP   |   Usuario: $env:USERNAME ]"
+$lHw1.AutoSize = $true; $lHw1.ForeColor = [System.Drawing.Color]::WhiteSmoke
+$lHw1.Font = New-Object System.Drawing.Font("Consolas", 10.5, [System.Drawing.FontStyle]::Bold)
+$lHw1.Location = '5,105'
+[void]$hLeft.Controls.Add($lHw1)
+
+$lHw2 = New-Object System.Windows.Forms.Label
+$lHw2.Text = "Sistema: $($os.Caption -replace 'Microsoft ','')   |   CPU: $($cpu.Name.Trim())"
+$lHw2.AutoSize = $true; $lHw2.ForeColor = [System.Drawing.Color]::WhiteSmoke
+$lHw2.Font = New-Object System.Drawing.Font("Consolas", 10.5, [System.Drawing.FontStyle]::Bold)
+$lHw2.Location = '5,125'
+[void]$hLeft.Controls.Add($lHw2)
+
+$lHw3 = New-Object System.Windows.Forms.Label
+$lHw3.Text = "RAM: $([Math]::Round($ram.TotalPhysicalMemory / 1GB)) GB   |   $diskType (C:): $([Math]::Round($disk.Size / 1GB)) GB   |   Video: $gpuName"
+$lHw3.AutoSize = $true; $lHw3.ForeColor = [System.Drawing.Color]::WhiteSmoke
+$lHw3.Font = New-Object System.Drawing.Font("Consolas", 10.5, [System.Drawing.FontStyle]::Bold)
+$lHw3.Location = '5,145'
+[void]$hLeft.Controls.Add($lHw3)
+
+$hwCopyAction = {
+    $fullText = "$($lHw1.Text)`r`n$($lHw2.Text)`r`n$($lHw3.Text)"
+    [System.Windows.Forms.Clipboard]::SetText($fullText)
+    Log-Message "SUCESSO" "Informações de hardware copiadas para a área de transferência."
+}
+$lHw1.Cursor = [System.Windows.Forms.Cursors]::Hand; $lHw1.Add_Click($hwCopyAction)
+$lHw2.Cursor = [System.Windows.Forms.Cursors]::Hand; $lHw2.Add_Click($hwCopyAction)
+$lHw3.Cursor = [System.Windows.Forms.Cursors]::Hand; $lHw3.Add_Click($hwCopyAction)
+
+$hRight = New-Object System.Windows.Forms.FlowLayoutPanel; $hRight.Dock = 'Right'; $hRight.Width = 140
 $hRight.FlowDirection = 'TopDown'; $hRight.BackColor = 'Transparent'; $hRight.WrapContents = $false
+$hRight.Padding = '0,40,0,0'
 [void]$head.Controls.Add($hRight)
 
-$sysInfo = New-Object System.Windows.Forms.Label
-$sysInfo.Text = "$env:COMPUTERNAME`n$env:USERNAME`nWindows $((Get-WmiObject Win32_OperatingSystem).Version)"
-$sysInfo.AutoSize = $true; $sysInfo.Font = New-Object System.Drawing.Font("Consolas", 9)
-$sysInfo.TextAlign = 'TopRight'; $sysInfo.Anchor = 'Right'
-[void]$hRight.Controls.Add($sysInfo)
-
-$btnIP = New-Object System.Windows.Forms.Button; $btnIP.Text = "DIAG. REDE"; $btnIP.Size = '130,35'
-$btnIP.BackColor = 'White'; $btnIP.ForeColor = [System.Drawing.Color]::FromArgb(0, 120, 215)
-$btnIP.FlatStyle = 'Flat'; $btnIP.Font = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold)
-$btnIP.Margin = '0,10,0,0'; $btnIP.Anchor = 'Right'
+$btnIP = New-Object System.Windows.Forms.Button; $btnIP.Text = "DIAG. REDE"; $btnIP.Size = '140,40'
+$btnIP.BackColor = 'White'; $btnIP.ForeColor = [System.Drawing.Color]::FromArgb(0, 100, 200)
+$btnIP.FlatStyle = 'Flat'; $btnIP.FlatAppearance.BorderSize = 0; $btnIP.Cursor = [System.Windows.Forms.Cursors]::Hand
+$btnIP.Font = New-Object System.Drawing.Font("Segoe UI", 9.5, [System.Drawing.FontStyle]::Bold)
+$btnIP.Margin = '0,0,0,10'
 $btnIP.Add_Click({ Show-IPs })
 [void]$hRight.Controls.Add($btnIP)
 
 # --- NOVO BOTAO LINKS NO HEADER ---
-$btnLinks = New-Object System.Windows.Forms.Button; $btnLinks.Text = "LINKS ÚTEIS ▼"; $btnLinks.Size = '130,35'
-$btnLinks.BackColor = 'White'; $btnLinks.ForeColor = [System.Drawing.Color]::FromArgb(0, 120, 215)
-$btnLinks.FlatStyle = 'Flat'; $btnLinks.Font = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold)
-$btnLinks.Margin = '0,5,0,0'; $btnLinks.Anchor = 'Right'
+$btnLinks = New-Object System.Windows.Forms.Button; $btnLinks.Text = "LINKS ÚTEIS ▼"; $btnLinks.Size = '140,40'
+$btnLinks.BackColor = 'White'; $btnLinks.ForeColor = [System.Drawing.Color]::FromArgb(0, 100, 200)
+$btnLinks.FlatStyle = 'Flat'; $btnLinks.FlatAppearance.BorderSize = 0; $btnLinks.Cursor = [System.Windows.Forms.Cursors]::Hand
+$btnLinks.Font = New-Object System.Drawing.Font("Segoe UI", 9.5, [System.Drawing.FontStyle]::Bold)
+$btnLinks.Margin = '0,0,0,0'
 $btnLinks.Add_Click({ 
         $linkMenu.Show($btnLinks, 0, $btnLinks.Height) 
     })

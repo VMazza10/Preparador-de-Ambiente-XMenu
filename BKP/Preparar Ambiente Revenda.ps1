@@ -1739,6 +1739,7 @@ Add-Btn "TeamViewer Full" "" "https://download.teamviewer.com/download/TeamViewe
 Add-Btn "AnyDesk" "" "https://download.anydesk.com/AnyDesk.exe" "AnyDesk.exe" -Help "Ferramenta de acesso remoto AnyDesk."
 Add-Btn "Google Chrome" "" "https://github.com/VMazza10/Preparador-de-Ambiente-XMenu/releases/download/Chrome/ChromeSetup.exe" "ChromeSetup.exe" -Help "Instalador online do navegador Google Chrome."
 Add-Btn "Revo Uninstaller" "" "https://download.revouninstaller.com/download/revosetup.exe" "revosetup.exe" -Help "Utilitário para desinstalação completa de programas e limpeza de restos."
+Add-Btn "TEF HUB Windows" "" "https://github.com/VMazza10/Preparador-de-Ambiente-XMenu/releases/download/Chrome/TEF.HUB.WINDOWS.exe" "TefHub_Windows.exe" -Help "Instalador Tefhub Windows."
 
 $colorDiag = [System.Drawing.Color]::FromArgb(30, 80, 30)
 $colorFix = [System.Drawing.Color]::FromArgb(100, 30, 30)
