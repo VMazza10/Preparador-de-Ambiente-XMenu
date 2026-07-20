@@ -1,6 +1,6 @@
-﻿# =============================================================================
+# =============================================================================
 # XMENU SYSTEM MANAGER - VERSAO REVENDA
-# Baseado na v17.58
+# Baseado na v17.59
 # Alteracoes Revenda:
 #   - Wallpaper: fundo_revenda.png
 #   - Removido: Atalhos de Suporte e Pasta Netcontroll
@@ -131,7 +131,7 @@ function Show-IPs {
                 
                 Clear-DnsClientCache
                 
-                Log-Message "INFO" "XMenu Manager v17.58 Carregado!"
+                Log-Message "INFO" "XMenu Manager v17.59 Carregado!"
                 Log-Message "INFO" "   > Endereco IP.....: $txtIPs"
                 Log-Message "INFO" "   > Gateway Padrao..: $gateway"
                 Log-Message "INFO" "   > Servidores DNS..: $dnsServers"
@@ -640,7 +640,654 @@ function Show-PrinterScanner {
         $Script:ScannerForm.ShowDialog($Script:MainForm)
     }
     catch {
-        [System.Windows.Forms.MessageBox]::Show("Erro ao abrir Scanner: $_", "XMenu Error")
+        [System.Windows.Forms.MessageBox]::Show("Erro ao abrir Scanner: $_", "XMenu Error") | Out-Null
+    }
+}
+
+function Show-PrinterManager {
+    try {
+        if ($null -ne $Script:PrinterManagerForm -and $Script:PrinterManagerForm.Visible) {
+            $Script:PrinterManagerForm.Activate(); return
+        }
+
+        $Script:PrinterManagerForm = New-Object System.Windows.Forms.Form
+        $Script:PrinterManagerForm.Text = "Gerenciador de Impressoras XMenu"; $Script:PrinterManagerForm.Size = "780,650"; $Script:PrinterManagerForm.StartPosition = 'CenterParent'
+        $Script:PrinterManagerForm.BackColor = [System.Drawing.Color]::FromArgb(25, 25, 30); $Script:PrinterManagerForm.ForeColor = 'White'
+        $Script:PrinterManagerForm.FormBorderStyle = 'FixedDialog'; $Script:PrinterManagerForm.MaximizeBox = $false
+
+        # PAINEL 1: Impressoras Locais
+        $pnlLocal = New-Object System.Windows.Forms.Panel
+        $pnlLocal.Size = New-Object System.Drawing.Size(735, 520); $pnlLocal.Location = New-Object System.Drawing.Point(15, 65)
+        $pnlLocal.BackColor = [System.Drawing.Color]::FromArgb(30, 30, 35)
+        [void]$Script:PrinterManagerForm.Controls.Add($pnlLocal)
+
+        # PAINEL 2: LPR/LPD
+        $pnlLpr = New-Object System.Windows.Forms.Panel
+        $pnlLpr.Size = New-Object System.Drawing.Size(735, 520); $pnlLpr.Location = New-Object System.Drawing.Point(15, 65)
+        $pnlLpr.BackColor = [System.Drawing.Color]::FromArgb(30, 30, 35)
+        $pnlLpr.Visible = $false
+        [void]$Script:PrinterManagerForm.Controls.Add($pnlLpr)
+
+        # PAINEL 3: Drivers de Impressoras
+        $pnlDrivers = New-Object System.Windows.Forms.Panel
+        $pnlDrivers.Size = New-Object System.Drawing.Size(735, 520); $pnlDrivers.Location = New-Object System.Drawing.Point(15, 65)
+        $pnlDrivers.BackColor = [System.Drawing.Color]::FromArgb(30, 30, 35)
+        $pnlDrivers.AutoScroll = $true
+        $pnlDrivers.Visible = $false
+        [void]$Script:PrinterManagerForm.Controls.Add($pnlDrivers)
+
+        # Botões de Tabulação (Header da Janela) - 3 abas
+        $tabActiveColor = [System.Drawing.Color]::FromArgb(0, 120, 215)
+        $tabInactiveColor = [System.Drawing.Color]::FromArgb(45, 45, 50)
+
+        $btnTabLocal = New-Object System.Windows.Forms.Button
+        $btnTabLocal.Text = "Impressoras Locais"; $btnTabLocal.Size = '200,35'; $btnTabLocal.Location = '15,18'
+        $btnTabLocal.FlatStyle = 'Flat'; $btnTabLocal.FlatAppearance.BorderSize = 0; $btnTabLocal.Cursor = 'Hand'
+        $btnTabLocal.Font = New-Object System.Drawing.Font("Segoe UI", 9.5, [System.Drawing.FontStyle]::Bold)
+        $btnTabLocal.BackColor = $tabActiveColor; $btnTabLocal.ForeColor = 'White'
+        
+        $btnTabLpr = New-Object System.Windows.Forms.Button
+        $btnTabLpr.Text = "USB via LPR (Win 11)"; $btnTabLpr.Size = '210,35'; $btnTabLpr.Location = '220,18'
+        $btnTabLpr.FlatStyle = 'Flat'; $btnTabLpr.FlatAppearance.BorderSize = 0; $btnTabLpr.Cursor = 'Hand'
+        $btnTabLpr.Font = New-Object System.Drawing.Font("Segoe UI", 9.5, [System.Drawing.FontStyle]::Bold)
+        $btnTabLpr.BackColor = $tabInactiveColor; $btnTabLpr.ForeColor = 'LightGray'
+
+        $btnTabDrivers = New-Object System.Windows.Forms.Button
+        $btnTabDrivers.Text = "Drivers de Impressoras"; $btnTabDrivers.Size = '210,35'; $btnTabDrivers.Location = '535,18'
+        $btnTabDrivers.FlatStyle = 'Flat'; $btnTabDrivers.FlatAppearance.BorderSize = 0; $btnTabDrivers.Cursor = 'Hand'
+        $btnTabDrivers.Font = New-Object System.Drawing.Font("Segoe UI", 9.5, [System.Drawing.FontStyle]::Bold)
+        $btnTabDrivers.BackColor = $tabInactiveColor; $btnTabDrivers.ForeColor = 'LightGray'
+
+        $btnTabLocal.Add_Click({
+            $pnlLocal.Visible = $true; $pnlLpr.Visible = $false; $pnlDrivers.Visible = $false
+            $btnTabLocal.BackColor = $tabActiveColor; $btnTabLocal.ForeColor = 'White'
+            $btnTabLpr.BackColor = $tabInactiveColor; $btnTabLpr.ForeColor = 'LightGray'
+            $btnTabDrivers.BackColor = $tabInactiveColor; $btnTabDrivers.ForeColor = 'LightGray'
+        })
+
+        $btnTabLpr.Add_Click({
+            $pnlLocal.Visible = $false; $pnlLpr.Visible = $true; $pnlDrivers.Visible = $false
+            $btnTabLocal.BackColor = $tabInactiveColor; $btnTabLocal.ForeColor = 'LightGray'
+            $btnTabLpr.BackColor = $tabActiveColor; $btnTabLpr.ForeColor = 'White'
+            $btnTabDrivers.BackColor = $tabInactiveColor; $btnTabDrivers.ForeColor = 'LightGray'
+        })
+
+        $btnTabDrivers.Add_Click({
+            $pnlLocal.Visible = $false; $pnlLpr.Visible = $false; $pnlDrivers.Visible = $true
+            $btnTabLocal.BackColor = $tabInactiveColor; $btnTabLocal.ForeColor = 'LightGray'
+            $btnTabLpr.BackColor = $tabInactiveColor; $btnTabLpr.ForeColor = 'LightGray'
+            $btnTabDrivers.BackColor = $tabActiveColor; $btnTabDrivers.ForeColor = 'White'
+        })
+
+        [void]$Script:PrinterManagerForm.Controls.Add($btnTabLocal)
+        [void]$Script:PrinterManagerForm.Controls.Add($btnTabLpr)
+        [void]$Script:PrinterManagerForm.Controls.Add($btnTabDrivers)
+
+        # -------------------------------------------------------------
+        # CONTEÚDO DO PAINEL DRIVERS (ABA 3)
+        # -------------------------------------------------------------
+        $baseUrl = "https://raw.githubusercontent.com/Delutto/thermal_printers/main"
+        $drvY = 10
+
+        function Add-DriverSection {
+            param($Panel, [ref]$Y, $Title, $Color)
+            $lbl = New-Object System.Windows.Forms.Label
+            $lbl.Text = $Title; $lbl.AutoSize = $true
+            $lbl.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
+            $lbl.ForeColor = $Color; $lbl.Location = New-Object System.Drawing.Point(15, $Y.Value)
+            [void]$Panel.Controls.Add($lbl)
+            $Y.Value += 28
+        }
+
+        function Add-DriverButton {
+            param($Panel, [ref]$Y, $Text, $Url, $FileName, $BgColor)
+            $btn = New-Object System.Windows.Forms.Button
+            $btn.Text = $Text; $btn.Size = New-Object System.Drawing.Size(700, 42)
+            $btn.Location = New-Object System.Drawing.Point(15, $Y.Value)
+            $btn.FlatStyle = 'Flat'; $btn.FlatAppearance.BorderSize = 0
+            $btn.BackColor = $BgColor; $btn.ForeColor = 'White'
+            $btn.Font = New-Object System.Drawing.Font("Segoe UI", 9.5, [System.Drawing.FontStyle]::Bold)
+            $btn.TextAlign = 'MiddleLeft'; $btn.Padding = '10,0,0,0'; $btn.Cursor = 'Hand'
+            $rr = $BgColor.R; $gg = $BgColor.G; $bb = $BgColor.B
+            $btn.FlatAppearance.MouseOverBackColor = [System.Drawing.Color]::FromArgb([Math]::Min($rr+20,255), [Math]::Min($gg+20,255), [Math]::Min($bb+20,255))
+            $btn.FlatAppearance.MouseDownBackColor = [System.Drawing.Color]::FromArgb([Math]::Max($rr-15,0), [Math]::Max($gg-15,0), [Math]::Max($bb-15,0))
+            $btn.Tag = "$Url|$FileName"
+            $btn.Add_Click({
+                $parts = $this.Tag.Split('|')
+                $dlUrl = $parts[0]; $dlFile = $parts[1]
+                $dest = Join-Path $env:TEMP $dlFile
+                $origText = $this.Text
+                try {
+                    $this.Enabled = $false; $this.Text = "  Baixando $dlFile ..."
+                    Log-Message "INFO" "Baixando driver: $dlFile"
+                    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+                    Invoke-WebRequest -Uri $dlUrl -OutFile $dest -UseBasicParsing
+                    Log-Message "SUCESSO" "Download concluido: $dlFile"
+                    $this.Text = "  Instalando $dlFile ..."
+                    Start-Process -FilePath $dest
+                    Log-Message "SUCESSO" "Instalador iniciado: $dlFile"
+                    $this.Text = "✔ $origText"
+                } catch {
+                    Log-Message "ERRO" "Falha ao baixar driver: $_"
+                    [System.Windows.Forms.MessageBox]::Show("Erro ao baixar o driver: $_", "Erro", "OK", "Error") | Out-Null
+                    $this.Text = $origText
+                } finally {
+                    $this.Enabled = $true
+                }
+            })
+            [void]$Panel.Controls.Add($btn)
+            $Y.Value += 47
+        }
+
+        $colorElgin   = [System.Drawing.Color]::FromArgb(25, 80, 140)
+        $colorBema    = [System.Drawing.Color]::FromArgb(30, 100, 60)
+        $colorEpson   = [System.Drawing.Color]::FromArgb(80, 40, 120)
+        $colorTanca   = [System.Drawing.Color]::FromArgb(140, 70, 20)
+
+        $colorElginUtil   = [System.Drawing.Color]::FromArgb(15, 60, 110)
+        $colorBemaUtil    = [System.Drawing.Color]::FromArgb(20, 80, 45)
+        $colorEpsonUtil   = [System.Drawing.Color]::FromArgb(60, 25, 95)
+        $colorTancaUtil   = [System.Drawing.Color]::FromArgb(110, 50, 15)
+
+        # --- ELGIN ---
+        Add-DriverSection $pnlDrivers ([ref]$drvY) "ELGIN" ([System.Drawing.Color]::FromArgb(80, 160, 255))
+        Add-DriverButton $pnlDrivers ([ref]$drvY) "  [DRIVER] Elgin i9 / i7  (v1.7.3)" "$baseUrl/Elgin/Elgin_i7_i9_v1.7.3.exe" "Elgin_i7_i9_v1.7.3.exe" $colorElgin
+        Add-DriverButton $pnlDrivers ([ref]$drvY) "  [DRIVER] Elgin i8  (v7.1.7)" "$baseUrl/Elgin/Elgin_i8_v7.1.7.exe" "Elgin_i8_v7.1.7.exe" $colorElgin
+        Add-DriverButton $pnlDrivers ([ref]$drvY) "  [UTILITÁRIO] Elgin i9 Utility  (v1.2.2.24)" "https://github.com/VMazza10/Preparador-de-Ambiente-XMenu/releases/download/Chrome/UTILITY.ELGIN.I9.E.I7.1.exe" "UTILITY.ELGIN.I9.E.I7.1.exe" $colorElginUtil
+        Add-DriverButton $pnlDrivers ([ref]$drvY) "  [UTILITÁRIO] Elgin i7 / i8 Utility  (v3.2)" "$baseUrl/Utilities/Elgin_i7-i8_Utility_v3.2.exe" "Elgin_i7-i8_Utility_v3.2.exe" $colorElginUtil
+        $drvY += 8
+
+        # --- BEMATECH ---
+        Add-DriverSection $pnlDrivers ([ref]$drvY) "BEMATECH" ([System.Drawing.Color]::FromArgb(80, 200, 120))
+        Add-DriverButton $pnlDrivers ([ref]$drvY) "  [DRIVER] Bematech MP-4200 TH / MP-2500 / MP-4000  (Spooler x64 v4.4.0.3)" "$baseUrl/Bematech/BematechSpoolerDrivers_x64_v4.4.0.3.exe" "BematechSpoolerDrivers_x64_v4.4.0.3.exe" $colorBema
+        Add-DriverButton $pnlDrivers ([ref]$drvY) "  [DRIVER] Bematech MP-4200 HS  (v1.7.7)" "$baseUrl/Bematech/Bematech%20MP-4200-HS_Driver_v1.7.7.exe" "Bematech_MP-4200-HS_Driver_v1.7.7.exe" $colorBema
+        Add-DriverButton $pnlDrivers ([ref]$drvY) "  [DRIVER] Bematech MP-2800 TH  (Spooler v1.3)" "$baseUrl/Bematech/Bematech_MP_2800_SpoolerDrivers_v1.3.exe" "Bematech_MP_2800_SpoolerDrivers_v1.3.exe" $colorBema
+        Add-DriverButton $pnlDrivers ([ref]$drvY) "  [UTILITÁRIO] Bematech Utility  (v2.10.04 x64)" "$baseUrl/Utilities/Bematech_Utility_v2.10.04_x64.exe" "Bematech_Utility_v2.10.04_x64.exe" $colorBemaUtil
+        Add-DriverButton $pnlDrivers ([ref]$drvY) "  [UTILITÁRIO] Bematech MP-2800 TH Utility  (v1.4)" "$baseUrl/Utilities/Bematech_MP-2800_TH_Utility_v1.4.exe" "Bematech_MP-2800_TH_Utility_v1.4.exe" $colorBemaUtil
+        $drvY += 8
+
+        # --- EPSON ---
+        Add-DriverSection $pnlDrivers ([ref]$drvY) "EPSON" ([System.Drawing.Color]::FromArgb(180, 120, 255))
+        Add-DriverButton $pnlDrivers ([ref]$drvY) "  [DRIVER] Epson TM-T20  (APD v5.6.0.0)" "$baseUrl/Epson/Epson_TM-T20_v5.6.0.0.exe" "Epson_TM-T20_v5.6.0.0.exe" $colorEpson
+        Add-DriverButton $pnlDrivers ([ref]$drvY) "  [DRIVER] Epson TM-T20X  (APD v6.1.0.0)" "$baseUrl/Epson/Epson_TM-T20X_v6.1.0.0.exe" "Epson_TM-T20X_v6.1.0.0.exe" $colorEpson
+        Add-DriverButton $pnlDrivers ([ref]$drvY) "  [DRIVER] Epson TM-T20X II  (APD v6.9.1.0)" "$baseUrl/Epson/Epson_TM-20X-II_Driver_v6.9.1.0.exe" "Epson_TM-20X-II_Driver_v6.9.1.0.exe" $colorEpson
+        Add-DriverButton $pnlDrivers ([ref]$drvY) "  [UTILITÁRIO] Epson NetConfig  (v4.9.5)" "$baseUrl/Utilities/Epson_NetConfig_v4_9_5.exe" "Epson_NetConfig_v4_9_5.exe" $colorEpsonUtil
+        $drvY += 8
+
+        # --- TANCA ---
+        Add-DriverSection $pnlDrivers ([ref]$drvY) "TANCA" ([System.Drawing.Color]::FromArgb(255, 160, 60))
+        Add-DriverButton $pnlDrivers ([ref]$drvY) "  [DRIVER] Tanca TP-620  (v6.1.0)" "$baseUrl/Tanca/Tanca_TP-620_Driver_v6.1.0.exe" "Tanca_TP-620_Driver_v6.1.0.exe" $colorTanca
+        Add-DriverButton $pnlDrivers ([ref]$drvY) "  [DRIVER] Tanca TP-650  (v2.11)" "$baseUrl/Tanca/Tanca_TP-650_DriverInstall_v2.11.exe" "Tanca_TP-650_DriverInstall_v2.11.exe" $colorTanca
+        Add-DriverButton $pnlDrivers ([ref]$drvY) "  [UTILITÁRIO] Tanca TP-620 Utility  (v3.2.0.1)" "$baseUrl/Utilities/Tanca_TP-620_Utility_v3.2.0.1.exe" "Tanca_TP-620_Utility_v3.2.0.1.exe" $colorTancaUtil
+        Add-DriverButton $pnlDrivers ([ref]$drvY) "  [UTILITÁRIO] Tanca TP-650 Printer Tool  (v1.48E)" "$baseUrl/Utilities/Tanca_TP-650_PrinterTool_1.48E.exe" "Tanca_TP-650_PrinterTool_1.48E.exe" $colorTancaUtil
+        $drvY += 8
+
+        # --- OUTRAS MARCAS ---
+        $colorDaruma  = [System.Drawing.Color]::FromArgb(130, 20, 50)
+        $colorSweda   = [System.Drawing.Color]::FromArgb(100, 100, 30)
+        $colorCtrlID  = [System.Drawing.Color]::FromArgb(60, 60, 80)
+        $colorOtherUtil = [System.Drawing.Color]::FromArgb(40, 40, 45)
+
+        Add-DriverSection $pnlDrivers ([ref]$drvY) "DARUMA / SWEDA / CONTROL ID" ([System.Drawing.Color]::FromArgb(220, 220, 220))
+        Add-DriverButton $pnlDrivers ([ref]$drvY) "  [DRIVER] Daruma DR800  (Spooler v2.0.1.7)" "$baseUrl/Daruma/Daruma_800_Spooler_Driver_v2.0.1.7.exe" "Daruma_800_Spooler_Driver_v2.0.1.7.exe" $colorDaruma
+        Add-DriverButton $pnlDrivers ([ref]$drvY) "  [DRIVER] Sweda SI-300 / SI-300E / SI-300W  (v1.2.0)" "$baseUrl/Sweda/Sweda_SI-300_SI-300E_SI-300W_v1.2.0.exe" "Sweda_SI-300_SI-300E_SI-300W_v1.2.0.exe" $colorSweda
+        Add-DriverButton $pnlDrivers ([ref]$drvY) "  [DRIVER] Control iD Print iD / Print iD Touch  (v1.1.10.2)" "$baseUrl/PrintID/Print_iD_%26_Print_iD_Touch_v1.1.10.2.exe" "Print_iD_v1.1.10.2.exe" $colorCtrlID
+        Add-DriverButton $pnlDrivers ([ref]$drvY) "  [UTILITÁRIO] Daruma Utility  (v2.20.9)" "$baseUrl/Utilities/Daruma_Utility_v2.20.9.exe" "Daruma_Utility_v2.20.9.exe" $colorDaruma
+        Add-DriverButton $pnlDrivers ([ref]$drvY) "  [UTILITÁRIO] Sweda Utility  (v2.03)" "$baseUrl/Utilities/Sweda_Utility_v2.03.exe" "Sweda_Utility_v2.03.exe" $colorSweda
+        Add-DriverButton $pnlDrivers ([ref]$drvY) "  [UTILITÁRIO] Control iD Utility  (v1.0)" "$baseUrl/Utilities/PrintID_Utility_v1.0.exe" "PrintID_Utility_v1.0.exe" $colorCtrlID
+
+        # -------------------------------------------------------------
+        # CONTEÚDO DO PAINEL LOCAL (ABA 1)
+        # -------------------------------------------------------------
+        # -------------------------------------------------------------
+        # CONTEÚDO DO PAINEL LOCAL (ABA 1)
+        # -------------------------------------------------------------
+        $lv = New-Object System.Windows.Forms.ListView
+        $lv.Location = '15,15'; $lv.Size = '705,300'
+        $lv.View = 'Details'; $lv.FullRowSelect = $true; $lv.GridLines = $false
+        $lv.BackColor = [System.Drawing.Color]::FromArgb(20, 20, 25); $lv.ForeColor = 'WhiteSmoke'
+        $lv.BorderStyle = 'None'; $lv.Font = New-Object System.Drawing.Font("Segoe UI", 9.5)
+        
+        $lv.Columns.Add("Impressora", 260) | Out-Null
+        $lv.Columns.Add("Porta", 130) | Out-Null
+        $lv.Columns.Add("Compartilhada?", 120) | Out-Null
+        $lv.Columns.Add("Nome Compart.", 190) | Out-Null
+        [void]$pnlLocal.Controls.Add($lv)
+
+        $LoadPrinters = {
+            $lv.Items.Clear()
+            try {
+                $printers = Get-WmiObject Win32_Printer
+                foreach ($p in $printers) {
+                    $pName = if ($p.Name) { $p.Name } else { "Sem Nome" }
+                    $pPort = if ($p.PortName) { $p.PortName } else { "" }
+                    $pShareName = if ($p.ShareName) { $p.ShareName } else { "" }
+                    $isShared = if ($p.Shared) { "Sim" } else { "Não" }
+
+                    $item = New-Object System.Windows.Forms.ListViewItem($pName)
+                    $item.SubItems.Add($pPort) | Out-Null
+                    $item.SubItems.Add($isShared) | Out-Null
+                    $item.SubItems.Add($pShareName) | Out-Null
+                    
+                    if ($p.Shared) {
+                        $item.ForeColor = [System.Drawing.Color]::PaleGreen
+                    }
+                    [void]$lv.Items.Add($item)
+                }
+            } catch {
+                Log-Message "ERRO" "Falha ao carregar impressoras: $_"
+            }
+        }
+        &$LoadPrinters
+
+        # Botões de Ação no Painel Local
+        $btnRefresh = New-Object System.Windows.Forms.Button
+        $btnRefresh.Text = "Atualizar Lista"; $btnRefresh.Location = '15,330'; $btnRefresh.Size = '130,40'
+        $btnRefresh.BackColor = [System.Drawing.Color]::FromArgb(55, 55, 60); $btnRefresh.FlatStyle = 'Flat'; $btnRefresh.Font = New-Object System.Drawing.Font("Segoe UI", 9.5, [System.Drawing.FontStyle]::Bold)
+        $btnRefresh.Cursor = 'Hand'; $btnRefresh.ForeColor = 'White'; $btnRefresh.FlatAppearance.BorderSize = 0
+        $btnRefresh.FlatAppearance.MouseOverBackColor = [System.Drawing.Color]::FromArgb(75, 75, 80)
+        $btnRefresh.FlatAppearance.MouseDownBackColor = [System.Drawing.Color]::FromArgb(45, 45, 50)
+        $btnRefresh.Add_Click({ &$LoadPrinters })
+        [void]$pnlLocal.Controls.Add($btnRefresh)
+
+        $btnTest = New-Object System.Windows.Forms.Button
+        $btnTest.Text = "Página de Teste"; $btnTest.Location = '155,330'; $btnTest.Size = '140,40'
+        $btnTest.BackColor = [System.Drawing.Color]::FromArgb(55, 55, 60); $btnTest.FlatStyle = 'Flat'; $btnTest.Font = New-Object System.Drawing.Font("Segoe UI", 9.5, [System.Drawing.FontStyle]::Bold)
+        $btnTest.Cursor = 'Hand'; $btnTest.ForeColor = 'White'; $btnTest.FlatAppearance.BorderSize = 0
+        $btnTest.FlatAppearance.MouseOverBackColor = [System.Drawing.Color]::FromArgb(75, 75, 80)
+        $btnTest.FlatAppearance.MouseDownBackColor = [System.Drawing.Color]::FromArgb(45, 45, 50)
+        $btnTest.Add_Click({
+            if ($lv.SelectedItems.Count -eq 0) { 
+                [System.Windows.Forms.MessageBox]::Show("Selecione uma impressora na lista primeiro.", "Aviso", "OK", "Warning") | Out-Null
+                return 
+            }
+            $pName = $lv.SelectedItems[0].Text
+            try {
+                $wmi = Get-WmiObject Win32_Printer -Filter "Name='$($pName -replace "'", "\'")'"
+                $wmi.PrintTestPage() | Out-Null
+                Log-Message "SUCESSO" "Página de teste enviada para: $pName"
+            } catch {
+                Log-Message "ERRO" "Falha ao imprimir página de teste: $_"
+            }
+        })
+        [void]$pnlLocal.Controls.Add($btnTest)
+
+        $btnShare = New-Object System.Windows.Forms.Button
+        $btnShare.Text = "Compartilhar"; $btnShare.Location = '305,330'; $btnShare.Size = '130,40'
+        $btnShare.BackColor = [System.Drawing.Color]::FromArgb(0, 120, 215); $btnShare.FlatStyle = 'Flat'; $btnShare.Font = New-Object System.Drawing.Font("Segoe UI", 9.5, [System.Drawing.FontStyle]::Bold)
+        $btnShare.Cursor = 'Hand'; $btnShare.ForeColor = 'White'; $btnShare.FlatAppearance.BorderSize = 0
+        $btnShare.FlatAppearance.MouseOverBackColor = [System.Drawing.Color]::FromArgb(0, 140, 240)
+        $btnShare.FlatAppearance.MouseDownBackColor = [System.Drawing.Color]::FromArgb(0, 100, 190)
+        $btnShare.Add_Click({
+            if ($lv.SelectedItems.Count -eq 0) { 
+                [System.Windows.Forms.MessageBox]::Show("Selecione uma impressora na lista primeiro.", "Aviso", "OK", "Warning") | Out-Null
+                return 
+            }
+            $pName = $lv.SelectedItems[0].Text
+            
+            $fInput = New-Object System.Windows.Forms.Form
+            $fInput.Text = "Nome do Compartilhamento"; $fInput.Size = "350,180"; $fInput.StartPosition = 'CenterParent'
+            $fInput.BackColor = [System.Drawing.Color]::FromArgb(35, 35, 40); $fInput.ForeColor = 'White'
+            $fInput.FormBorderStyle = 'FixedDialog'; $fInput.MaximizeBox = $false
+            
+            $lbl = New-Object System.Windows.Forms.Label; $lbl.Text = "Digite o nome (sem acentos/espaços):"; $lbl.Location = '20,20'; $lbl.AutoSize = $true
+            [void]$fInput.Controls.Add($lbl)
+            
+            $txt = New-Object System.Windows.Forms.TextBox; $txt.Location = '20,45'; $txt.Width = 290
+            $suggested = $pName -replace '[^a-zA-Z0-9]', ''
+            if ($suggested.Length -gt 15) { $suggested = $suggested.Substring(0,15) }
+            $txt.Text = $suggested.ToUpper()
+            $txt.BackColor = [System.Drawing.Color]::FromArgb(50, 50, 60); $txt.ForeColor = 'White'; $txt.BorderStyle = 'FixedSingle'
+            [void]$fInput.Controls.Add($txt)
+            
+            $btnOk = New-Object System.Windows.Forms.Button; $btnOk.Text = "OK"; $btnOk.Location = '130,90'; $btnOk.Size = '80,30'
+            $btnOk.BackColor = [System.Drawing.Color]::FromArgb(0, 120, 215); $btnOk.FlatStyle = 'Flat'; $btnOk.Cursor = 'Hand'; $btnOk.ForeColor = 'White'; $btnOk.FlatAppearance.BorderSize = 0
+            $btnOk.Add_Click({ $fInput.DialogResult = 'OK'; $fInput.Close() })
+            [void]$fInput.Controls.Add($btnOk)
+            
+            $btnCan = New-Object System.Windows.Forms.Button; $btnCan.Text = "Cancelar"; $btnCan.Location = '220,90'; $btnCan.Size = '80,30'
+            $btnCan.BackColor = [System.Drawing.Color]::FromArgb(60, 60, 65); $btnCan.FlatStyle = 'Flat'; $btnCan.Cursor = 'Hand'; $btnCan.ForeColor = 'White'; $btnCan.FlatAppearance.BorderSize = 0
+            $btnCan.Add_Click({ $fInput.Close() })
+            [void]$fInput.Controls.Add($btnCan)
+            
+            if ($fInput.ShowDialog() -eq 'OK') {
+                $shareName = $txt.Text.Trim() -replace '\s+', '' -replace '[^a-zA-Z0-9]', ''
+                if ($shareName) {
+                    try {
+                        $wmi = Get-WmiObject Win32_Printer -Filter "Name='$($pName -replace "'", "\'")'"
+                        $wmi.Shared = $true
+                        $wmi.ShareName = $shareName
+                        $wmi.Put() | Out-Null
+                        Log-Message "SUCESSO" "Impressora '$pName' compartilhada como '$shareName'"
+                        
+                        # --- APLICAR CORREÇÃO DE REGISTRO RPC (Win 10/11) ---
+                        Log-Message "INFO" "Aplicando correcoes de registro RPC para compartilhamento..."
+                        
+                        $printPath = "HKLM:\System\CurrentControlSet\Control\Print"
+                        $privName = "RpcAuthnLevelPrivacyEnabled"
+                        if (-not (Get-ItemProperty -Path $printPath -Name $privName -ErrorAction SilentlyContinue)) {
+                            New-ItemProperty -Path $printPath -Name $privName -Value 0 -PropertyType DWord -Force | Out-Null
+                        } else {
+                            Set-ItemProperty -Path $printPath -Name $privName -Value 0 | Out-Null
+                        }
+
+                        $rpcPath = "HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Printers\RPC"
+                        if (-not (Test-Path $rpcPath)) {
+                            New-Item -Path $rpcPath -Force | Out-Null
+                        }
+                        $pipeName = "RpcUseNamedPipeProtocol"
+                        if (-not (Get-ItemProperty -Path $rpcPath -Name $pipeName -ErrorAction SilentlyContinue)) {
+                            New-ItemProperty -Path $rpcPath -Name $pipeName -Value 1 -PropertyType DWord -Force | Out-Null
+                        } else {
+                            Set-ItemProperty -Path $rpcPath -Name $pipeName -Value 1 | Out-Null
+                        }
+                        
+                        Log-Message "INFO" "Reiniciando spooler para aplicar registros..."
+                        Restart-Service -Name Spooler -Force
+                        Log-Message "SUCESSO" "Registros RPC aplicados e Spooler reiniciado com sucesso!"
+                        
+                        $netPath = "\\$env:COMPUTERNAME\$shareName"
+                        [System.Windows.Forms.Clipboard]::SetText($netPath)
+                        [System.Windows.Forms.MessageBox]::Show(
+                            "Impressora compartilhada com sucesso e registros aplicados!`n`nCaminho da impressora para o portal:`n$netPath`n`n(Este caminho ja foi copiado para sua Area de Transferencia!)",
+                            "Compartilhada com Sucesso", "OK", "Information") | Out-Null
+                        
+                        &$LoadPrinters
+                    } catch {
+                        Log-Message "ERRO" "Erro ao compartilhar/aplicar registros: $_"
+                    }
+                }
+            }
+        })
+        [void]$pnlLocal.Controls.Add($btnShare)
+
+        $btnUnshare = New-Object System.Windows.Forms.Button
+        $btnUnshare.Text = "Remover Compart."; $btnUnshare.Location = '445,330'; $btnUnshare.Size = '140,40'
+        $btnUnshare.BackColor = [System.Drawing.Color]::FromArgb(120, 30, 30); $btnUnshare.FlatStyle = 'Flat'; $btnUnshare.Font = New-Object System.Drawing.Font("Segoe UI", 9.5, [System.Drawing.FontStyle]::Bold)
+        $btnUnshare.Cursor = 'Hand'; $btnUnshare.ForeColor = 'White'; $btnUnshare.FlatAppearance.BorderSize = 0
+        $btnUnshare.FlatAppearance.MouseOverBackColor = [System.Drawing.Color]::FromArgb(145, 45, 45)
+        $btnUnshare.FlatAppearance.MouseDownBackColor = [System.Drawing.Color]::FromArgb(100, 20, 20)
+        $btnUnshare.Add_Click({
+            if ($lv.SelectedItems.Count -eq 0) { 
+                [System.Windows.Forms.MessageBox]::Show("Selecione uma impressora na lista primeiro.", "Aviso", "OK", "Warning") | Out-Null
+                return 
+            }
+            $pName = $lv.SelectedItems[0].Text
+            try {
+                $wmi = Get-WmiObject Win32_Printer -Filter "Name='$($pName -replace "'", "\'")'"
+                $wmi.Shared = $false
+                $wmi.Put() | Out-Null
+                Log-Message "SUCESSO" "Compartilhamento removido para: $pName"
+                &$LoadPrinters
+            } catch {
+                Log-Message "ERRO" "Erro ao remover compartilhamento: $_"
+            }
+        })
+        [void]$pnlLocal.Controls.Add($btnUnshare)
+
+        $btnCopyPath = New-Object System.Windows.Forms.Button
+        $btnCopyPath.Text = "Copiar Caminho"; $btnCopyPath.Location = '595,330'; $btnCopyPath.Size = '125,40'
+        $btnCopyPath.BackColor = [System.Drawing.Color]::FromArgb(0, 120, 215); $btnCopyPath.FlatStyle = 'Flat'; $btnCopyPath.Font = New-Object System.Drawing.Font("Segoe UI", 9.5, [System.Drawing.FontStyle]::Bold)
+        $btnCopyPath.Cursor = 'Hand'; $btnCopyPath.ForeColor = 'White'; $btnCopyPath.FlatAppearance.BorderSize = 0
+        $btnCopyPath.FlatAppearance.MouseOverBackColor = [System.Drawing.Color]::FromArgb(0, 140, 240)
+        $btnCopyPath.FlatAppearance.MouseDownBackColor = [System.Drawing.Color]::FromArgb(0, 100, 190)
+        $btnCopyPath.Add_Click({
+            if ($lv.SelectedItems.Count -eq 0) { 
+                [System.Windows.Forms.MessageBox]::Show("Selecione uma impressora na lista primeiro.", "Aviso", "OK", "Warning") | Out-Null
+                return 
+            }
+            $pName = $lv.SelectedItems[0].Text
+            try {
+                $wmi = Get-WmiObject Win32_Printer -Filter "Name='$($pName -replace "'", "\'")'"
+                if ($wmi.Shared -and $wmi.ShareName) {
+                    $netPath = "\\$env:COMPUTERNAME\$($wmi.ShareName)"
+                    [System.Windows.Forms.Clipboard]::SetText($netPath)
+                    Log-Message "SUCESSO" "Caminho copiado: $netPath"
+                    [System.Windows.Forms.MessageBox]::Show("Caminho de rede copiado para a Area de Transferencia:`n`n$netPath", "Caminho Copiado", "OK", "Information") | Out-Null
+                } else {
+                    [System.Windows.Forms.MessageBox]::Show("Esta impressora nao esta compartilhada. Compartilhe-a primeiro para copiar o caminho de rede.", "Aviso", "OK", "Warning") | Out-Null
+                }
+            } catch {
+                Log-Message "ERRO" "Erro ao obter dados de compartilhamento: $_"
+            }
+        })
+        [void]$pnlLocal.Controls.Add($btnCopyPath)
+
+        $lblSep = New-Object System.Windows.Forms.Label
+        $lblSep.Text = "________________________________________________________________________________________________________"
+        $lblSep.Location = '15,390'; $lblSep.Size = '705,20'; $lblSep.ForeColor = 'Gray'
+        [void]$pnlLocal.Controls.Add($lblSep)
+
+        $btnSpool = New-Object System.Windows.Forms.Button
+        $btnSpool.Text = "REINICIAR SPOOLER DE IMPRESSÃO"; $btnSpool.Location = '15,420'; $btnSpool.Size = '705,45'
+        $btnSpool.BackColor = [System.Drawing.Color]::FromArgb(50, 55, 60); $btnSpool.FlatStyle = 'Flat'; $btnSpool.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
+        $btnSpool.Cursor = 'Hand'; $btnSpool.ForeColor = 'White'; $btnSpool.FlatAppearance.BorderSize = 0
+        $btnSpool.FlatAppearance.MouseOverBackColor = [System.Drawing.Color]::FromArgb(70, 75, 80)
+        $btnSpool.FlatAppearance.MouseDownBackColor = [System.Drawing.Color]::FromArgb(40, 45, 50)
+        $btnSpool.Add_Click({
+            Invoke-SpoolerReset
+        })
+        [void]$pnlLocal.Controls.Add($btnSpool)
+
+        # -------------------------------------------------------------
+        # CONTEÚDO DO PAINEL LPR/LPD (ABA 2)
+        # -------------------------------------------------------------
+        $lblLprTitle = New-Object System.Windows.Forms.Label
+        $lblLprTitle.Text = "COMPARTILHAMENTO USB VIA REDE LPR/LPD (Evita Erros 0x00000709 / 0x0000011b)"; $lblLprTitle.Location = '15,15'; $lblLprTitle.Size = '700,25'
+        $lblLprTitle.Font = New-Object System.Drawing.Font("Segoe UI", 9.5, [System.Drawing.FontStyle]::Bold)
+        $lblLprTitle.ForeColor = [System.Drawing.Color]::Gold
+        [void]$pnlLpr.Controls.Add($lblLprTitle)
+
+        # Card Origem (Esquerda)
+        $pnlServerCard = New-Object System.Windows.Forms.Panel
+        $pnlServerCard.Location = '15,50'; $pnlServerCard.Size = '345,450'
+        $pnlServerCard.BackColor = [System.Drawing.Color]::FromArgb(35, 35, 40)
+        [void]$pnlLpr.Controls.Add($pnlServerCard)
+
+        $lblSrvTitle = New-Object System.Windows.Forms.Label
+        $lblSrvTitle.Text = "ETAPA 1: PC da Impressora USB (Origem)"; $lblSrvTitle.Location = '15,15'; $lblSrvTitle.Size = '315,20'
+        $lblSrvTitle.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
+        $lblSrvTitle.ForeColor = [System.Drawing.Color]::FromArgb(135, 206, 250) # LightSkyBlue
+        [void]$pnlServerCard.Controls.Add($lblSrvTitle)
+
+        $lblSrvDesc = New-Object System.Windows.Forms.Label
+        $lblSrvDesc.Text = "Configure o computador onde a impressora está ligada no USB.`n`nAtiva o serviço LPD e a porta TCP 515 no Firewall."
+        $lblSrvDesc.Location = '15,45'; $lblSrvDesc.AutoSize = $true; $lblSrvDesc.MaximumSize = New-Object System.Drawing.Size(315, 0)
+        $lblSrvDesc.Font = New-Object System.Drawing.Font("Segoe UI", 9)
+        $lblSrvDesc.ForeColor = 'WhiteSmoke'
+        [void]$pnlServerCard.Controls.Add($lblSrvDesc)
+
+        $lblSrvAlert = New-Object System.Windows.Forms.Label
+        $lblSrvAlert.Text = "[!] ATENÇÃO:`nVocê DEVE compartilhar a impressora na aba 'Impressoras Locais' com um nome simples (ex: IMPRESSORA) para que a rede possa acessá-la!"
+        $lblSrvAlert.Location = '15,115'; $lblSrvAlert.AutoSize = $true; $lblSrvAlert.MaximumSize = New-Object System.Drawing.Size(315, 0)
+        $lblSrvAlert.Font = New-Object System.Drawing.Font("Segoe UI", 8.5, [System.Drawing.FontStyle]::Bold)
+        $lblSrvAlert.ForeColor = [System.Drawing.Color]::Gold
+        [void]$pnlServerCard.Controls.Add($lblSrvAlert)
+
+        $btnActServer = New-Object System.Windows.Forms.Button
+        $btnActServer.Text = "ATIVAR LPD NESTE COMPUTADOR"; $btnActServer.Location = '15,215'; $btnActServer.Size = '315,45'
+        $btnActServer.BackColor = [System.Drawing.Color]::FromArgb(30, 80, 30); $btnActServer.FlatStyle = 'Flat'; $btnActServer.Font = New-Object System.Drawing.Font("Segoe UI", 9.5, [System.Drawing.FontStyle]::Bold)
+        $btnActServer.Cursor = 'Hand'; $btnActServer.ForeColor = 'White'; $btnActServer.FlatAppearance.BorderSize = 0
+        $btnActServer.FlatAppearance.MouseOverBackColor = [System.Drawing.Color]::FromArgb(40, 100, 40)
+        $btnActServer.FlatAppearance.MouseDownBackColor = [System.Drawing.Color]::FromArgb(20, 60, 20)
+        $btnActServer.Add_Click({
+            $btnActServer.Enabled = $false
+            $btnActServer.Text = "Configurando LPD..."
+            [System.Windows.Forms.Application]::DoEvents()
+            
+            try {
+                Log-Message "INFO" "Habilitando Servico LPD..."
+                $proc = Start-Process cmd -ArgumentList "/c title Ativando Recurso LPD (Aguarde...) && dism /online /enable-feature /featurename:Printing-Foundation-LPDPrintService /all /norestart" -PassThru
+                while (-not $proc.HasExited) {
+                    [System.Windows.Forms.Application]::DoEvents()
+                    Start-Sleep -Milliseconds 100
+                }
+                if ($proc.ExitCode -ne 0) { throw "Falha no DISM. Codigo: $($proc.ExitCode)" }
+                
+                Log-Message "INFO" "Configurando e iniciando o servico LPDSVC..."
+                sc.exe config LPDSVC start= auto | Out-Null
+                net start LPDSVC | Out-Null
+                
+                Log-Message "INFO" "Adicionando regra de Firewall..."
+                netsh advfirewall firewall add rule name="LPD Porta 515" dir=in action=allow protocol=TCP localport=515 | Out-Null
+                
+                Log-Message "INFO" "Reiniciando spooler..."
+                Restart-Service -Name Spooler -Force
+                
+                $ips = Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object { $_.IPAddress -notlike "127.*" -and $_.IPAddress -notlike "169.*" } | Select-Object -ExpandProperty IPAddress -Unique
+                $txtIps = $ips -join " ou "
+                if (-not $txtIps) { $txtIps = "Não detectado" }
+                
+                Log-Message "SUCESSO" "LPD configurado com sucesso no PC local! Porta 515 ativa."
+                Log-Message "INFO" ">>> IP DESTE COMPUTADOR: $txtIps <<<"
+                Log-Message "INFO" "IMPORTANTE: Agora compartilhe a impressora na Aba 1 com nome simples."
+                
+                [System.Windows.Forms.MessageBox]::Show(
+                    $Script:PrinterManagerForm,
+                    "LPD Ativado com sucesso!`n`nIP da Máquina: $txtIps`n`nProximos Passos:`n1. Compartilhe a impressora USB na Aba 1 (ex: IMPRESSORA).`n2. Fixe o IP deste computador no roteador.`n3. Vá para o outro PC e configure como Cliente LPR.",
+                    "LPD Configurado", "OK", "Information") | Out-Null
+            }
+            catch {
+                Log-Message "ERRO" "Falha ao configurar LPD: $_"
+                [System.Windows.Forms.MessageBox]::Show($Script:PrinterManagerForm, "Erro na configuracao do LPD: $_", "Erro LPD", "OK", "Error") | Out-Null
+            }
+            finally {
+                $btnActServer.Enabled = $true
+                $btnActServer.Text = "ATIVAR LPD NESTE COMPUTADOR"
+            }
+        })
+        [void]$pnlServerCard.Controls.Add($btnActServer)
+
+        $btnGoShare = New-Object System.Windows.Forms.Button
+        $btnGoShare.Text = "COMPARTILHAR IMPRESSORA AGORA"; $btnGoShare.Location = '15,270'; $btnGoShare.Size = '315,35'
+        $btnGoShare.BackColor = [System.Drawing.Color]::FromArgb(0, 120, 215); $btnGoShare.FlatStyle = 'Flat'; $btnGoShare.Font = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold)
+        $btnGoShare.Cursor = 'Hand'; $btnGoShare.ForeColor = 'White'; $btnGoShare.FlatAppearance.BorderSize = 0
+        $btnGoShare.FlatAppearance.MouseOverBackColor = [System.Drawing.Color]::FromArgb(0, 140, 240)
+        $btnGoShare.FlatAppearance.MouseDownBackColor = [System.Drawing.Color]::FromArgb(0, 100, 190)
+        $btnGoShare.Add_Click({
+            $pnlLocal.Visible = $true
+            $pnlLpr.Visible = $false
+            $btnTabLocal.BackColor = [System.Drawing.Color]::FromArgb(0, 120, 215); $btnTabLocal.ForeColor = 'White'
+            $btnTabLpr.BackColor = [System.Drawing.Color]::FromArgb(45, 45, 50); $btnTabLpr.ForeColor = 'LightGray'
+        })
+        [void]$pnlServerCard.Controls.Add($btnGoShare)
+
+        $lblIpSrv = New-Object System.Windows.Forms.Label
+        $lblIpSrv.Text = "IP Atual deste PC:"; $lblIpSrv.Location = '15,320'; $lblIpSrv.AutoSize = $true
+        $lblIpSrv.ForeColor = 'Gray'
+        [void]$pnlServerCard.Controls.Add($lblIpSrv)
+
+        $txtIpSrv = New-Object System.Windows.Forms.TextBox
+        $txtIpSrv.Location = '15,340'; $txtIpSrv.Width = 315; $txtIpSrv.ReadOnly = $true
+        $txtIpSrv.BackColor = [System.Drawing.Color]::FromArgb(45, 45, 50); $txtIpSrv.ForeColor = 'LimeGreen'; $txtIpSrv.BorderStyle = 'FixedSingle'
+        $txtIpSrv.Font = New-Object System.Drawing.Font("Consolas", 10.5, [System.Drawing.FontStyle]::Bold)
+        try {
+            $activeIps = Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object { $_.IPAddress -notlike "127.*" -and $_.IPAddress -notlike "169.*" } | Select-Object -ExpandProperty IPAddress -Unique
+            $txtIpSrv.Text = $activeIps -join ", "
+        } catch { $txtIpSrv.Text = "IP não encontrado" }
+        [void]$pnlServerCard.Controls.Add($txtIpSrv)
+
+
+        # Card Destino (Direita)
+        $pnlClientCard = New-Object System.Windows.Forms.Panel
+        $pnlClientCard.Location = '375,50'; $pnlClientCard.Size = '345,450'
+        $pnlClientCard.BackColor = [System.Drawing.Color]::FromArgb(35, 35, 40)
+        [void]$pnlLpr.Controls.Add($pnlClientCard)
+
+        $lblCliTitle = New-Object System.Windows.Forms.Label
+        $lblCliTitle.Text = "ETAPA 2: No outro PC da rede (Destino)"; $lblCliTitle.Location = '15,15'; $lblCliTitle.Size = '315,20'
+        $lblCliTitle.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
+        $lblCliTitle.ForeColor = [System.Drawing.Color]::FromArgb(135, 206, 250) # LightSkyBlue
+        [void]$pnlClientCard.Controls.Add($lblCliTitle)
+
+        $lblCliDesc = New-Object System.Windows.Forms.Label
+        $lblCliDesc.Text = "Configure o outro computador da rede que precisa enviar impressões para a impressora USB.`n`nAtiva o Monitor LPR do Windows e reinicia o spooler."
+        $lblCliDesc.Location = '15,45'; $lblCliDesc.AutoSize = $true; $lblCliDesc.MaximumSize = New-Object System.Drawing.Size(315, 0)
+        $lblCliDesc.Font = New-Object System.Drawing.Font("Segoe UI", 9)
+        $lblCliDesc.ForeColor = 'WhiteSmoke'
+        [void]$pnlClientCard.Controls.Add($lblCliDesc)
+
+        $btnActClient = New-Object System.Windows.Forms.Button
+        $btnActClient.Text = "ATIVAR MONITOR LPR"; $btnActClient.Location = '15,125'; $btnActClient.Size = '315,45'
+        $btnActClient.BackColor = [System.Drawing.Color]::FromArgb(30, 80, 30); $btnActClient.FlatStyle = 'Flat'; $btnActClient.Font = New-Object System.Drawing.Font("Segoe UI", 9.5, [System.Drawing.FontStyle]::Bold)
+        $btnActClient.Cursor = 'Hand'; $btnActClient.ForeColor = 'White'; $btnActClient.FlatAppearance.BorderSize = 0
+        $btnActClient.FlatAppearance.MouseOverBackColor = [System.Drawing.Color]::FromArgb(40, 100, 40)
+        $btnActClient.FlatAppearance.MouseDownBackColor = [System.Drawing.Color]::FromArgb(20, 60, 20)
+        $btnActClient.Add_Click({
+            $btnActClient.Enabled = $false
+            $btnActClient.Text = "Configurando LPR..."
+            [System.Windows.Forms.Application]::DoEvents()
+            
+            try {
+                Log-Message "INFO" "Habilitando Recurso LPR..."
+                $proc = Start-Process cmd -ArgumentList "/c title Ativando Recurso LPR (Aguarde...) && dism /online /enable-feature /featurename:Printing-Foundation-LPRPortMonitor /all /norestart" -PassThru
+                while (-not $proc.HasExited) {
+                    [System.Windows.Forms.Application]::DoEvents()
+                    Start-Sleep -Milliseconds 100
+                }
+                if ($proc.ExitCode -ne 0) { throw "Falha no DISM. Codigo: $($proc.ExitCode)" }
+                
+                Log-Message "INFO" "Reiniciando spooler..."
+                Restart-Service -Name Spooler -Force
+                
+                Log-Message "SUCESSO" "Cliente LPR ativado com sucesso!"
+                
+                $colinha = @"
+COLA RÁPIDA - INSTALAR VIA LPR
+===============================
+1. Selecione: 'A impressora que eu quero não está na lista'
+2. Selecione: 'Adicionar uma impressora local ou de rede com configurações manuais'
+3. Selecione: 'Criar uma nova porta' -> Escolha: 'LPR Port'
+4. Digite o IP do PC com a Impressora USB no campo 'Nome ou endereço do servidor' (Ex: 192.168.0.10)
+5. Digite o Nome do Compartilhamento no campo 'Nome da impressora ou fila' (Ex: IMPRESSORA)
+6. Escolha o driver correspondente e conclua.
+"@
+                [System.Windows.Forms.Clipboard]::SetText($colinha)
+                Log-Message "INFO" "Passo a passo de instalação LPR copiado para a Área de Trabalho."
+
+                [System.Windows.Forms.MessageBox]::Show(
+                    $Script:PrinterManagerForm,
+                    "Cliente LPR Ativado com sucesso!`n`nO passo a passo foi copiado para sua Área de Transferência!`n`nAgora clique no botao 'ABRIR ASSISTENTE' para adicionar a impressora no Windows.",
+                    "LPR Configurado", "OK", "Information") | Out-Null
+                
+                Start-Process "rundll32.exe" -ArgumentList "printui.dll,PrintUIEntry /il"
+            }
+            catch {
+                Log-Message "ERRO" "Falha ao configurar Cliente LPR: $_"
+                [System.Windows.Forms.MessageBox]::Show($Script:PrinterManagerForm, "Erro na configuracao do Cliente LPR: $_", "Erro LPR", "OK", "Error") | Out-Null
+            }
+            finally {
+                $btnActClient.Enabled = $true
+                $btnActClient.Text = "ATIVAR MONITOR LPR"
+            }
+        })
+        [void]$pnlClientCard.Controls.Add($btnActClient)
+
+        $btnWizard = New-Object System.Windows.Forms.Button
+        $btnWizard.Text = "ABRIR ASSISTENTE DO WINDOWS"; $btnWizard.Location = '15,180'; $btnWizard.Size = '315,45'
+        $btnWizard.BackColor = [System.Drawing.Color]::FromArgb(0, 120, 215); $btnWizard.FlatStyle = 'Flat'; $btnWizard.Font = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold)
+        $btnWizard.Cursor = 'Hand'; $btnWizard.ForeColor = 'White'; $btnWizard.FlatAppearance.BorderSize = 0
+        $btnWizard.FlatAppearance.MouseOverBackColor = [System.Drawing.Color]::FromArgb(0, 140, 240)
+        $btnWizard.FlatAppearance.MouseDownBackColor = [System.Drawing.Color]::FromArgb(0, 100, 190)
+        $btnWizard.Add_Click({
+            Start-Process "rundll32.exe" -ArgumentList "printui.dll,PrintUIEntry /il"
+            Log-Message "INFO" "Assistente de impressora aberto manualmente."
+        })
+        [void]$pnlClientCard.Controls.Add($btnWizard)
+
+        $txtInstLpr = New-Object System.Windows.Forms.RichTextBox
+        $txtInstLpr.Location = '15,240'; $txtInstLpr.Size = '315,195'
+        $txtInstLpr.ReadOnly = $true; $txtInstLpr.BackColor = [System.Drawing.Color]::FromArgb(25, 25, 30); $txtInstLpr.ForeColor = 'LightYellow'
+        $txtInstLpr.BorderStyle = 'None'; $txtInstLpr.Font = New-Object System.Drawing.Font("Segoe UI", 8.5)
+        $txtInstLpr.Text = "AJUDA DE INSTALAÇÃO (LPR):`n1. Criar nova porta -> LPR Port`n2. Servidor: [IP do PC com o cabo USB]`n3. Nome da fila: [Nome Compartilhado] (ex: IMPRESSORA)`n4. Escolha o driver correspondente."
+        [void]$pnlClientCard.Controls.Add($txtInstLpr)
+
+        $Script:PrinterManagerForm.Add_FormClosing({ $Script:PrinterManagerForm = $null })
+        $Script:PrinterManagerForm.Add_Shown({ $this.ActiveControl = $null })
+        $Script:PrinterManagerForm.ShowDialog($Script:MainForm)
+    }
+    catch {
+        [System.Windows.Forms.MessageBox]::Show("Erro ao abrir Gerenciador de Impressoras: $_", "Erro")
     }
 }
 
@@ -1582,7 +2229,7 @@ $formWidth = if ($screen.Width -lt 1000) { 900 } else { 1000 }
 $formHeight = if ($screen.Height -lt 800) { 700 } else { 800 }
 
 $form = New-Object System.Windows.Forms.Form
-$form.Text = "XMenu System Manager v17.58 - REVENDA"
+$form.Text = "XMenu System Manager v17.59 - REVENDA"
 $form.Size = New-Object System.Drawing.Size($formWidth, $formHeight)
 $form.StartPosition = "CenterScreen"
 $form.BackColor = [System.Drawing.Color]::FromArgb(25, 25, 30); $form.ForeColor = 'White'
@@ -1681,6 +2328,8 @@ $btnIP.BackColor = 'White'; $btnIP.ForeColor = [System.Drawing.Color]::FromArgb(
 $btnIP.FlatStyle = 'Flat'; $btnIP.FlatAppearance.BorderSize = 0; $btnIP.Cursor = [System.Windows.Forms.Cursors]::Hand
 $btnIP.Font = New-Object System.Drawing.Font("Segoe UI", 9.5, [System.Drawing.FontStyle]::Bold)
 $btnIP.Margin = '0,0,0,10'
+$btnIP.FlatAppearance.MouseOverBackColor = [System.Drawing.Color]::FromArgb(240, 240, 240)
+$btnIP.FlatAppearance.MouseDownBackColor = [System.Drawing.Color]::FromArgb(220, 220, 220)
 $btnIP.Add_Click({ Show-IPs })
 [void]$hRight.Controls.Add($btnIP)
 
@@ -1690,6 +2339,8 @@ $btnLinks.BackColor = 'White'; $btnLinks.ForeColor = [System.Drawing.Color]::Fro
 $btnLinks.FlatStyle = 'Flat'; $btnLinks.FlatAppearance.BorderSize = 0; $btnLinks.Cursor = [System.Windows.Forms.Cursors]::Hand
 $btnLinks.Font = New-Object System.Drawing.Font("Segoe UI", 9.5, [System.Drawing.FontStyle]::Bold)
 $btnLinks.Margin = '0,0,0,0'
+$btnLinks.FlatAppearance.MouseOverBackColor = [System.Drawing.Color]::FromArgb(240, 240, 240)
+$btnLinks.FlatAppearance.MouseDownBackColor = [System.Drawing.Color]::FromArgb(220, 220, 220)
 $btnLinks.Add_Click({ 
         $linkMenu.Show($btnLinks, 0, $btnLinks.Height) 
     })
@@ -1738,6 +2389,9 @@ $bCfg = New-Object System.Windows.Forms.Button; $bCfg.Text = "PREPARAR AMBIENTE 
 $bCfg.Dock = 'Fill'; $bCfg.BackColor = [System.Drawing.Color]::FromArgb(0, 120, 215); $bCfg.ForeColor = 'White'
 $bCfg.FlatStyle = 'Flat'; $bCfg.Font = New-Object System.Drawing.Font("Segoe UI", 12, [System.Drawing.FontStyle]::Bold)
 $bCfg.Margin = '0,10,0,10'; $bCfg.Cursor = 'Hand'
+$bCfg.FlatAppearance.BorderSize = 0
+$bCfg.FlatAppearance.MouseOverBackColor = [System.Drawing.Color]::FromArgb(0, 140, 240)
+$bCfg.FlatAppearance.MouseDownBackColor = [System.Drawing.Color]::FromArgb(0, 100, 190)
 
 if ($null -eq $Script:ToolTip) {
     $Script:ToolTip = New-Object System.Windows.Forms.ToolTip
@@ -1767,18 +2421,33 @@ function Add-Title {
 function Add-Btn {
     param($T, $D, $U, $F, $Sel = $false, $Type = "", $Color = $null, $Help = "") 
     $b = New-Object System.Windows.Forms.Button; $b.Height = 60; $b.Dock = 'Top'
-    $b.BackColor = if ($Color) { $Color } else { [System.Drawing.Color]::FromArgb(30, 45, 75) }
     $b.ForeColor = 'WhiteSmoke'
-    $b.FlatStyle = 'Flat'; $b.TextAlign = 'MiddleLeft'; $b.Padding = '10,0,0,0'; $b.Margin = '5'
+    $b.FlatStyle = 'Flat'
+    $b.TextAlign = 'MiddleLeft'; $b.Padding = '10,0,0,0'; $b.Margin = '5'
     $b.Text = $T; $b.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
     $b.Cursor = 'Hand'
+    $b.FlatAppearance.BorderSize = 0
+
+    $baseColor = if ($Color) { $Color } else { [System.Drawing.Color]::FromArgb(30, 45, 75) }
+    $b.BackColor = $baseColor
+    
+    # Hover: mais claro
+    $r = [Math]::Min(255, $baseColor.R + 20)
+    $g = [Math]::Min(255, $baseColor.G + 20)
+    $bl = [Math]::Min(255, $baseColor.B + 20)
+    $b.FlatAppearance.MouseOverBackColor = [System.Drawing.Color]::FromArgb($r, $g, $bl)
+    
+    # Clique: mais escuro
+    $rD = [Math]::Max(0, $baseColor.R - 15)
+    $gD = [Math]::Max(0, $baseColor.G - 15)
+    $blD = [Math]::Max(0, $baseColor.B - 15)
+    $b.FlatAppearance.MouseDownBackColor = [System.Drawing.Color]::FromArgb($rD, $gD, $blD)
 
     if ($Help -ne "") {
         $Script:ToolTip.SetToolTip($b, $Help)
     }
 
     if ($Sel) { 
-        $b.BackColor = [System.Drawing.Color]::FromArgb(30, 45, 75)
         $b.Tag = $Type; $b.Add_Click({ Open-Selector $this.Tag $this })
     }
     else {
@@ -1796,7 +2465,9 @@ Add-Btn "SQL Server 2019 (Instalador)" "" "https://www.netcontroll.com.br/util/i
 
 $bSqlMan = New-Object System.Windows.Forms.Button; $bSqlMan.Height = 60; $bSqlMan.Dock = 'Top'
 $bSqlMan.BackColor = [System.Drawing.Color]::FromArgb(30, 45, 75); $bSqlMan.ForeColor = 'WhiteSmoke'
-$bSqlMan.FlatStyle = 'Flat'; $bSqlMan.TextAlign = 'MiddleLeft'; $bSqlMan.Padding = '10,0,0,0'; $bSqlMan.Margin = '5'
+$bSqlMan.FlatStyle = 'Flat'; $bSqlMan.FlatAppearance.BorderSize = 0; $bSqlMan.TextAlign = 'MiddleLeft'; $bSqlMan.Padding = '10,0,0,0'; $bSqlMan.Margin = '5'
+$bSqlMan.FlatAppearance.MouseOverBackColor = [System.Drawing.Color]::FromArgb(50, 65, 95)
+$bSqlMan.FlatAppearance.MouseDownBackColor = [System.Drawing.Color]::FromArgb(15, 30, 60)
 $bSqlMan.Text = "SQL 2019 + SSMS (Manual)"; $bSqlMan.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
 $bSqlMan.Cursor = 'Hand'
 $Script:ToolTip.SetToolTip($bSqlMan, "Baixa o instalador do SQL 2019 e a ferramenta de gerenciamento SSMS separadamente.")
@@ -1820,7 +2491,9 @@ Add-Btn "TecnoSpeed NFCe (11.1.7.27)" "" "https://netcontroll.com.br/util/instal
 
 $bVspe = New-Object System.Windows.Forms.Button; $bVspe.Height = 60; $bVspe.Dock = 'Top'
 $bVspe.BackColor = [System.Drawing.Color]::FromArgb(30, 45, 75); $bVspe.ForeColor = 'WhiteSmoke'
-$bVspe.FlatStyle = 'Flat'; $bVspe.TextAlign = 'MiddleLeft'; $bVspe.Padding = '10,0,0,0'; $bVspe.Margin = '5'
+$bVspe.FlatStyle = 'Flat'; $bVspe.FlatAppearance.BorderSize = 0; $bVspe.TextAlign = 'MiddleLeft'; $bVspe.Padding = '10,0,0,0'; $bVspe.Margin = '5'
+$bVspe.FlatAppearance.MouseOverBackColor = [System.Drawing.Color]::FromArgb(50, 65, 95)
+$bVspe.FlatAppearance.MouseDownBackColor = [System.Drawing.Color]::FromArgb(15, 30, 60)
 $bVspe.Text = "VSPE + Epson Virtual Port"; $bVspe.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
 $bVspe.Cursor = 'Hand'
 $Script:ToolTip.SetToolTip($bVspe, "Instala o emulador de porta serial VSPE e os drivers de porta virtual da Epson.")
@@ -1832,105 +2505,139 @@ Add-Btn "AnyDesk" "" "https://download.anydesk.com/AnyDesk.exe" "AnyDesk.exe" -H
 Add-Btn "Google Chrome" "" "https://github.com/VMazza10/Preparador-de-Ambiente-XMenu/releases/download/Chrome/ChromeSetup.exe" "ChromeSetup.exe" -Help "Instalador online do navegador Google Chrome."
 Add-Btn "Revo Uninstaller" "" "https://download.revouninstaller.com/download/revosetup.exe" "revosetup.exe" -Help "Utilitário para desinstalação completa de programas e limpeza de restos."
 Add-Btn "TEF HUB Windows" "" "https://github.com/VMazza10/Preparador-de-Ambiente-XMenu/releases/download/Chrome/TEF.HUB.WINDOWS.exe" "TefHub_Windows.exe" -Help "Instalador Tefhub Windows."
+Add-Btn "Advanced IP Scanner" "" "https://download.advanced-ip-scanner.com/download/files/Advanced_IP_Scanner_2.5.4594.1.exe" "Advanced_IP_Scanner.exe" -Help "Ferramenta de varredura de rede local Advanced IP Scanner."
+Add-Btn "Balança Teste" "" "https://github.com/VMazza10/Preparador-de-Ambiente-XMenu/releases/download/Chrome/BalancaTeste.exe" "BalancaTeste.exe" -Help "Aplicativo para testar o funcionamento e comunicação da balança."
 
 $colorDiag = [System.Drawing.Color]::FromArgb(30, 80, 30)
 $colorFix = [System.Drawing.Color]::FromArgb(100, 30, 30)
 
+function Format-SupportBtn {
+    param($Button, $Color)
+    $Button.FlatStyle = 'Flat'
+    $Button.FlatAppearance.BorderSize = 0
+    $Button.BackColor = $Color
+    $Button.ForeColor = 'WhiteSmoke'
+    $Button.TextAlign = 'MiddleLeft'
+    $Button.Padding = '10,0,0,0'
+    $Button.Margin = '5'
+    
+    # Hover: mais claro
+    $r = [Math]::Min(255, $Color.R + 20)
+    $g = [Math]::Min(255, $Color.G + 20)
+    $bl = [Math]::Min(255, $Color.B + 20)
+    $Button.FlatAppearance.MouseOverBackColor = [System.Drawing.Color]::FromArgb($r, $g, $bl)
+    
+    # Clique: mais escuro
+    $rD = [Math]::Max(0, $Color.R - 15)
+    $gD = [Math]::Max(0, $Color.G - 15)
+    $blD = [Math]::Max(0, $Color.B - 15)
+    $Button.FlatAppearance.MouseDownBackColor = [System.Drawing.Color]::FromArgb($rD, $gD, $blD)
+}
+
 Add-Title "SUPORTE E DIAGNÓSTICO"
+
+# --- IMPRESSORAS E REDE (AZUL ESCURO / CINZA) ---
+$colorGray = [System.Drawing.Color]::FromArgb(50, 55, 60)
+$colorCyan = [System.Drawing.Color]::FromArgb(25, 75, 95)
+
+$bPrintMgr = New-Object System.Windows.Forms.Button; $bPrintMgr.Height = 50; $bPrintMgr.Dock = 'Top'
+$bPrintMgr.Text = "Gerenciador de Impressoras (LPR/LPD)"; $bPrintMgr.Font = New-Object System.Drawing.Font("Segoe UI", 11, [System.Drawing.FontStyle]::Bold)
+$bPrintMgr.Cursor = 'Hand'
+Format-SupportBtn $bPrintMgr $colorCyan
+$Script:ToolTip.SetToolTip($bPrintMgr, "Gerencia impressoras locais, compartilhamentos e configura rede via protocolo LPR/LPD para corrigir erros no Windows 11.")
+$bPrintMgr.Add_Click({ Show-PrinterManager })
+[void]$tbl.Controls.Add($bPrintMgr)
+# Placeholder vazio na coluna direita (reservado para botão futuro)
+$lblPrintPlaceholder = New-Object System.Windows.Forms.Label; $lblPrintPlaceholder.Text = ""; $lblPrintPlaceholder.Dock = 'Fill'
+[void]$tbl.Controls.Add($lblPrintPlaceholder)
+
 # --- DIAGNÓSTICOS (VERDE) ---
 $bInfo = New-Object System.Windows.Forms.Button; $bInfo.Height = 50; $bInfo.Dock = 'Top'
-$bInfo.BackColor = $colorDiag; $bInfo.ForeColor = 'WhiteSmoke'
-$bInfo.FlatStyle = 'Flat'; $bInfo.TextAlign = 'MiddleLeft'; $bInfo.Padding = '10,0,0,0'; $bInfo.Margin = '5'
 $bInfo.Text = "Avaliação de Hardware"; $bInfo.Font = New-Object System.Drawing.Font("Segoe UI", 11, [System.Drawing.FontStyle]::Bold)
-$bInfo.Cursor = 'Hand'; 
+$bInfo.Cursor = 'Hand'
+Format-SupportBtn $bInfo $colorDiag
 $Script:ToolTip.SetToolTip($bInfo, "Analisa CPU, RAM e SSD usando WMI (Win32_Processor, Win32_LogicalDisk) e compara com requisitos XMenu.")
 $bInfo.Add_Click({ Show-SystemInfo })
 [void]$tbl.Controls.Add($bInfo)
 
 $bScan = New-Object System.Windows.Forms.Button; $bScan.Height = 50; $bScan.Dock = 'Top'
-$bScan.BackColor = $colorDiag; $bScan.ForeColor = 'WhiteSmoke'
-$bScan.FlatStyle = 'Flat'; $bScan.TextAlign = 'MiddleLeft'; $bScan.Padding = '10,0,0,0'; $bScan.Margin = '5'
 $bScan.Text = "Scanner de Impressoras (IP Scan)"; $bScan.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
-$bScan.Cursor = 'Hand'; 
+$bScan.Cursor = 'Hand'
+Format-SupportBtn $bScan $colorDiag
 $Script:ToolTip.SetToolTip($bScan, "Executa 'arp -a' e varredura de sockets (TCP 9100, 515, 631) para identificar impressoras e IPs na rede.")
 $bScan.Add_Click({ Show-PrinterScanner })
 [void]$tbl.Controls.Add($bScan)
 
 $bPingT = New-Object System.Windows.Forms.Button; $bPingT.Height = 50; $bPingT.Dock = 'Top'
-$bPingT.BackColor = $colorDiag; $bPingT.ForeColor = 'WhiteSmoke'
-$bPingT.FlatStyle = 'Flat'; $bPingT.TextAlign = 'MiddleLeft'; $bPingT.Padding = '10,0,0,0'; $bPingT.Margin = '5'
 $bPingT.Text = "Teste de Ping Contínuo (com Log)"; $bPingT.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
-$bPingT.Cursor = 'Hand'; 
+$bPingT.Cursor = 'Hand'
+Format-SupportBtn $bPingT $colorDiag
 $Script:ToolTip.SetToolTip($bPingT, "Executa 'Test-Connection' continuamente para o IP alvo, permitindo monitorar perdas de pacotes com log local.")
 $bPingT.Add_Click({ Show-PingTester })
 [void]$tbl.Controls.Add($bPingT)
 
 $bRes = New-Object System.Windows.Forms.Button; $bRes.Height = 50; $bRes.Dock = 'Top'
-$bRes.BackColor = $colorDiag; $bRes.ForeColor = 'WhiteSmoke'
-$bRes.FlatStyle = 'Flat'; $bRes.TextAlign = 'MiddleLeft'; $bRes.Padding = '10,0,0,0'; $bRes.Margin = '5'
 $bRes.Text = "Monitorar CPU e RAM"; $bRes.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
-$bRes.Cursor = 'Hand'; 
+$bRes.Cursor = 'Hand'
+Format-SupportBtn $bRes $colorDiag
 $Script:ToolTip.SetToolTip($bRes, "Utiliza 'Get-Process' para listar os 5 processos com maior consumo de CPU e Memória RAM em tempo real.")
 $bRes.Add_Click({ Show-ResourceMonitor })
 [void]$tbl.Controls.Add($bRes)
 
 # --- REPAROS E RESETS (VERMELHO) ---
 $bSfc = New-Object System.Windows.Forms.Button; $bSfc.Height = 50; $bSfc.Dock = 'Top'
-$bSfc.BackColor = $colorFix; $bSfc.ForeColor = 'WhiteSmoke'
-$bSfc.FlatStyle = 'Flat'; $bSfc.TextAlign = 'MiddleLeft'; $bSfc.Padding = '10,0,0,0'; $bSfc.Margin = '5'
 $bSfc.Text = "SFC /Scannow (Reparar Sistema)"; $bSfc.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
-$bSfc.Cursor = 'Hand'; 
+$bSfc.Cursor = 'Hand'
+Format-SupportBtn $bSfc $colorFix
 $Script:ToolTip.SetToolTip($bSfc, "Executa o comando 'sfc /scannow' em uma nova janela para verificar e reparar arquivos corrompidos da instalação do Windows.")
 $bSfc.Add_Click({ Invoke-SFC })
 [void]$tbl.Controls.Add($bSfc)
 
 $bDism = New-Object System.Windows.Forms.Button; $bDism.Height = 50; $bDism.Dock = 'Top'
-$bDism.BackColor = $colorFix; $bDism.ForeColor = 'WhiteSmoke'
-$bDism.FlatStyle = 'Flat'; $bDism.TextAlign = 'MiddleLeft'; $bDism.Padding = '10,0,0,0'; $bDism.Margin = '5'
 $bDism.Text = "Reparar Imagem (DISM)"; $bDism.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
-$bDism.Cursor = 'Hand'; 
+$bDism.Cursor = 'Hand'
+Format-SupportBtn $bDism $colorFix
 $Script:ToolTip.SetToolTip($bDism, "Executa 'dism /online /cleanup-image /restorehealth' para corrigir erros profundos na imagem do sistema operacional.")
 $bDism.Add_Click({ Invoke-DISM })
 [void]$tbl.Controls.Add($bDism)
 
 $bClean = New-Object System.Windows.Forms.Button; $bClean.Height = 50; $bClean.Dock = 'Top'
-$bClean.BackColor = $colorFix; $bClean.ForeColor = 'WhiteSmoke'
-$bClean.FlatStyle = 'Flat'; $bClean.TextAlign = 'MiddleLeft'; $bClean.Padding = '10,0,0,0'; $bClean.Margin = '5'
 $bClean.Text = "Limpeza de Disco Profunda"; $bClean.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
-$bClean.Cursor = 'Hand'; 
+$bClean.Cursor = 'Hand'
+Format-SupportBtn $bClean $colorFix
 $Script:ToolTip.SetToolTip($bClean, "Limpa pastas TEMP, Prefetch, Logs do Windows e executa 'cleanmgr.exe /sagerun:1' para liberar espaço em disco.")
 $bClean.Add_Click({ Invoke-DeepClean })
 [void]$tbl.Controls.Add($bClean)
 
 $bWinUp = New-Object System.Windows.Forms.Button; $bWinUp.Height = 50; $bWinUp.Dock = 'Top'
-$bWinUp.BackColor = $colorFix; $bWinUp.ForeColor = 'WhiteSmoke'
-$bWinUp.FlatStyle = 'Flat'; $bWinUp.TextAlign = 'MiddleLeft'; $bWinUp.Padding = '10,0,0,0'; $bWinUp.Margin = '5'
 $bWinUp.Text = "Reparar Windows Update"; $bWinUp.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
-$bWinUp.Cursor = 'Hand'; 
+$bWinUp.Cursor = 'Hand'
+Format-SupportBtn $bWinUp $colorFix
 $Script:ToolTip.SetToolTip($bWinUp, "Interrompe wuauserv/bits, limpa a pasta SoftwareDistribution e reinicia os serviços de atualização.")
 $bWinUp.Add_Click({ Invoke-WindowsUpdateReset })
 [void]$tbl.Controls.Add($bWinUp)
 
 $bSpool = New-Object System.Windows.Forms.Button; $bSpool.Height = 50; $bSpool.Dock = 'Top'
-$bSpool.BackColor = [System.Drawing.Color]::FromArgb(50, 55, 60); $bSpool.ForeColor = 'WhiteSmoke'
-$bSpool.FlatStyle = 'Flat'; $bSpool.TextAlign = 'MiddleLeft'; $bSpool.Padding = '10,0,0,0'; $bSpool.Margin = '5'
 $bSpool.Text = "Reiniciar Spooler de Impressão"; $bSpool.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
-$bSpool.Cursor = 'Hand'; 
+$bSpool.Cursor = 'Hand'
+Format-SupportBtn $bSpool $colorGray
 $Script:ToolTip.SetToolTip($bSpool, "Comando 'Stop-Service Spooler', deleta conteúdo de C:\Windows\System32\spool\PRINTERS\* e reinicia o serviço.")
 $bSpool.Add_Click({ Invoke-SpoolerReset })
 [void]$tbl.Controls.Add($bSpool)
 
 $bNetR = New-Object System.Windows.Forms.Button; $bNetR.Height = 50; $bNetR.Dock = 'Top'
-$bNetR.BackColor = [System.Drawing.Color]::FromArgb(50, 55, 60); $bNetR.ForeColor = 'WhiteSmoke'
-$bNetR.FlatStyle = 'Flat'; $bNetR.TextAlign = 'MiddleLeft'; $bNetR.Padding = '10,0,0,0'; $bNetR.Margin = '5'
 $bNetR.Text = "Reset de Rede e DNS"; $bNetR.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
-$bNetR.Cursor = 'Hand'; 
+$bNetR.Cursor = 'Hand'
+Format-SupportBtn $bNetR $colorGray
 $Script:ToolTip.SetToolTip($bNetR, "Executa 'ipconfig /flushdns', 'netsh winsock reset' e 'netsh int ip reset' para restaurar toda a pilha de rede.")
 $bNetR.Add_Click({ Invoke-NetworkReset })
 [void]$tbl.Controls.Add($bNetR)
 
-Log-Message "INFO" "XMenu System Manager v17.58 - REVENDA"
+Log-Message "INFO" "XMenu System Manager v17.59 - REVENDA"
 Log-Message "LOG" "==============================================================="
+Log-Message "SUCESSO" "[NOVIDADE] Nova aba 'Drivers de Impressoras' no Gerenciador!"
+Log-Message "SUCESSO" "           - Download direto de drivers e utilitários de configuração."
+Log-Message "LOG" "---------------------------------------------------------------"
 Log-Message "LOG" "Este utilitário automatiza a configuração de ambientes XMenu,"
 Log-Message "LOG" "garantindo que o Windows esteja otimizado para máxima performance."
 Log-Message "LOG" ""
@@ -1940,4 +2647,6 @@ Log-Message "INFO" "[3] DIAGNÓSTICO: Auditoria de Hardware e Scanner de Rede Pr
 Log-Message "INFO" "[4] MANUTENÇÃO: Reparos de Rede, Spooler e do Sistema Windows."
 Log-Message "LOG" "==============================================================="
 Log-Message "SUCESSO" "Sistema pronto para suporte técnico."
+
+$form.Add_Shown({ $this.ActiveControl = $null })
 [void]$form.ShowDialog()
