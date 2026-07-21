@@ -53,6 +53,51 @@ $code = '[DllImport("user32.dll", CharSet=CharSet.Auto)] public static extern in
 Add-Type -MemberDefinition $code -Name "WinAPI" -Namespace "XMenuTools"
 
 # -----------------------------------------------------------------------------
+# TELA DE CARREGAMENTO (SPLASH) - aparece na hora enquanto a janela principal e montada
+# -----------------------------------------------------------------------------
+$splash = New-Object System.Windows.Forms.Form
+$splash.Size = New-Object System.Drawing.Size(420, 170)
+$splash.StartPosition = 'CenterScreen'
+$splash.FormBorderStyle = 'None'
+$splash.BackColor = [System.Drawing.Color]::FromArgb(0, 120, 215)
+$splash.TopMost = $true
+$splash.ShowInTaskbar = $false
+
+$splashTitle = New-Object System.Windows.Forms.Label
+$splashTitle.Text = "XMenu System Manager"
+$splashTitle.Font = New-Object System.Drawing.Font("Segoe UI", 16, [System.Drawing.FontStyle]::Bold)
+$splashTitle.ForeColor = 'White'
+$splashTitle.AutoSize = $true
+$splashTitle.Location = '30,30'
+[void]$splash.Controls.Add($splashTitle)
+
+$Script:SplashStatus = New-Object System.Windows.Forms.Label
+$Script:SplashStatus.Text = "Iniciando..."
+$Script:SplashStatus.Font = New-Object System.Drawing.Font("Segoe UI", 9.5)
+$Script:SplashStatus.ForeColor = [System.Drawing.Color]::WhiteSmoke
+$Script:SplashStatus.AutoSize = $true
+$Script:SplashStatus.Location = '32,80'
+[void]$splash.Controls.Add($Script:SplashStatus)
+
+$splashBar = New-Object System.Windows.Forms.ProgressBar
+$splashBar.Style = 'Marquee'
+$splashBar.MarqueeAnimationSpeed = 30
+$splashBar.Location = '30,115'
+$splashBar.Size = New-Object System.Drawing.Size(360, 8)
+[void]$splash.Controls.Add($splashBar)
+
+function Set-SplashStatus {
+    param($Text)
+    $Script:SplashStatus.Text = $Text
+    $splash.Refresh()
+    [System.Windows.Forms.Application]::DoEvents()
+}
+
+$splash.Show()
+$splash.Refresh()
+[System.Windows.Forms.Application]::DoEvents()
+
+# -----------------------------------------------------------------------------
 # 3. FUNCOES UTILITARIAS E LOGS
 # -----------------------------------------------------------------------------
 
@@ -2300,6 +2345,7 @@ function Run-Config {
 # -----------------------------------------------------------------------------
 # 6. UI WINDOWS FORMS
 # -----------------------------------------------------------------------------
+Set-SplashStatus "Montando interface..."
 $screen = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
 $formWidth = if ($screen.Width -lt 1200) { $screen.Width - 50 } else { 1200 }
 $formHeight = if ($screen.Height -lt 900) { $screen.Height - 50 } else { 900 }
@@ -2347,22 +2393,41 @@ $lS.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontSt
 $lS.Location = '5,60'
 [void]$hLeft.Controls.Add($lS)
 
+Set-SplashStatus "Coletando informações do sistema..."
+$os = Get-CimInstance Win32_OperatingSystem
+$cpu = Get-CimInstance Win32_Processor | Select-Object -First 1
+$ram = Get-CimInstance Win32_ComputerSystem
+$disk = Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='C:'"
+$gpu = Get-CimInstance Win32_VideoController | Select-Object -First 1
+$gpuName = if ($gpu) { $gpu.Name } else { "N/A" }
+
+$localIP = (Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object { $_.IPAddress -notmatch '^127\.|^169\.254\.' } | Select-Object -First 1).IPAddress
+if (-not $localIP) { $localIP = "Offline" }
+
+$diskType = "Disco"
+try {
+    $physDisk = Get-PhysicalDisk -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($physDisk.MediaType -match 'SSD') { $diskType = "SSD" }
+    elseif ($physDisk.MediaType -match 'HDD') { $diskType = "HD" }
+}
+catch {}
+
 $lHw1 = New-Object System.Windows.Forms.Label
-$lHw1.Text = "[ Host: $env:COMPUTERNAME   |   IP Local: ...   |   Usuario: $env:USERNAME ]"
+$lHw1.Text = "[ Host: $env:COMPUTERNAME   |   IP Local: $localIP   |   Usuario: $env:USERNAME ]"
 $lHw1.AutoSize = $true; $lHw1.ForeColor = [System.Drawing.Color]::WhiteSmoke
 $lHw1.Font = New-Object System.Drawing.Font("Consolas", 10.5, [System.Drawing.FontStyle]::Bold)
 $lHw1.Location = '5,105'
 [void]$hLeft.Controls.Add($lHw1)
 
 $lHw2 = New-Object System.Windows.Forms.Label
-$lHw2.Text = "Carregando informações do sistema..."
+$lHw2.Text = "Sistema: $($os.Caption -replace 'Microsoft ','')   |   CPU: $($cpu.Name.Trim())"
 $lHw2.AutoSize = $true; $lHw2.ForeColor = [System.Drawing.Color]::WhiteSmoke
 $lHw2.Font = New-Object System.Drawing.Font("Consolas", 10.5, [System.Drawing.FontStyle]::Bold)
 $lHw2.Location = '5,125'
 [void]$hLeft.Controls.Add($lHw2)
 
 $lHw3 = New-Object System.Windows.Forms.Label
-$lHw3.Text = ""
+$lHw3.Text = "RAM: $([Math]::Round($ram.TotalPhysicalMemory / 1GB)) GB   |   $diskType (C:): $([Math]::Round($disk.Size / 1GB)) GB   |   Video: $gpuName"
 $lHw3.AutoSize = $true; $lHw3.ForeColor = [System.Drawing.Color]::WhiteSmoke
 $lHw3.Font = New-Object System.Drawing.Font("Consolas", 10.5, [System.Drawing.FontStyle]::Bold)
 $lHw3.Location = '5,145'
@@ -2709,32 +2774,8 @@ Log-Message "LOG" "=============================================================
 Log-Message "SUCESSO" "Sistema pronto para suporte técnico."
 
 $form.Add_Shown({ $this.ActiveControl = $null })
-$form.Add_Shown({
-    $this.Refresh()
-    [System.Windows.Forms.Application]::DoEvents()
-    try {
-        $os = Get-CimInstance Win32_OperatingSystem
-        $cpu = Get-CimInstance Win32_Processor | Select-Object -First 1
-        $ram = Get-CimInstance Win32_ComputerSystem
-        $disk = Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='C:'"
-        $gpu = Get-CimInstance Win32_VideoController | Select-Object -First 1
-        $gpuName = if ($gpu) { $gpu.Name } else { "N/A" }
 
-        $localIP = (Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object { $_.IPAddress -notmatch '^127\.|^169\.254\.' } | Select-Object -First 1).IPAddress
-        if (-not $localIP) { $localIP = "Offline" }
-
-        $diskType = "Disco"
-        try {
-            $physDisk = Get-PhysicalDisk -ErrorAction SilentlyContinue | Select-Object -First 1
-            if ($physDisk.MediaType -match 'SSD') { $diskType = "SSD" }
-            elseif ($physDisk.MediaType -match 'HDD') { $diskType = "HD" }
-        }
-        catch {}
-
-        $lHw1.Text = "[ Host: $env:COMPUTERNAME   |   IP Local: $localIP   |   Usuario: $env:USERNAME ]"
-        $lHw2.Text = "Sistema: $($os.Caption -replace 'Microsoft ','')   |   CPU: $($cpu.Name.Trim())"
-        $lHw3.Text = "RAM: $([Math]::Round($ram.TotalPhysicalMemory / 1GB)) GB   |   $diskType (C:): $([Math]::Round($disk.Size / 1GB)) GB   |   Video: $gpuName"
-    }
-    catch {}
-})
+Set-SplashStatus "Pronto!"
+$splash.Close()
+$splash.Dispose()
 [void]$form.ShowDialog()
