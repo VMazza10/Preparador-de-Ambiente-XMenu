@@ -2347,40 +2347,22 @@ $lS.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontSt
 $lS.Location = '5,60'
 [void]$hLeft.Controls.Add($lS)
 
-$os = Get-CimInstance Win32_OperatingSystem
-$cpu = Get-CimInstance Win32_Processor | Select-Object -First 1
-$ram = Get-CimInstance Win32_ComputerSystem
-$disk = Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='C:'"
-$gpu = Get-CimInstance Win32_VideoController | Select-Object -First 1
-$gpuName = if ($gpu) { $gpu.Name } else { "N/A" }
-
-$localIP = (Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object { $_.IPAddress -notmatch '^127\.|^169\.254\.' } | Select-Object -First 1).IPAddress
-if (-not $localIP) { $localIP = "Offline" }
-
-$diskType = "Disco"
-try {
-    $physDisk = Get-PhysicalDisk -ErrorAction SilentlyContinue | Select-Object -First 1
-    if ($physDisk.MediaType -match 'SSD') { $diskType = "SSD" }
-    elseif ($physDisk.MediaType -match 'HDD') { $diskType = "HD" }
-}
-catch {}
-
 $lHw1 = New-Object System.Windows.Forms.Label
-$lHw1.Text = "[ Host: $env:COMPUTERNAME   |   IP Local: $localIP   |   Usuario: $env:USERNAME ]"
+$lHw1.Text = "[ Host: $env:COMPUTERNAME   |   IP Local: ...   |   Usuario: $env:USERNAME ]"
 $lHw1.AutoSize = $true; $lHw1.ForeColor = [System.Drawing.Color]::WhiteSmoke
 $lHw1.Font = New-Object System.Drawing.Font("Consolas", 10.5, [System.Drawing.FontStyle]::Bold)
 $lHw1.Location = '5,105'
 [void]$hLeft.Controls.Add($lHw1)
 
 $lHw2 = New-Object System.Windows.Forms.Label
-$lHw2.Text = "Sistema: $($os.Caption -replace 'Microsoft ','')   |   CPU: $($cpu.Name.Trim())"
+$lHw2.Text = "Carregando informações do sistema..."
 $lHw2.AutoSize = $true; $lHw2.ForeColor = [System.Drawing.Color]::WhiteSmoke
 $lHw2.Font = New-Object System.Drawing.Font("Consolas", 10.5, [System.Drawing.FontStyle]::Bold)
 $lHw2.Location = '5,125'
 [void]$hLeft.Controls.Add($lHw2)
 
 $lHw3 = New-Object System.Windows.Forms.Label
-$lHw3.Text = "RAM: $([Math]::Round($ram.TotalPhysicalMemory / 1GB)) GB   |   $diskType (C:): $([Math]::Round($disk.Size / 1GB)) GB   |   Video: $gpuName"
+$lHw3.Text = ""
 $lHw3.AutoSize = $true; $lHw3.ForeColor = [System.Drawing.Color]::WhiteSmoke
 $lHw3.Font = New-Object System.Drawing.Font("Consolas", 10.5, [System.Drawing.FontStyle]::Bold)
 $lHw3.Location = '5,145'
@@ -2727,4 +2709,30 @@ Log-Message "LOG" "=============================================================
 Log-Message "SUCESSO" "Sistema pronto para suporte técnico."
 
 $form.Add_Shown({ $this.ActiveControl = $null })
+$form.Add_Shown({
+    try {
+        $os = Get-CimInstance Win32_OperatingSystem
+        $cpu = Get-CimInstance Win32_Processor | Select-Object -First 1
+        $ram = Get-CimInstance Win32_ComputerSystem
+        $disk = Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='C:'"
+        $gpu = Get-CimInstance Win32_VideoController | Select-Object -First 1
+        $gpuName = if ($gpu) { $gpu.Name } else { "N/A" }
+
+        $localIP = (Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object { $_.IPAddress -notmatch '^127\.|^169\.254\.' } | Select-Object -First 1).IPAddress
+        if (-not $localIP) { $localIP = "Offline" }
+
+        $diskType = "Disco"
+        try {
+            $physDisk = Get-PhysicalDisk -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($physDisk.MediaType -match 'SSD') { $diskType = "SSD" }
+            elseif ($physDisk.MediaType -match 'HDD') { $diskType = "HD" }
+        }
+        catch {}
+
+        $lHw1.Text = "[ Host: $env:COMPUTERNAME   |   IP Local: $localIP   |   Usuario: $env:USERNAME ]"
+        $lHw2.Text = "Sistema: $($os.Caption -replace 'Microsoft ','')   |   CPU: $($cpu.Name.Trim())"
+        $lHw3.Text = "RAM: $([Math]::Round($ram.TotalPhysicalMemory / 1GB)) GB   |   $diskType (C:): $([Math]::Round($disk.Size / 1GB)) GB   |   Video: $gpuName"
+    }
+    catch {}
+})
 [void]$form.ShowDialog()
