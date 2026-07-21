@@ -1427,6 +1427,33 @@ function Show-PingTester {
 }
 
 # -----------------------------------------------------------------------------
+# 3.45 FECHAR CONCENTRADOR E NETSTART (usado antes de instalar o TecnoSpeed)
+# -----------------------------------------------------------------------------
+function Close-NetControllSystem {
+    Log-Message "INFO" "Fechando Concentrador e NetStart..."
+    $closed = @()
+
+    foreach ($name in @("Concentrador", "NetStart")) {
+        Get-Process -Name $name -ErrorAction SilentlyContinue | ForEach-Object {
+            try {
+                Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue
+                $closed += $_.ProcessName
+            }
+            catch {}
+        }
+    }
+
+    $closed = $closed | Select-Object -Unique
+    if ($closed.Count -gt 0) {
+        Log-Message "SUCESSO" "Programas fechados: $($closed -join ', ')"
+    }
+    else {
+        Log-Message "INFO" "Concentrador/NetStart nao estavam abertos."
+    }
+    Wait-UI 0.5
+}
+
+# -----------------------------------------------------------------------------
 # 3.5 DEPLOY COM BACKUP AUTOMATICO (PDV / LinkXMenu)
 # -----------------------------------------------------------------------------
 function Deploy-WithBackup {
@@ -2593,7 +2620,20 @@ Add-Btn "Cardápio Tablet (ZIP)" "" "" "" $true "Tablet" -Help "Versões compact
 Add-Btn "Totem Auto-Atendimento (ZIP)" "" "" "" $true "Totem" -Help "Versões compactadas para o sistema de Totem (Auto-atendimento)."
 
 Add-Title "EXTERNOS"
-Add-Btn "TecnoSpeed NFCe (11.1.7.27)" "" "https://netcontroll.com.br/util/instaladores/NFCE/11.1.7.27/InstaladorNFCe.exe" "InstaladorNFCe.exe" -Help "Instalador do componente TecnoSpeed para NFC-e."
+
+$bTecno = New-Object System.Windows.Forms.Button; $bTecno.Height = 50; $bTecno.Dock = 'Top'
+$bTecno.BackColor = $colorBlue; $bTecno.ForeColor = 'WhiteSmoke'
+$bTecno.FlatStyle = 'Flat'; $bTecno.FlatAppearance.BorderSize = 0; $bTecno.TextAlign = 'MiddleLeft'; $bTecno.Padding = '10,0,0,0'; $bTecno.Margin = '5'
+$bTecno.FlatAppearance.MouseOverBackColor = [System.Drawing.Color]::FromArgb(50, 65, 95)
+$bTecno.FlatAppearance.MouseDownBackColor = [System.Drawing.Color]::FromArgb(15, 30, 60)
+$bTecno.Text = "TecnoSpeed NFCe (11.1.7.27)"; $bTecno.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
+$bTecno.Cursor = 'Hand'
+$Script:ToolTip.SetToolTip($bTecno, "Fecha todo o sistema NetControll (NetPDV, LinkXMenu, XMenu, Concentrador, XBot, XTag) e instala o componente TecnoSpeed para NFC-e.")
+$bTecno.Add_Click({
+        Close-NetControllSystem
+        Start-Download "https://netcontroll.com.br/util/instaladores/NFCE/11.1.7.27/InstaladorNFCe.exe" "InstaladorNFCe.exe" $this
+    })
+[void]$tbl.Controls.Add($bTecno)
 
 $bVspe = New-Object System.Windows.Forms.Button; $bVspe.Height = 50; $bVspe.Dock = 'Top'
 $bVspe.BackColor = [System.Drawing.Color]::FromArgb(30, 45, 75); $bVspe.ForeColor = 'WhiteSmoke'
