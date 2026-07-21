@@ -1004,14 +1004,31 @@ function Show-PrinterManager {
                             Set-ItemProperty -Path $rpcPath -Name $pipeName -Value 1 | Out-Null
                         }
                         
+                        # --- LIBERAR FIREWALL (Compartilhamento de Arquivo e Impressora) ---
+                        # Usa o ID interno do grupo (independe do idioma do Windows)
+                        Log-Message "INFO" "Liberando Firewall para Compartilhamento de Arquivo e Impressora..."
+                        try {
+                            Get-NetFirewallRule -Group "@FirewallAPI.dll,-28502" -ErrorAction SilentlyContinue | Enable-NetFirewallRule -ErrorAction SilentlyContinue
+                        } catch {}
+
                         Log-Message "INFO" "Reiniciando spooler para aplicar registros..."
                         Restart-Service -Name Spooler -Force
-                        Log-Message "SUCESSO" "Registros RPC aplicados e Spooler reiniciado com sucesso!"
-                        
+                        Log-Message "SUCESSO" "Registros RPC aplicados, Firewall liberado e Spooler reiniciado com sucesso!"
+
                         $netPath = "\\$env:COMPUTERNAME\$shareName"
                         [System.Windows.Forms.Clipboard]::SetText($netPath)
                         [System.Windows.Forms.MessageBox]::Show(
-                            "Impressora compartilhada com sucesso e registros aplicados!`n`nCaminho da impressora para o portal:`n$netPath`n`n(Este caminho ja foi copiado para sua Area de Transferencia!)",
+                            "Impressora compartilhada com sucesso e registros aplicados!`n`n" +
+                            "Caminho da impressora para o portal:`n$netPath`n`n" +
+                            "(Este caminho ja foi copiado para sua Area de Transferencia!)`n`n" +
+                            "--------------------------------------------------`n" +
+                            "COMO INSTALAR NO SERVIDOR (ou em outro PC da rede):`n" +
+                            "1. No servidor, abra o Explorador de Arquivos.`n" +
+                            "2. Cole o caminho na barra de endereco: $netPath`n" +
+                            "3. De duplo-clique na impressora que aparecer.`n" +
+                            "4. O Windows vai instalar e adicionar a impressora automaticamente.`n" +
+                            "   (Se pedir driver manualmente, use o mesmo driver instalado nesta maquina.)`n" +
+                            "--------------------------------------------------",
                             "Compartilhada com Sucesso", "OK", "Information") | Out-Null
                         
                         &$LoadPrinters
