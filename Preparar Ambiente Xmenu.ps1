@@ -2710,6 +2710,8 @@ Log-Message "SUCESSO" "Sistema pronto para suporte técnico."
 
 $form.Add_Shown({ $this.ActiveControl = $null })
 $form.Add_Shown({
+    $this.Refresh()
+    [System.Windows.Forms.Application]::DoEvents()
     try {
         $os = Get-CimInstance Win32_OperatingSystem
         $cpu = Get-CimInstance Win32_Processor | Select-Object -First 1
