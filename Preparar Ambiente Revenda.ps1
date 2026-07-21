@@ -53,51 +53,6 @@ $code = '[DllImport("user32.dll", CharSet=CharSet.Auto)] public static extern in
 Add-Type -MemberDefinition $code -Name "WinAPI" -Namespace "XMenuTools"
 
 # -----------------------------------------------------------------------------
-# TELA DE CARREGAMENTO (SPLASH) - aparece na hora enquanto a janela principal e montada
-# -----------------------------------------------------------------------------
-$splash = New-Object System.Windows.Forms.Form
-$splash.Size = New-Object System.Drawing.Size(420, 170)
-$splash.StartPosition = 'CenterScreen'
-$splash.FormBorderStyle = 'None'
-$splash.BackColor = [System.Drawing.Color]::FromArgb(0, 120, 215)
-$splash.TopMost = $true
-$splash.ShowInTaskbar = $false
-
-$splashTitle = New-Object System.Windows.Forms.Label
-$splashTitle.Text = "XMenu System Manager"
-$splashTitle.Font = New-Object System.Drawing.Font("Segoe UI", 16, [System.Drawing.FontStyle]::Bold)
-$splashTitle.ForeColor = 'White'
-$splashTitle.AutoSize = $true
-$splashTitle.Location = '30,30'
-[void]$splash.Controls.Add($splashTitle)
-
-$Script:SplashStatus = New-Object System.Windows.Forms.Label
-$Script:SplashStatus.Text = "Iniciando..."
-$Script:SplashStatus.Font = New-Object System.Drawing.Font("Segoe UI", 9.5)
-$Script:SplashStatus.ForeColor = [System.Drawing.Color]::WhiteSmoke
-$Script:SplashStatus.AutoSize = $true
-$Script:SplashStatus.Location = '32,80'
-[void]$splash.Controls.Add($Script:SplashStatus)
-
-$splashBar = New-Object System.Windows.Forms.ProgressBar
-$splashBar.Style = 'Marquee'
-$splashBar.MarqueeAnimationSpeed = 30
-$splashBar.Location = '30,115'
-$splashBar.Size = New-Object System.Drawing.Size(360, 8)
-[void]$splash.Controls.Add($splashBar)
-
-function Set-SplashStatus {
-    param($Text)
-    $Script:SplashStatus.Text = $Text
-    $splash.Refresh()
-    [System.Windows.Forms.Application]::DoEvents()
-}
-
-$splash.Show()
-$splash.Refresh()
-[System.Windows.Forms.Application]::DoEvents()
-
-# -----------------------------------------------------------------------------
 # 3. FUNCOES UTILITARIAS E LOGS
 # -----------------------------------------------------------------------------
 
@@ -1742,22 +1697,28 @@ function Start-Download {
                         $Button.Text = "Extraido"
                     }
                     Log-Message "SUCESSO" "Extraido com sucesso para: $folderName"
+                    Wait-UI 1.5
+                    $Button.Text = "✔ $originalText"
                 }
                 catch {
                     Log-Message "ERRO" "Falha ao extrair ZIP: $($_.Exception.Message)"
                     $Button.Text = "Erro ZIP"
                     $Button.BackColor = [System.Drawing.Color]::Salmon
                 }
-                
+
             }
             elseif ($FileName.EndsWith(".rar")) {
                 $Button.Text = "Baixado (RAR)"
                 Invoke-Item $destPath
+                Wait-UI 1.5
+                $Button.Text = "✔ $originalText"
             }
             else {
                 Log-Message "EXEC" "Executando instalador..."
                 Start-Process $destPath
                 $Button.Text = "Executado"
+                Wait-UI 1.5
+                $Button.Text = "✔ $originalText"
             }
         }
         else {
@@ -2291,7 +2252,6 @@ function Run-Config {
 # -----------------------------------------------------------------------------
 # 6. UI WINDOWS FORMS
 # -----------------------------------------------------------------------------
-Set-SplashStatus "Montando interface..."
 $screen = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
 $formWidth = if ($screen.Width -lt 1000) { 900 } else { 1000 }
 $formHeight = if ($screen.Height -lt 800) { 700 } else { 800 }
@@ -2339,7 +2299,6 @@ $lS.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontSt
 $lS.Location = '5,60'
 [void]$hLeft.Controls.Add($lS)
 
-Set-SplashStatus "Coletando informações do sistema..."
 $os = Get-CimInstance Win32_OperatingSystem
 $cpu = Get-CimInstance Win32_Processor | Select-Object -First 1
 $ram = Get-CimInstance Win32_ComputerSystem
@@ -2719,8 +2678,4 @@ Log-Message "LOG" "=============================================================
 Log-Message "SUCESSO" "Sistema pronto para suporte técnico."
 
 $form.Add_Shown({ $this.ActiveControl = $null })
-
-Set-SplashStatus "Pronto!"
-$splash.Close()
-$splash.Dispose()
 [void]$form.ShowDialog()
