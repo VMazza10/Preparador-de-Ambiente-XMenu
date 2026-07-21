@@ -800,7 +800,7 @@ function Show-PrinterManager {
             $btn.Add_Click({
                 $parts = $this.Tag.Split('|')
                 $dlUrl = $parts[0]; $dlFile = $parts[1]
-                $dest = Join-Path $env:TEMP $dlFile
+                $dest = Join-Path $Script:DownloadFolder $dlFile
                 $origText = $this.Text
                 try {
                     $this.Enabled = $false; $this.Text = "  Baixando $dlFile ..."
