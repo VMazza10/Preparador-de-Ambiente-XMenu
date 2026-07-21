@@ -155,6 +155,24 @@ function Log-Message {
     }
 }
 
+# Checagem leve de integridade: tamanho minimo + assinatura binaria (MZ/PK).
+# Pega download vazio, truncado ou pagina de erro (html) salva com extensao errada.
+function Test-DownloadIntegrity {
+    param($Path, $MinBytes = 10240)
+    if (-not (Test-Path $Path)) { return $false }
+    if ((Get-Item $Path).Length -lt $MinBytes) { return $false }
+
+    $ext = [System.IO.Path]::GetExtension($Path).ToLower()
+    if ($ext -eq '.exe' -or $ext -eq '.zip') {
+        $expected = if ($ext -eq '.exe') { [byte[]](0x4D, 0x5A) } else { [byte[]](0x50, 0x4B) }
+        $buffer = New-Object byte[] 2
+        $fs = [System.IO.File]::OpenRead($Path)
+        try { [void]$fs.Read($buffer, 0, 2) } finally { $fs.Close() }
+        if ($buffer[0] -ne $expected[0] -or $buffer[1] -ne $expected[1]) { return $false }
+    }
+    return $true
+}
+
 function Show-IPs {
     try {
         $activeAdapters = Get-NetAdapter -ErrorAction SilentlyContinue | Where-Object { $_.Status -eq 'Up' }
@@ -814,6 +832,10 @@ function Show-PrinterManager {
                     Log-Message "INFO" "Baixando driver: $dlFile"
                     [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
                     Invoke-WebRequest -Uri $dlUrl -OutFile $dest -UseBasicParsing
+                    if (-not (Test-DownloadIntegrity -Path $dest)) {
+                        Remove-Item $dest -Force -ErrorAction SilentlyContinue
+                        throw "Arquivo baixado esta corrompido ou invalido (link quebrado ou pagina de erro)."
+                    }
                     Log-Message "SUCESSO" "Download concluido: $dlFile"
                     $this.Text = "  Instalando $dlFile ..."
                     Start-Process -FilePath $dest
@@ -1690,10 +1712,10 @@ function Start-Download {
         }
         elseif ($downloadSuccessful) {
             
-            # Verificacao de integridade basica (arquivo > 50kb)
-            $fileInfo = Get-Item $destPath
-            if ($fileInfo.Length -lt 50000) {
-                Log-Message "ERRO" "Arquivo corrompido ou link invalido (Tamanho: $($fileInfo.Length) bytes)."
+            # Verificacao de integridade basica (tamanho minimo + assinatura binaria)
+            if (-not (Test-DownloadIntegrity -Path $destPath -MinBytes 50000)) {
+                Log-Message "ERRO" "Arquivo corrompido ou link invalido (Tamanho: $((Get-Item $destPath).Length) bytes)."
+                Remove-Item $destPath -Force -ErrorAction SilentlyContinue
                 $Button.BackColor = [System.Drawing.Color]::Salmon
                 $Button.Text = "Erro (Arquivo Invalido)"
                 return
