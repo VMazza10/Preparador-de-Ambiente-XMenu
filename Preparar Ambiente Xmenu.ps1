@@ -17,9 +17,20 @@ $Script:DesktopPath = [Environment]::GetFolderPath("Desktop")
 $Script:DownloadFolder = Join-Path $Script:DesktopPath "Arquivos Xmenu"
 $Script:RepoBase = "https://raw.githubusercontent.com/VMazza10/Preparador-de-Ambiente-XMenu/main"
 
-if (-not (Test-Path $Script:DownloadFolder)) { 
-    New-Item -Path $Script:DownloadFolder -ItemType Directory -Force | Out-Null 
+if (-not (Test-Path $Script:DownloadFolder)) {
+    New-Item -Path $Script:DownloadFolder -ItemType Directory -Force | Out-Null
 }
+
+# Exclui a pasta de downloads do Windows Defender.
+# Evita falsos positivos que bloqueiam instaladores de driver legitimos
+# (comum em auto-extraiveis WinRAR SFX e drivers antigos).
+# ATENCAO: essa pasta deixa de ser escaneada pelo antivirus.
+try {
+    if (Get-Command Add-MpPreference -ErrorAction SilentlyContinue) {
+        Add-MpPreference -ExclusionPath $Script:DownloadFolder -ErrorAction SilentlyContinue
+    }
+}
+catch {}
 
 # Variaveis Globais UI
 $Script:LogBox = $null
@@ -783,25 +794,97 @@ function Show-PrinterManager {
                 $dest = Join-Path $Script:DownloadFolder $dlFile
                 $origText = $this.Text
                 try {
-                    $this.Enabled = $false; $this.Text = "  Baixando $dlFile ..."
+                    $this.Enabled = $false; $this.Text = "  Iniciando download..."
                     Log-Message "INFO" "Baixando driver: $dlFile"
                     [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-                    Invoke-WebRequest -Uri $dlUrl -OutFile $dest -UseBasicParsing
+
+                    # Download assincrono com barra de progresso no proprio botao
+                    $Script:DrvBtn = $this
+                    $Script:DrvFile = $dlFile
+                    $Script:DrvComplete = $false
+                    $Script:DrvError = $null
+                    $wc = New-Object System.Net.WebClient
+
+                    $wc.Add_DownloadProgressChanged({
+                        param($s, $e)
+                        $pct = $e.ProgressPercentage
+                        $barSize = 14
+                        $filled = [Math]::Floor($pct / (100 / $barSize))
+                        $bar = ("|" * $filled) + ("." * ($barSize - $filled))
+                        $mb = [Math]::Round($e.BytesReceived / 1MB, 1)
+                        $totMb = [Math]::Round($e.TotalBytesToReceive / 1MB, 1)
+                        $Script:DrvBtn.Text = "  [$bar] $pct%   ($mb / $totMb MB)"
+                    })
+                    $wc.Add_DownloadFileCompleted({
+                        param($s, $e)
+                        if ($e.Error) { $Script:DrvError = $e.Error }
+                        $Script:DrvComplete = $true
+                    })
+
+                    $cleanUrl = $dlUrl.Replace(" ", "%20")
+                    $wc.DownloadFileAsync((New-Object Uri($cleanUrl)), $dest)
+                    while (-not $Script:DrvComplete) {
+                        [System.Windows.Forms.Application]::DoEvents()
+                        Start-Sleep -Milliseconds 15
+                    }
+                    $wc.Dispose()
+                    if ($Script:DrvError) { throw $Script:DrvError }
+
                     if (-not (Test-DownloadIntegrity -Path $dest)) {
                         Remove-Item $dest -Force -ErrorAction SilentlyContinue
                         throw "Arquivo baixado esta corrompido ou invalido (link quebrado ou pagina de erro)."
                     }
                     Log-Message "SUCESSO" "Download concluido: $dlFile"
                     $this.Text = "  Instalando $dlFile ..."
-                    Start-Process -FilePath $dest
+                    # WorkingDirectory na pasta de downloads: instaladores auto-extraiveis (WinRAR SFX)
+                    # passam a sugerir essa pasta em vez de C:\WINDOWS\system32.
+                    Start-Process -FilePath $dest -WorkingDirectory $Script:DownloadFolder
                     Log-Message "SUCESSO" "Instalador iniciado: $dlFile"
                     $this.Text = "✔ $origText"
                 } catch {
-                    Log-Message "ERRO" "Falha ao baixar driver: $_"
-                    [System.Windows.Forms.MessageBox]::Show("Erro ao baixar o driver: $_", "Erro", "OK", "Error") | Out-Null
+                    $errMsg = $_.Exception.Message
+                    if ($errMsg -match 'v[ií]rus|software.*indesejado|potentially unwanted|unwanted software') {
+                        Log-Message "ERRO" "Windows Defender bloqueou o arquivo (provavel falso positivo): $dlFile"
+                        [System.Windows.Forms.MessageBox]::Show(
+                            "O Windows Defender bloqueou este driver.`n`n" +
+                            "Isso costuma ser um FALSO POSITIVO em instaladores de driver (o arquivo vem de fonte oficial).`n`n" +
+                            "A pasta 'Arquivos Xmenu' ja foi adicionada as excecoes do Defender - tente baixar novamente.`n`n" +
+                            "Se ainda assim bloquear, restaure o arquivo em: Seguranca do Windows > Protecao contra virus > Historico de protecao (Quarentena).",
+                            "Bloqueado pelo Windows Defender", "OK", "Warning") | Out-Null
+                    }
+                    else {
+                        Log-Message "ERRO" "Falha ao baixar driver: $_"
+                        [System.Windows.Forms.MessageBox]::Show("Erro ao baixar o driver: $_", "Erro", "OK", "Error") | Out-Null
+                    }
                     $this.Text = $origText
                 } finally {
                     $this.Enabled = $true
+                }
+            })
+            [void]$Panel.Controls.Add($btn)
+            $Y.Value += 47
+        }
+
+        # Botao que so abre a pagina oficial do fabricante (quando nao ha link direto confiavel de download)
+        function Add-DriverLinkButton {
+            param($Panel, [ref]$Y, $Text, $Url, $BgColor)
+            $btn = New-Object System.Windows.Forms.Button
+            $btn.Text = $Text; $btn.Size = New-Object System.Drawing.Size(700, 42)
+            $btn.Location = New-Object System.Drawing.Point(15, $Y.Value)
+            $btn.FlatStyle = 'Flat'; $btn.FlatAppearance.BorderSize = 0
+            $btn.BackColor = $BgColor; $btn.ForeColor = 'White'
+            $btn.Font = New-Object System.Drawing.Font("Segoe UI", 9.5, [System.Drawing.FontStyle]::Bold)
+            $btn.TextAlign = 'MiddleLeft'; $btn.Padding = '10,0,0,0'; $btn.Cursor = 'Hand'
+            $rr = $BgColor.R; $gg = $BgColor.G; $bb = $BgColor.B
+            $btn.FlatAppearance.MouseOverBackColor = [System.Drawing.Color]::FromArgb([Math]::Min($rr+20,255), [Math]::Min($gg+20,255), [Math]::Min($bb+20,255))
+            $btn.FlatAppearance.MouseDownBackColor = [System.Drawing.Color]::FromArgb([Math]::Max($rr-15,0), [Math]::Max($gg-15,0), [Math]::Max($bb-15,0))
+            $btn.Tag = $Url
+            $btn.Add_Click({
+                try {
+                    Log-Message "INFO" "Abrindo pagina oficial: $($this.Tag)"
+                    Start-Process $this.Tag
+                } catch {
+                    Log-Message "ERRO" "Falha ao abrir pagina: $_"
                 }
             })
             [void]$Panel.Controls.Add($btn)
@@ -864,6 +947,20 @@ function Show-PrinterManager {
         Add-DriverButton $pnlDrivers ([ref]$drvY) "  [UTILITÁRIO] Daruma Utility  (v2.20.9)" "$baseUrl/Utilities/Daruma_Utility_v2.20.9.exe" "Daruma_Utility_v2.20.9.exe" $colorDaruma
         Add-DriverButton $pnlDrivers ([ref]$drvY) "  [UTILITÁRIO] Sweda Utility  (v2.03)" "$baseUrl/Utilities/Sweda_Utility_v2.03.exe" "Sweda_Utility_v2.03.exe" $colorSweda
         Add-DriverButton $pnlDrivers ([ref]$drvY) "  [UTILITÁRIO] Control iD Utility  (v1.0)" "$baseUrl/Utilities/PrintID_Utility_v1.0.exe" "PrintID_Utility_v1.0.exe" $colorCtrlID
+
+        # --- IMPRESSORAS XTAG (ETIQUETA) ---
+        $colorXtag = [System.Drawing.Color]::FromArgb(0, 140, 130)
+        $colorXtagUtil = [System.Drawing.Color]::FromArgb(0, 95, 90)
+        $xtagBaseUrl = "https://raw.githubusercontent.com/ElginDeveloperCommunity/Impressoras/master/Impressoras%20de%20Etiqueta"
+        Add-DriverSection $pnlDrivers ([ref]$drvY) "IMPRESSORAS XTAG (ETIQUETA)" ([System.Drawing.Color]::FromArgb(100, 220, 210))
+        Add-DriverButton $pnlDrivers ([ref]$drvY) "  [DRIVER] Elgin L42 PRO  (ZIP - contem instalador, v2020.4)" "$xtagBaseUrl/Elgin/L42PRO/Drivers/Windows_DriverL42PRO_V2020.4.zip" "Windows_DriverL42PRO_V2020.4.zip" $colorXtag
+        Add-DriverButton $pnlDrivers ([ref]$drvY) "  [DRIVER] Elgin L42 PRO FULL  (v2022.1)" "$xtagBaseUrl/Elgin/L42PRO%20FULL/Drivers/L42PRO%20FULL_Windows_driver_2022.1.exe" "Elgin_L42PRO_FULL_Windows_driver_2022.1.exe" $colorXtag
+        Add-DriverButton $pnlDrivers ([ref]$drvY) "  [DRIVER] Elgin L42 DT  (v7.4.3)" "$xtagBaseUrl/Elgin/L42DT/Drivers/Windows_DriverL42DT_7.4.3_M-5.exe" "Elgin_L42DT_Windows_driver_7.4.3.exe" $colorXtag
+        Add-DriverButton $pnlDrivers ([ref]$drvY) "  [DRIVER] Zebra ZD220 / ZD230  (ZIP - contem instalador)" "https://www.zebra.com/content/dam/support-dam/en/driver/unrestricted/0002/zddriver-v1062628275-certified.zip" "Zebra_ZD220_ZD230_Driver.zip" $colorXtag
+        Add-DriverButton $pnlDrivers ([ref]$drvY) "  [DRIVER] Argox  (Todos os modelos, v2022.1)" "$baseUrl/Argox/Argox_PrinterDrivers_v2022.1.exe" "Argox_PrinterDrivers_v2022.1.exe" $colorXtag
+        Add-DriverButton $pnlDrivers ([ref]$drvY) "  [DRIVER] Gainscha  (Todos os modelos, v2020.1)" "$baseUrl/Gainscha/Gainscha_GPrinterDrivers_v2020.1.exe" "Gainscha_GPrinterDrivers_v2020.1.exe" $colorXtag
+        Add-DriverButton $pnlDrivers ([ref]$drvY) "  [UTILITÁRIO] Gerenciador Elgin L42 PRO FULL  (v1.5.1)" "$xtagBaseUrl/Elgin/L42PRO%20FULL/Utilit%C3%A1rios/GerenciadorL42PRO_Full_1.5.1.exe" "GerenciadorL42PRO_Full_1.5.1.exe" $colorXtagUtil
+        Add-DriverButton $pnlDrivers ([ref]$drvY) "  [UTILITÁRIO] Gerenciador Elgin L42 DT  (v1.5.6)" "$xtagBaseUrl/Elgin/L42DT/Utilit%C3%A1rios/GerenciadorL42DT_Full_1.5.6.exe" "GerenciadorL42DT_Full_1.5.6.exe" $colorXtagUtil
 
         # -------------------------------------------------------------
         # CONTEÚDO DO PAINEL LOCAL (ABA 1)
@@ -1783,7 +1880,9 @@ function Start-Download {
             }
             else {
                 Log-Message "EXEC" "Executando instalador..."
-                Start-Process $destPath
+                # WorkingDirectory na pasta de downloads: instaladores auto-extraiveis (WinRAR SFX)
+                # passam a sugerir essa pasta em vez de C:\WINDOWS\system32.
+                Start-Process $destPath -WorkingDirectory $Script:DownloadFolder
                 $Button.Text = "Executado"
                 Wait-UI 1.5
                 $Button.Text = "✔ $originalText"
