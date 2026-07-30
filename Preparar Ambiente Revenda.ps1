@@ -1921,11 +1921,18 @@ function Install-VSPE-Combined {
 
 function Install-SqlManual {
     param($Button)
-    if ($Script:IsDownloading) { 
+    if ($Script:IsDownloading) {
         [System.Windows.Forms.MessageBox]::Show("Aguarde o download atual!", "Ocupado", "OK", "Warning") | Out-Null
-        return 
+        return
     }
-    
+
+    $aviso = "ATENÇÃO - INSTALAÇÃO MANUAL E AVANÇADA`n`n" +
+             "Este botão baixa o SQL 2019 e o SSMS SEPARADAMENTE, para instalação manual (passo a passo).`n`n" +
+             "Se você só precisa instalar o banco de dados normalmente, use o botão azul 'SQL Server 2019 (Instalador)' (automático).`n`n" +
+             "Deseja realmente continuar com a instalação MANUAL?"
+    $resp = [System.Windows.Forms.MessageBox]::Show($aviso, "Instalação Manual - Confirmação", [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Warning)
+    if ($resp -ne [System.Windows.Forms.DialogResult]::Yes) { return }
+
     try {
         $Button.Enabled = $false
         Start-Download "https://download.microsoft.com/download/7/f/8/7f8a9c43-8c8a-4f7c-9f92-83c18d96b681/SQL2019-SSEI-Expr.exe" "SQL2019-SSEI-Expr.exe" $Button
@@ -2640,9 +2647,9 @@ $bSqlMan.BackColor = [System.Drawing.Color]::FromArgb(30, 45, 75); $bSqlMan.Fore
 $bSqlMan.FlatStyle = 'Flat'; $bSqlMan.FlatAppearance.BorderSize = 0; $bSqlMan.TextAlign = 'MiddleLeft'; $bSqlMan.Padding = '10,0,0,0'; $bSqlMan.Margin = '5'
 $bSqlMan.FlatAppearance.MouseOverBackColor = [System.Drawing.Color]::FromArgb(50, 65, 95)
 $bSqlMan.FlatAppearance.MouseDownBackColor = [System.Drawing.Color]::FromArgb(15, 30, 60)
-$bSqlMan.Text = "SQL 2019 + SSMS (Manual)"; $bSqlMan.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
+$bSqlMan.Text = "SQL 2019 + SSMS (Manual / Avançado)"; $bSqlMan.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
 $bSqlMan.Cursor = 'Hand'
-$Script:ToolTip.SetToolTip($bSqlMan, "Baixa o instalador do SQL 2019 e a ferramenta de gerenciamento SSMS separadamente.")
+$Script:ToolTip.SetToolTip($bSqlMan, "ATENÇÃO: Instalação MANUAL e AVANÇADA. Baixa o SQL 2019 e o SSMS SEPARADAMENTE, para instalar passo a passo. Para a instalação normal/automática, use o botão azul 'SQL Server 2019 (Instalador)'.")
 $bSqlMan.Add_Click({ Install-SqlManual $this })
 [void]$tbl.Controls.Add($bSqlMan)
 
