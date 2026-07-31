@@ -809,6 +809,193 @@ function Show-ServiceManager {
     }
 }
 
+# -----------------------------------------------------------------------------
+# RELOGIO DO WINDOWS
+# Relogio errado faz a SEFAZ rejeitar NFC-e/SAT e quebra validacao de
+# certificado. Em maquina de PDV o servico de horario costuma vir desligado.
+# -----------------------------------------------------------------------------
+function Get-DesvioRelogio {
+    # Le a diferenca entre o relogio local e o servidor de hora, sem alterar nada
+    try {
+        $saida = & w32tm /stripchart /computer:pool.ntp.br /samples:2 /dataonly 2>&1
+        foreach ($linha in $saida) {
+            if ("$linha" -match ',\s*([+-]?\d+\.\d+)s') { $ultimo = [double]$matches[1] }
+        }
+        if ($null -ne $ultimo) { return $ultimo }
+    }
+    catch {}
+    return $null
+}
+
+function Invoke-ClockSync {
+    Log-Message "INFO" "Sincronizando o relogio do Windows..."
+    $passos = @()
+    $problemas = @()
+
+    $antes = Get-DesvioRelogio
+    if ($null -ne $antes) {
+        Log-Message "INFO" "   > Desvio antes: $([Math]::Round($antes, 3))s"
+    }
+
+    # 1) O servico de horario precisa estar automatico e rodando
+    try {
+        Set-Service -Name w32time -StartupType Automatic -ErrorAction Stop
+        $passos += "Servico de horario em inicio automatico"
+    }
+    catch { $problemas += "Nao consegui deixar o servico de horario em automatico" }
+
+    try {
+        $sv = Get-Service -Name w32time -ErrorAction Stop
+        if ($sv.Status -ne 'Running') {
+            Start-Service -Name w32time -ErrorAction Stop
+            $passos += "Servico de horario iniciado"
+        }
+    }
+    catch { $problemas += "Nao consegui iniciar o servico de horario" }
+
+    # 2) Usa o pool.ntp.br (hora legal brasileira) em vez do padrao da
+    #    Microsoft, que costuma estar bloqueado ou lento nas lojas
+    try {
+        $null = & w32tm /config /manualpeerlist:"pool.ntp.br,0x9" /syncfromflags:manual /update 2>&1
+        $passos += "Fonte de hora apontada para o pool.ntp.br"
+    }
+    catch { $problemas += "Nao consegui configurar a fonte de hora" }
+
+    # 3) Sincroniza (a primeira tentativa falha quando o servico acabou de subir)
+    $sincronizou = $false
+    foreach ($tentativa in 1..2) {
+        try {
+            $res = & w32tm /resync /force 2>&1
+            if ("$res" -notmatch 'erro|error|falha|failed') { $sincronizou = $true; break }
+        }
+        catch {}
+        Start-Sleep -Seconds 2
+    }
+    if ($sincronizou) { $passos += "Relogio sincronizado com o servidor de hora" }
+    else { $problemas += "A sincronizacao nao respondeu (verifique se a porta UDP 123 esta liberada)" }
+
+    $depois = Get-DesvioRelogio
+
+    $texto = "SINCRONIZACAO DO RELOGIO`r`n`r`n"
+    $texto += "Hora do computador agora: $(Get-Date -Format 'dd/MM/yyyy HH:mm:ss')`r`n"
+    if ($null -ne $antes) {
+        $texto += "Diferenca antes:  $([Math]::Round($antes, 2)) segundos`r`n"
+    }
+    if ($null -ne $depois) {
+        $texto += "Diferenca agora:  $([Math]::Round($depois, 2)) segundos`r`n"
+        if ([Math]::Abs($depois) -gt 5) {
+            $texto += "`r`nATENCAO: ainda ha mais de 5 segundos de diferenca.`r`nIsso e suficiente para a SEFAZ rejeitar NFC-e.`r`n"
+        }
+    }
+    if ($passos.Count -gt 0) {
+        $texto += "`r`nAplicado:`r`n"
+        foreach ($p in $passos) { $texto += "  - $p`r`n" }
+    }
+    if ($problemas.Count -gt 0) {
+        $texto += "`r`nNao deu certo:`r`n"
+        foreach ($p in $problemas) { $texto += "  - $p`r`n" }
+    }
+
+    Log-Message $(if ($problemas.Count -gt 0) { "ERRO" } else { "SUCESSO" }) "Relogio: $(if ($sincronizou) { 'sincronizado' } else { 'falhou' })$(if ($null -ne $depois) { " (desvio $([Math]::Round($depois,2))s)" })"
+
+    [System.Windows.Forms.MessageBox]::Show($texto, "Relogio do Windows", "OK",
+        $(if ($problemas.Count -gt 0) { "Warning" } else { "Information" })) | Out-Null
+}
+
+# -----------------------------------------------------------------------------
+# TEF HUB DA ELGIN - RESOLVE A VERSAO MAIS RECENTE SOZINHO
+# A Elgin publica os instaladores nesta pasta do GitHub e troca a versao sem
+# aviso. Em vez de deixar o link fixo (que envelhece), a gente pergunta a API
+# qual e o arquivo x86 atual na hora do clique.
+#
+# Detalhe importante: o repositorio usa Git LFS. O link "raw.githubusercontent"
+# devolve so um ponteiro de texto de ~130 bytes, nao o instalador. O binario de
+# verdade sai por "media.githubusercontent.com/media/".
+# -----------------------------------------------------------------------------
+$Script:TefHubReserva = "https://media.githubusercontent.com/media/ElginDeveloperCommunity/ElginTEFHUB/master/ELGIN%20TEF%20HUB/Instaladores%20Windows/86Elgin%20TEFHUB-v05.09.00.exe"
+$Script:TefHubPagina = "https://github.com/ElginDeveloperCommunity/ElginTEFHUB/tree/master/ELGIN%20TEF%20HUB/Instaladores%20Windows"
+
+function Get-TefHubUltimaVersao {
+    $api = "https://api.github.com/repos/ElginDeveloperCommunity/ElginTEFHUB/contents/ELGIN%20TEF%20HUB/Instaladores%20Windows"
+    try {
+        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+        $itens = Invoke-RestMethod -Uri $api -Headers @{ "User-Agent" = "XMenu-Preparador" } -TimeoutSec 25
+
+        # "86..." = 32 bits (x86), que e a versao que usamos. "64..." e x64.
+        $x86 = @($itens | Where-Object { $_.type -eq 'file' -and $_.name -match '^86Elgin.*\.exe$' })
+        if ($x86.Count -eq 0) { return $null }
+
+        $maisNovo = $x86 | Sort-Object {
+            if ($_.name -match 'v(\d+)\.(\d+)\.(\d+)') { [version]"$($matches[1]).$($matches[2]).$($matches[3])" }
+            else { [version]"0.0.0" }
+        } -Descending | Select-Object -First 1
+
+        $versao = if ($maisNovo.name -match 'v([\d\.]+)\.exe$') { $matches[1] } else { "desconhecida" }
+        $caminho = (($maisNovo.path -split '/') | ForEach-Object { [uri]::EscapeDataString($_) }) -join '/'
+
+        return [PSCustomObject]@{
+            Versao  = $versao
+            Nome    = $maisNovo.name
+            Url     = "https://media.githubusercontent.com/media/ElginDeveloperCommunity/ElginTEFHUB/master/$caminho"
+            Arquivo = "Elgin_TEFHUB_x86_v$versao.exe"
+        }
+    }
+    catch {
+        Log-Message "ERRO" "Nao consegui consultar o GitHub da Elgin: $($_.Exception.Message)"
+        return $null
+    }
+}
+
+function Install-TefHub {
+    param($Button)
+
+    $textoOriginal = $Button.Text
+    $Button.Text = "Verificando versao mais recente..."
+    $Button.Enabled = $false
+    [System.Windows.Forms.Application]::DoEvents()
+
+    $info = Get-TefHubUltimaVersao
+
+    $Button.Enabled = $true
+    $Button.Text = $textoOriginal
+
+    if ($null -eq $info) {
+        $r = [System.Windows.Forms.MessageBox]::Show(
+            "Nao consegui verificar a versao mais recente no GitHub da Elgin.`n`n" +
+            "Pode ser falta de internet ou limite de consultas do GitHub.`n`n" +
+            "SIM  = baixar a versao de reserva (05.09.00)`n" +
+            "NAO  = abrir a pasta da Elgin no navegador",
+            "TEF HUB", [System.Windows.Forms.MessageBoxButtons]::YesNoCancel, [System.Windows.Forms.MessageBoxIcon]::Warning)
+        if ($r -eq [System.Windows.Forms.DialogResult]::No) {
+            Log-Message "INFO" "Abrindo a pasta oficial da Elgin para download manual."
+            Start-Process $Script:TefHubPagina
+            return
+        }
+        if ($r -ne [System.Windows.Forms.DialogResult]::Yes) { return }
+        Start-Download $Script:TefHubReserva "Elgin_TEFHUB_x86_v05.09.00.exe" $Button
+        $nomeAlvo = "86Elgin TEFHUB-v05.09.00.exe"
+    }
+    else {
+        Log-Message "INFO" "TEF HUB x86 no GitHub da Elgin: versao $($info.Versao)  ($($info.Nome))"
+        Start-Download $info.Url $info.Arquivo $Button
+        $nomeAlvo = $info.Nome
+    }
+
+    # O motor de download ja tenta 3 vezes sozinho. Se mesmo assim nao veio
+    # (e o usuario nao cancelou), abre a pasta da Elgin para baixar na mao -
+    # o arquivo tem mais de 300 MB e costuma ser rede instavel.
+    if (-not $Script:UltimoDownloadOk -and -not $Script:UltimoDownloadCancelado) {
+        Log-Message "ERRO" "TEF HUB falhou nas 3 tentativas. Abrindo a pasta oficial da Elgin."
+        [System.Windows.Forms.MessageBox]::Show(
+            "Nao consegui baixar o TEF HUB depois de 3 tentativas.`n`n" +
+            "Vou abrir a pasta oficial da Elgin no navegador.`n" +
+            "Baixe o arquivo:`n`n    $nomeAlvo`n`n" +
+            "(o que comeca com 86 e a versao x86, que e a que usamos)",
+            "TEF HUB", "OK", "Warning") | Out-Null
+        Start-Process $Script:TefHubPagina
+    }
+}
+
 function Invoke-SFC {
     Log-Message "INFO" "Iniciando SFC /Scannow (Reparo de Arquivos)..."
     Log-Message "CMD" "COMANDO: sfc /scannow"
@@ -3636,13 +3823,23 @@ function Cancel-Download {
 
 function Start-Download {
     param($Url, $FileName, $Button)
-    
-    if ($Global:XM_DOWNLOAD_IN_PROGRESS) { 
+
+    # Resultado desta chamada, para quem chamou poder reagir (o TEF HUB usa
+    # isso para abrir a pagina da Elgin quando as 3 tentativas falham).
+    # "Cancelado" tambem cobre os casos em que o download nem chegou a comecar.
+    $Script:UltimoDownloadOk = $false
+    $Script:UltimoDownloadCancelado = $false
+
+    if ($Global:XM_DOWNLOAD_IN_PROGRESS) {
+        $Script:UltimoDownloadCancelado = $true
         [System.Windows.Forms.MessageBox]::Show("Já existe um download ou tarefa em andamento. Aguarde a conclusão ou cancele o atual.", "Sistema Ocupado", "OK", "Warning") | Out-Null
-        return 
+        return
     }
-    
-    if ($Button.Text -like "*Instalado" -or $Button.Text -like "*Aberto" -or $Button.Text -like "*Extraido") { return }
+
+    if ($Button.Text -like "*Instalado" -or $Button.Text -like "*Aberto" -or $Button.Text -like "*Extraido") {
+        $Script:UltimoDownloadCancelado = $true
+        return
+    }
 
     $originalText = $Button.Text
     $originalBack = $Button.BackColor
@@ -3746,6 +3943,7 @@ function Start-Download {
         Hide-CancelOverlay
 
         if ($Script:CancelRequested) {
+            $Script:UltimoDownloadCancelado = $true
             $Button.Text = "Cancelado"
             Set-ButtonDone -Button $Button -Label "CANCELADO" -Kind 'cancel' -Nome $originalText
             $Script:StatusLabel.Text = "Cancelado."
@@ -3771,6 +3969,7 @@ function Start-Download {
             }
 
             Log-Message "SUCESSO" "Download concluido."
+            $Script:UltimoDownloadOk = $true
             $Button.BackColor = $originalBack
             $Button.Text = "Instalado"
             Set-ButtonDone -Button $Button -Label "BAIXADO"
@@ -4537,15 +4736,8 @@ $hRight.FlowDirection = 'TopDown'; $hRight.BackColor = 'Transparent'; $hRight.Wr
 $hRight.Padding = '0,40,0,0'
 [void]$head.Controls.Add($hRight)
 
-$btnIP = New-Object System.Windows.Forms.Button; $btnIP.Text = "DIAG. REDE"; $btnIP.Size = '140,40'
-$btnIP.BackColor = 'White'; $btnIP.ForeColor = [System.Drawing.Color]::FromArgb(0, 100, 200)
-$btnIP.FlatStyle = 'Flat'; $btnIP.FlatAppearance.BorderSize = 0; $btnIP.Cursor = [System.Windows.Forms.Cursors]::Hand
-$btnIP.Font = New-Object System.Drawing.Font("Segoe UI", 9.5, [System.Drawing.FontStyle]::Bold)
-$btnIP.Margin = '0,0,0,10'
-$btnIP.FlatAppearance.MouseOverBackColor = [System.Drawing.Color]::FromArgb(240, 240, 240)
-$btnIP.FlatAppearance.MouseDownBackColor = [System.Drawing.Color]::FromArgb(220, 220, 220)
-$btnIP.Add_Click({ Show-IPs })
-[void]$hRight.Controls.Add($btnIP)
+# O diagnostico de rede agora fica na grade de SUPORTE E DIAGNOSTICO,
+# junto com as outras ferramentas (nao precisa mais de botao no cabecalho).
 
 # --- NOVO BOTAO LINKS NO HEADER ---
 $btnLinks = New-Object System.Windows.Forms.Button; $btnLinks.Text = "LINKS ÚTEIS ▼"; $btnLinks.Size = '140,40'
@@ -4653,8 +4845,12 @@ function Add-Btn {
         $Script:ToolTip.SetToolTip($b, $Help)
     }
 
-    if ($Sel) { 
+    if ($Sel) {
         $b.Tag = $Type; $b.Add_Click({ Open-Selector $this.Tag $this })
+    }
+    elseif ($U -eq "TEFHUB-X86") {
+        # Link resolvido na hora do clique (a Elgin troca a versao sem aviso)
+        $b.Add_Click({ Install-TefHub $this })
     }
     else {
         $b.Tag = "$U|$F"; $b.Add_Click({ $d = $this.Tag.Split('|'); Start-Download $d[0] $d[1] $this })
@@ -4723,7 +4919,7 @@ Add-Btn "TeamViewer Full" "" "https://download.teamviewer.com/download/TeamViewe
 Add-Btn "AnyDesk" "" "https://download.anydesk.com/AnyDesk.exe" "AnyDesk.exe" -Help "Ferramenta de acesso remoto AnyDesk."
 Add-Btn "Google Chrome" "" "https://github.com/VMazza10/Preparador-de-Ambiente-XMenu/releases/download/Chrome/ChromeSetup.exe" "ChromeSetup.exe" -Help "Instalador online do navegador Google Chrome."
 Add-Btn "Revo Uninstaller" "" "https://download.revouninstaller.com/download/revosetup.exe" "revosetup.exe" -Help "Utilitário para desinstalação completa de programas e limpeza de restos."
-Add-Btn "TEF HUB Windows" "" "https://github.com/VMazza10/Preparador-de-Ambiente-XMenu/releases/download/Chrome/TEF.HUB.WINDOWS.exe" "TefHub_Windows.exe" -Help "Instalador Tefhub Windows."
+Add-Btn "TEF HUB Windows (x86 - sempre a versão atual)" "" "TEFHUB-X86" "" -Help "Consulta o GitHub oficial da Elgin no momento do clique e baixa a versão x86 mais recente do TEF HUB. Não precisa mais trocar o link na mão."
 Add-Btn "Advanced IP Scanner" "" "https://download.advanced-ip-scanner.com/download/files/Advanced_IP_Scanner_2.5.4594.1.exe" "Advanced_IP_Scanner.exe" -Help "Ferramenta de varredura de rede local Advanced IP Scanner."
 Add-Btn "Balança Teste" "" "https://github.com/VMazza10/Preparador-de-Ambiente-XMenu/releases/download/Chrome/BalancaTeste.exe" "BalancaTeste.exe" -Help "Aplicativo para testar o funcionamento e comunicação da balança."
 
@@ -4753,6 +4949,15 @@ function Format-SupportBtn {
     $Button.FlatAppearance.MouseDownBackColor = [System.Drawing.Color]::FromArgb($rD, $gD, $blD)
 }
 
+# Ocupa a celula que sobra quando um grupo de cor tem numero impar de botoes,
+# para o proximo grupo sempre comecar numa linha nova (alinhado por cor).
+function Add-SupportSpacer {
+    $sp = New-Object System.Windows.Forms.Label
+    $sp.Text = ""
+    $sp.Dock = 'Fill'
+    [void]$tbl.Controls.Add($sp)
+}
+
 Add-Title "SUPORTE E DIAGNÓSTICO"
 
 # --- IMPRESSORAS E REDE (AZUL ESCURO / CINZA) ---
@@ -4766,9 +4971,7 @@ Format-SupportBtn $bPrintMgr $colorCyan
 $Script:ToolTip.SetToolTip($bPrintMgr, "Gerencia impressoras locais, compartilhamentos e configura rede via protocolo LPR/LPD para corrigir erros no Windows 11.")
 $bPrintMgr.Add_Click({ Show-PrinterManager })
 [void]$tbl.Controls.Add($bPrintMgr)
-# Placeholder vazio na coluna direita (reservado para botão futuro)
-$lblPrintPlaceholder = New-Object System.Windows.Forms.Label; $lblPrintPlaceholder.Text = ""; $lblPrintPlaceholder.Dock = 'Fill'
-[void]$tbl.Controls.Add($lblPrintPlaceholder)
+Add-SupportSpacer   # fecha a linha do grupo azul
 
 # --- DIAGNÓSTICOS (VERDE) ---
 $bInfo = New-Object System.Windows.Forms.Button; $bInfo.Height = 50; $bInfo.Dock = 'Top'
@@ -4810,6 +5013,14 @@ Format-SupportBtn $bSrv $colorDiag
 $Script:ToolTip.SetToolTip($bSrv, "Mostra o estado do SQL Server, SQL Browser, Spooler e serviços do sistema. Permite iniciar, parar, reiniciar, deixar em início automático e testar a porta 1433 do servidor.")
 $bSrv.Add_Click({ Show-ServiceManager })
 [void]$tbl.Controls.Add($bSrv)
+
+$bNet = New-Object System.Windows.Forms.Button; $bNet.Height = 50; $bNet.Dock = 'Top'
+$bNet.Text = "Diagnóstico de Rede"; $bNet.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
+$bNet.Cursor = 'Hand'
+Format-SupportBtn $bNet $colorDiag
+$Script:ToolTip.SetToolTip($bNet, "IP, gateway, DNS, placa e MAC, mais os testes de rede local, internet, DNS e servidor NetControll. Aponta em qual ponto a conexão quebrou.")
+$bNet.Add_Click({ Show-IPs })
+[void]$tbl.Controls.Add($bNet)
 
 # --- REPAROS E RESETS (VERMELHO) ---
 $bSfc = New-Object System.Windows.Forms.Button; $bSfc.Height = 50; $bSfc.Dock = 'Top'
@@ -4867,6 +5078,14 @@ Format-SupportBtn $bNetR $colorGray
 $Script:ToolTip.SetToolTip($bNetR, "Executa 'ipconfig /flushdns', 'netsh winsock reset', 'netsh int ip reset', 'ipconfig /release' e 'ipconfig /renew' para restaurar toda a pilha de rede e renovar o IP.")
 $bNetR.Add_Click({ Invoke-NetworkReset })
 [void]$tbl.Controls.Add($bNetR)
+
+$bClock = New-Object System.Windows.Forms.Button; $bClock.Height = 50; $bClock.Dock = 'Top'
+$bClock.Text = "Sincronizar Relógio (NFC-e)"; $bClock.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
+$bClock.Cursor = 'Hand'
+Format-SupportBtn $bClock $colorGray
+$Script:ToolTip.SetToolTip($bClock, "Liga o serviço de horário, aponta para o pool.ntp.br e sincroniza. Relógio adiantado ou atrasado faz a SEFAZ rejeitar NFC-e.")
+$bClock.Add_Click({ Invoke-ClockSync })
+[void]$tbl.Controls.Add($bClock)
 
 Log-Message "INFO" "XMenu System Manager v17.59 - Central de Preparo e Suporte"
 Log-Message "LOG" "==============================================================="
