@@ -481,6 +481,8 @@ Resultado: $($pnlVeredito.Tag.Texto)
 # geralmente e a porta sendo suspensa pelo Windows.
 # -----------------------------------------------------------------------------
 function Invoke-UsbPowerFix {
+    # -Silencioso: usado pelo PREPARAR AMBIENTE, so registra no log
+    param([switch]$Silencioso)
     Log-Message "INFO" "Desligando economia de energia das portas USB..."
     $feitos = @()
     $falhas = @()
@@ -559,6 +561,8 @@ function Invoke-UsbPowerFix {
         foreach ($x in $falhas) { $texto += "  - $x`r`n" }
     }
     $texto += "`r`nIsso evita que a impressora termica USB pare de responder`r`ndepois de um tempo parada. Se ela ja estiver travada,`r`ndesconecte e reconecte o cabo uma vez."
+
+    if ($Silencioso) { return }
 
     [System.Windows.Forms.MessageBox]::Show($texto, "Energia das portas USB", "OK",
         $(if ($falhas.Count -gt 0) { "Warning" } else { "Information" })) | Out-Null
@@ -828,13 +832,19 @@ function Get-DesvioRelogio {
 }
 
 function Invoke-ClockSync {
+    # -Silencioso: usado pelo PREPARAR AMBIENTE. Pula a medicao de desvio
+    # (que leva alguns segundos) e nao abre janela, so registra no log.
+    param([switch]$Silencioso)
     Log-Message "INFO" "Sincronizando o relogio do Windows..."
     $passos = @()
     $problemas = @()
 
-    $antes = Get-DesvioRelogio
-    if ($null -ne $antes) {
-        Log-Message "INFO" "   > Desvio antes: $([Math]::Round($antes, 3))s"
+    $antes = $null
+    if (-not $Silencioso) {
+        $antes = Get-DesvioRelogio
+        if ($null -ne $antes) {
+            Log-Message "INFO" "   > Desvio antes: $([Math]::Round($antes, 3))s"
+        }
     }
 
     # 1) O servico de horario precisa estar automatico e rodando
@@ -874,7 +884,8 @@ function Invoke-ClockSync {
     if ($sincronizou) { $passos += "Relogio sincronizado com o servidor de hora" }
     else { $problemas += "A sincronizacao nao respondeu (verifique se a porta UDP 123 esta liberada)" }
 
-    $depois = Get-DesvioRelogio
+    $depois = $null
+    if (-not $Silencioso) { $depois = Get-DesvioRelogio }
 
     $texto = "SINCRONIZACAO DO RELOGIO`r`n`r`n"
     $texto += "Hora do computador agora: $(Get-Date -Format 'dd/MM/yyyy HH:mm:ss')`r`n"
@@ -897,6 +908,8 @@ function Invoke-ClockSync {
     }
 
     Log-Message $(if ($problemas.Count -gt 0) { "ERRO" } else { "SUCESSO" }) "Relogio: $(if ($sincronizou) { 'sincronizado' } else { 'falhou' })$(if ($null -ne $depois) { " (desvio $([Math]::Round($depois,2))s)" })"
+
+    if ($Silencioso) { return }
 
     [System.Windows.Forms.MessageBox]::Show($texto, "Relogio do Windows", "OK",
         $(if ($problemas.Count -gt 0) { "Warning" } else { "Information" })) | Out-Null
@@ -4467,6 +4480,21 @@ function Run-Config {
     if (!(Test-Path "HKLM:\SOFTWARE\Policies\Microsoft\Dsh")) { New-Item "HKLM:\SOFTWARE\Policies\Microsoft\Dsh" -Force | Out-Null }
     Set-ItemProperty "HKLM:\SOFTWARE\Policies\Microsoft\Dsh" -Name "AllowNewsAndInterests" -Value 0 -Force -ErrorAction SilentlyContinue
 
+    # No Windows 11 o App Installer (winget) e marcado como NonRemovable: o
+    # Remove-AppxPackage acima falha com 0x80073CFA e o erro fica escondido.
+    # O jeito que realmente desliga e por diretiva.
+    Log-Message "LOG" "     Bloqueando o winget (App Installer) por diretiva..."
+    Log-Message "CMD" "COMANDO: HKLM\...\Policies\Microsoft\Windows\AppInstaller -> EnableAppInstaller = 0"
+    if (!(Test-Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\AppInstaller")) { New-Item "HKLM:\SOFTWARE\Policies\Microsoft\Windows\AppInstaller" -Force | Out-Null }
+    Set-ItemProperty "HKLM:\SOFTWARE\Policies\Microsoft\Windows\AppInstaller" -Name "EnableAppInstaller" -Value 0 -Type DWord -Force -ErrorAction SilentlyContinue
+    Set-ItemProperty "HKLM:\SOFTWARE\Policies\Microsoft\Windows\AppInstaller" -Name "EnableWindowsPackageManagerCommandLineInterfaces" -Value 0 -Type DWord -Force -ErrorAction SilentlyContinue
+    Set-ItemProperty "HKLM:\SOFTWARE\Policies\Microsoft\Windows\AppInstaller" -Name "EnableMSAppInstallerProtocol" -Value 0 -Type DWord -Force -ErrorAction SilentlyContinue
+
+    # Sem isso a Loja continua atualizando aplicativos sozinha
+    Log-Message "LOG" "     Desligando atualizacao automatica da Microsoft Store..."
+    if (!(Test-Path "HKLM:\SOFTWARE\Policies\Microsoft\WindowsStore")) { New-Item "HKLM:\SOFTWARE\Policies\Microsoft\WindowsStore" -Force | Out-Null }
+    Set-ItemProperty "HKLM:\SOFTWARE\Policies\Microsoft\WindowsStore" -Name "AutoDownload" -Value 2 -Type DWord -Force -ErrorAction SilentlyContinue
+
     # --- LIMPEZA DE TOOLBARS E ICONES (RESTAURADA) ---
     Log-Message "LOG" "     Limpando e organizando a Barra de Tarefas..."
     
@@ -4538,6 +4566,14 @@ function Run-Config {
     }
     catch { Log-Message "ERRO" "Falha no atalho: $($_.Exception.Message)" }
     
+    # Dois ajustes que todo PDV precisa e que antes dependiam do tecnico
+    # lembrar de clicar nos botoes de suporte:
+    Log-Message "LOG" "     Protegendo as portas USB (impressora que desconecta sozinha)..."
+    try { Invoke-UsbPowerFix -Silencioso } catch { Log-Message "ERRO" "Falha no ajuste de USB: $($_.Exception.Message)" }
+
+    Log-Message "LOG" "     Acertando o relogio pelo pool.ntp.br (NFC-e)..."
+    try { Invoke-ClockSync -Silencioso } catch { Log-Message "ERRO" "Falha ao sincronizar o relogio: $($_.Exception.Message)" }
+
     Log-Message "LOG" "7. FINALIZAÇÃO:"
     Log-Message "LOG" "     Atualizando interface do Windows (Explorer)..."
     Get-ChildItem "$env:LOCALAPPDATA\IconCache.db" -ErrorAction SilentlyContinue | Remove-Item -Force | Out-Null
