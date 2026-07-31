@@ -153,57 +153,660 @@ function Test-DownloadIntegrity {
     return $true
 }
 
+function ConvertTo-Mascara {
+    param([int]$Prefixo)
+    try {
+        $bits = ('1' * $Prefixo).PadRight(32, '0')
+        return ((0..3) | ForEach-Object { [Convert]::ToInt32($bits.Substring($_ * 8, 8), 2) }) -join '.'
+    }
+    catch { return "-" }
+}
+
 function Show-IPs {
     try {
-        $activeAdapters = Get-NetAdapter -ErrorAction SilentlyContinue | Where-Object { $_.Status -eq 'Up' }
-        if ($activeAdapters) {
-            $ips = $activeAdapters | Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object { $_.IPAddress -notlike "127.*" -and $_.IPAddress -notlike "169.*" } | Select-Object -ExpandProperty IPAddress -Unique
-            
-            $netConfig = Get-NetIPConfiguration | Where-Object { $_.IPv4DefaultGateway -ne $null } | Select-Object -First 1
-            $gateway = if ($netConfig) { $netConfig.IPv4DefaultGateway.NextHop } else { "Nao detectado" }
-            $dnsServers = if ($netConfig) { $netConfig.DNSServer.ServerAddresses -join ", " } else { "Nao detectado" }
-            
-            $pingObj = New-Object System.Net.NetworkInformation.Ping
-            $internetStatus = try { if (($pingObj.Send("8.8.8.8", 1500)).Status -eq "Success") { "Conectado (Online)" } else { "Sem Acesso (Offline)" } } catch { "Sem Acesso (Offline)" }
-            $pingAdm2 = try { if (($pingObj.Send("adm2.netcontroll.com.br", 1500)).Status -eq "Success") { "OK (Acessivel)" } else { "FALHA (Inacessivel)" } } catch { "FALHA (Inacessivel)" }
-            
-            if ($ips) {
-                if ($ips -is [string]) { $ips = @($ips) }
-                $txtIPs = $ips -join ", "
-                $txtClipboard = $ips -join "`r`n"
-                
-                Clear-DnsClientCache
-                
-                Log-Message "INFO" "Diagnostico de Rede Detalhado:"
-                Log-Message "INFO" "   > Endereco IP.....: $txtIPs"
-                Log-Message "INFO" "   > Gateway Padrao..: $gateway"
-                Log-Message "INFO" "   > Servidores DNS..: $dnsServers"
-                Log-Message "INFO" "   > Status Internet.: $internetStatus (Cache DNS Limpo)"
-                Log-Message "INFO" "   > Ping ADM2.......: $pingAdm2"
-                
-                [System.Windows.Forms.Clipboard]::SetText($txtClipboard)
-                
-                $msgBody = "RELATORIO DE REDE:`n" +
-                "--------------------------------------------------`n" +
-                "Endereco IP.......: $txtIPs`n" +
-                "Gateway Padrao....: $gateway`n" +
-                "Servidores DNS....: $dnsServers`n" +
-                "Status Internet...: $internetStatus`n" +
-                "Ping ADM2 (Server): $pingAdm2`n" +
-                "--------------------------------------------------`n" +
-                "(Enderecos IP copiados para a Area de Transferencia!)"
+        if ($null -ne $Script:RedeForm -and -not $Script:RedeForm.IsDisposed) {
+            $Script:RedeForm.Activate(); return
+        }
 
-                [System.Windows.Forms.MessageBox]::Show($msgBody, "Diagnostico de Rede", "OK", "Information") | Out-Null
+        $f = New-ToolForm "Diagnostico de Rede" 780 700
+        $Script:RedeForm = $f
+
+        New-ToolLabel $f "DIAGNOSTICO DE REDE" 20 14 12 -Negrito | Out-Null
+        $lblAdaptador = New-ToolLabel $f "Lendo configuracao..." 20 40 8.5 -Cor $Script:UiSuave
+
+        # Faixa de veredito
+        $pnlVeredito = New-Object System.Windows.Forms.Panel
+        $pnlVeredito.Location = New-Object System.Drawing.Point(20, 66)
+        $pnlVeredito.Size = New-Object System.Drawing.Size(725, 54)
+        $pnlVeredito.Anchor = 'Top,Left,Right'
+        $pnlVeredito.BackColor = $Script:UiFundo
+        $pnlVeredito.Tag = @{ Cor = $Script:UiCinza; Texto = "Executando testes..." }
+        $pnlVeredito.Add_Paint({
+                param($s, $e)
+                $g = $e.Graphics
+                $g.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
+                $g.Clear($s.Parent.BackColor)
+                $d = $s.Tag
+                $rect = New-Object System.Drawing.Rectangle(0, 0, $s.Width, $s.Height)
+                $caminho = New-RoundedRectPath -X 0 -Y 0 -W $s.Width -H $s.Height -R 8
+                $br = New-Object System.Drawing.Drawing2D.LinearGradientBrush($rect, (Get-UiTom $d.Cor 18), (Get-UiTom $d.Cor -28), [float]0)
+                $g.FillPath($br, $caminho)
+                $fw = New-Object System.Drawing.Font("Segoe UI", 11.5, [System.Drawing.FontStyle]::Bold)
+                [System.Windows.Forms.TextRenderer]::DrawText($g, $d.Texto, $fw, $rect, [System.Drawing.Color]::White,
+                    ([System.Windows.Forms.TextFormatFlags]::HorizontalCenter -bor [System.Windows.Forms.TextFormatFlags]::VerticalCenter -bor [System.Windows.Forms.TextFormatFlags]::WordBreak))
+                $fw.Dispose(); $br.Dispose(); $caminho.Dispose()
+            })
+        [void]$f.Controls.Add($pnlVeredito)
+
+        # Cartoes da cadeia de conexao
+        $gRede = New-Gauge $f "REDE LOCAL" 20 132 234 88 $Script:UiAzul
+        $gNet = New-Gauge $f "INTERNET" 265 132 234 88 $Script:UiAzul
+        $gServidor = New-Gauge $f "SERVIDOR NETCONTROLL" 511 132 234 88 $Script:UiAzul
+
+        $lv = New-Object System.Windows.Forms.ListView
+        $lv.Location = New-Object System.Drawing.Point(20, 232)
+        $lv.Size = New-Object System.Drawing.Size(725, 366)
+        $lv.Anchor = 'Top,Left,Right,Bottom'
+        Format-ToolListView $lv
+        [void]$lv.Columns.Add("Item", 210)
+        [void]$lv.Columns.Add("Resultado", 400)
+        [void]$lv.Columns.Add("Status", 95)
+        [void]$f.Controls.Add($lv)
+
+        $Script:RedeRelatorio = ""
+
+        $addLinha = {
+            param([string]$Item, [string]$Valor, $Estado)
+            $it = New-Object System.Windows.Forms.ListViewItem($Item)
+            [void]$it.SubItems.Add($Valor)
+            if ($null -eq $Estado) { [void]$it.SubItems.Add("-"); $it.ForeColor = $Script:UiTexto }
+            elseif ($Estado) { [void]$it.SubItems.Add("OK"); $it.ForeColor = $Script:UiVerde }
+            else { [void]$it.SubItems.Add("FALHA"); $it.ForeColor = $Script:UiVermelho }
+            [void]$lv.Items.Add($it)
+        }
+
+        $diagnosticar = {
+            $lv.Items.Clear()
+            $pnlVeredito.Tag.Cor = $Script:UiCinza
+            $pnlVeredito.Tag.Texto = "Executando testes..."
+            $pnlVeredito.Invalidate()
+            Update-Gauge $gRede 0 "..." "testando" $Script:UiCinza
+            Update-Gauge $gNet 0 "..." "testando" $Script:UiCinza
+            Update-Gauge $gServidor 0 "..." "testando" $Script:UiCinza
+            [System.Windows.Forms.Application]::DoEvents()
+
+            $ping = New-Object System.Net.NetworkInformation.Ping
+            $linhas = @()
+
+            # --- configuracao do adaptador ---
+            $cfg = $null
+            $ad = $null
+            try {
+                $cfg = Get-NetIPConfiguration -ErrorAction Stop | Where-Object { $null -ne $_.IPv4DefaultGateway } | Select-Object -First 1
+                if ($cfg) { $ad = Get-NetAdapter -InterfaceIndex $cfg.InterfaceIndex -ErrorAction SilentlyContinue }
+            }
+            catch {}
+
+            $ipv4 = "-"; $mascara = "-"; $gw = ""; $dns = @()
+            if ($cfg) {
+                if ($cfg.IPv4Address) {
+                    $ipv4 = $cfg.IPv4Address[0].IPAddress
+                    $mascara = ConvertTo-Mascara $cfg.IPv4Address[0].PrefixLength
+                }
+                if ($cfg.IPv4DefaultGateway) { $gw = $cfg.IPv4DefaultGateway.NextHop }
+                if ($cfg.DNSServer) { $dns = @($cfg.DNSServer | Where-Object { $_.AddressFamily -eq 2 } | ForEach-Object { $_.ServerAddresses }) }
+            }
+            if ($dns.Count -eq 0 -and $cfg -and $cfg.DNSServer) { $dns = @($cfg.DNSServer.ServerAddresses) }
+
+            $semIP = ($ipv4 -eq "-" -or $ipv4 -like "169.254.*")
+            & $addLinha "Endereco IP" $(if ($ipv4 -like "169.254.*") { "$ipv4  (APIPA - o DHCP nao respondeu)" } else { $ipv4 }) (-not $semIP)
+            & $addLinha "Mascara de sub-rede" $mascara $null
+            & $addLinha "Gateway padrao" $(if ($gw) { $gw } else { "Nao detectado" }) ([bool]$gw)
+            & $addLinha "Servidores DNS" $(if ($dns.Count -gt 0) { $dns -join ", " } else { "Nao detectado" }) ($dns.Count -gt 0)
+
+            if ($ad) {
+                $lblAdaptador.Text = "$($ad.InterfaceDescription)   |   $($ad.LinkSpeed)   |   MAC $($ad.MacAddress)"
+                & $addLinha "Placa de rede" "$($ad.Name) - $($ad.InterfaceDescription)" $null
+                & $addLinha "Velocidade do link" "$($ad.LinkSpeed)" $null
+                & $addLinha "Endereco MAC" "$($ad.MacAddress)" $null
+
+                $tipo = "Cabo (Ethernet)"
+                if ($ad.PhysicalMediaType -match '802.11|Wireless|Native') { $tipo = "Wi-Fi (sem fio)" }
+                & $addLinha "Tipo de conexao" $tipo $null
+
+                # Qualidade do sinal quando for Wi-Fi: sinal fraco derruba PDV
+                if ($tipo -like "Wi-Fi*") {
+                    try {
+                        $wlan = netsh wlan show interfaces 2>$null
+                        $sinal = ($wlan | Select-String -Pattern 'Sinal|Signal' | Select-Object -First 1)
+                        $ssid = ($wlan | Select-String -Pattern '^\s+SSID\s+:' | Select-Object -First 1)
+                        if ($sinal) {
+                            $pctSinal = 0
+                            if ("$sinal" -match '(\d+)\s*%') { $pctSinal = [int]$matches[1] }
+                            $nomeRede = if ($ssid) { ("$ssid" -split ':', 2)[1].Trim() } else { "-" }
+                            & $addLinha "Sinal do Wi-Fi" "$pctSinal%  (rede: $nomeRede)" ($pctSinal -ge 60)
+                        }
+                    }
+                    catch {}
+                }
+            }
+
+            try {
+                $dhcp = Get-NetIPInterface -InterfaceIndex $cfg.InterfaceIndex -AddressFamily IPv4 -ErrorAction Stop
+                & $addLinha "Obtencao do IP" $(if ($dhcp.Dhcp -eq 'Enabled') { "Automatico (DHCP)" } else { "Fixo (manual)" }) $null
+            }
+            catch {}
+
+            # Proxy configurado costuma travar acesso ao servidor
+            try {
+                $prx = Get-ItemProperty "HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings" -ErrorAction Stop
+                if ($prx.ProxyEnable -eq 1) {
+                    & $addLinha "Proxy do Windows" "ATIVO: $($prx.ProxyServer)" $false
+                }
+                else { & $addLinha "Proxy do Windows" "Desativado (normal)" $true }
+            }
+            catch {}
+
+            # --- testes de conectividade ---
+            $okGw = $false; $msGw = 0
+            if ($gw) {
+                try {
+                    $r = $ping.Send($gw, 1500)
+                    if ($r.Status -eq 'Success') { $okGw = $true; $msGw = $r.RoundtripTime }
+                }
+                catch {}
+                & $addLinha "Ping no gateway" $(if ($okGw) { "$gw respondeu em $msGw ms" } else { "$gw nao respondeu" }) $okGw
+            }
+            [System.Windows.Forms.Application]::DoEvents()
+
+            $okNet = $false; $msNet = 0
+            try {
+                $r = $ping.Send("8.8.8.8", 2000)
+                if ($r.Status -eq 'Success') { $okNet = $true; $msNet = $r.RoundtripTime }
+            }
+            catch {}
+            & $addLinha "Internet (8.8.8.8)" $(if ($okNet) { "respondeu em $msNet ms" } else { "sem resposta" }) $okNet
+            [System.Windows.Forms.Application]::DoEvents()
+
+            $okDns = $false
+            $tempoDns = 0
+            try {
+                $cron = [System.Diagnostics.Stopwatch]::StartNew()
+                $res = [System.Net.Dns]::GetHostAddresses("google.com")
+                $cron.Stop()
+                if ($res.Count -gt 0) { $okDns = $true; $tempoDns = [int]$cron.ElapsedMilliseconds }
+            }
+            catch {}
+            & $addLinha "Resolucao de nomes (DNS)" $(if ($okDns) { "google.com resolvido em $tempoDns ms" } else { "falhou ao resolver google.com" }) $okDns
+            [System.Windows.Forms.Application]::DoEvents()
+
+            $okAdm = $false; $msAdm = 0
+            try {
+                $r = $ping.Send("adm2.netcontroll.com.br", 2500)
+                if ($r.Status -eq 'Success') { $okAdm = $true; $msAdm = $r.RoundtripTime }
+            }
+            catch {}
+            & $addLinha "Servidor NetControll" $(if ($okAdm) { "adm2 respondeu em $msAdm ms" } else { "adm2 nao respondeu ao ping" }) $okAdm
+            [System.Windows.Forms.Application]::DoEvents()
+
+            $portasAdm = @()
+            if ($okNet) {
+                try { $portasAdm = Test-PortasRapido -IP ([System.Net.Dns]::GetHostAddresses("adm2.netcontroll.com.br")[0].IPAddressToString) -Portas @(80, 443) -TimeoutMs 900 } catch {}
+                & $addLinha "Portas do servidor" $(if ($portasAdm.Count -gt 0) { "abertas: $($portasAdm -join ', ')" } else { "80 e 443 fechadas ou bloqueadas" }) ($portasAdm.Count -gt 0)
+            }
+            [System.Windows.Forms.Application]::DoEvents()
+
+            # --- cartoes ---
+            if ($okGw) {
+                Update-Gauge $gRede ([Math]::Min(100, $msGw * 4)) "OK" "gateway em $msGw ms" $Script:UiVerde
             }
             else {
-                [System.Windows.Forms.MessageBox]::Show("Nenhum IP valido encontrado.", "Rede", "OK", "Warning") | Out-Null
+                Update-Gauge $gRede 100 "FALHA" $(if ($gw) { "gateway nao responde" } else { "sem gateway" }) $Script:UiVermelho
             }
+            if ($okNet) {
+                $corNet = if ($msNet -ge 150) { $Script:UiAmarelo } else { $Script:UiVerde }
+                Update-Gauge $gNet ([Math]::Min(100, $msNet / 3)) "ONLINE" "$msNet ms ate 8.8.8.8" $corNet
+            }
+            else {
+                Update-Gauge $gNet 100 "OFFLINE" "sem acesso a internet" $Script:UiVermelho
+            }
+            if ($okAdm) {
+                $corAdm = if ($msAdm -ge 200) { $Script:UiAmarelo } else { $Script:UiVerde }
+                Update-Gauge $gServidor ([Math]::Min(100, $msAdm / 4)) "ACESSIVEL" "$msAdm ms ate o adm2" $corAdm
+            }
+            else {
+                Update-Gauge $gServidor 100 "SEM RESPOSTA" "adm2 inacessivel" $Script:UiVermelho
+            }
+
+            # --- veredito: aponta ONDE a corrente quebrou ---
+            if ($semIP) {
+                $pnlVeredito.Tag.Cor = $Script:UiVermelho
+                $pnlVeredito.Tag.Texto = "SEM IP VALIDO - cabo solto ou roteador sem DHCP"
+            }
+            elseif (-not $okGw -and $gw) {
+                $pnlVeredito.Tag.Cor = $Script:UiVermelho
+                $pnlVeredito.Tag.Texto = "PROBLEMA NA REDE LOCAL - o roteador ($gw) nao responde"
+            }
+            elseif (-not $okNet) {
+                $pnlVeredito.Tag.Cor = $Script:UiVermelho
+                $pnlVeredito.Tag.Texto = "REDE LOCAL OK, MAS SEM INTERNET - verifique o link do provedor"
+            }
+            elseif (-not $okDns) {
+                $pnlVeredito.Tag.Cor = $Script:UiAmarelo
+                $pnlVeredito.Tag.Texto = "INTERNET OK, MAS O DNS FALHOU - tente limpar o cache DNS"
+            }
+            elseif (-not $okAdm) {
+                $pnlVeredito.Tag.Cor = $Script:UiAmarelo
+                $pnlVeredito.Tag.Texto = "INTERNET OK, MAS O SERVIDOR NETCONTROLL NAO RESPONDE"
+            }
+            else {
+                $pnlVeredito.Tag.Cor = $Script:UiVerde
+                $pnlVeredito.Tag.Texto = "REDE FUNCIONANDO - internet e servidor acessiveis"
+            }
+            $pnlVeredito.Invalidate()
+
+            # --- relatorio em texto ---
+            $Script:RedeRelatorio = @"
+=== DIAGNOSTICO DE REDE - $env:COMPUTERNAME ===
+Data: $(Get-Date -Format 'dd/MM/yyyy HH:mm')
+
+Endereco IP:   $ipv4
+Mascara:       $mascara
+Gateway:       $(if ($gw) { $gw } else { '-' })
+DNS:           $(if ($dns.Count -gt 0) { $dns -join ', ' } else { '-' })
+Placa:         $(if ($ad) { "$($ad.InterfaceDescription) ($($ad.LinkSpeed))" } else { '-' })
+MAC:           $(if ($ad) { $ad.MacAddress } else { '-' })
+
+Gateway:       $(if ($okGw) { "OK - $msGw ms" } else { 'FALHA' })
+Internet:      $(if ($okNet) { "OK - $msNet ms" } else { 'FALHA' })
+DNS:           $(if ($okDns) { "OK - $tempoDns ms" } else { 'FALHA' })
+Servidor adm2: $(if ($okAdm) { "OK - $msAdm ms" } else { 'FALHA' })
+
+Resultado: $($pnlVeredito.Tag.Texto)
+"@
+
+            Log-Message "INFO" "Diagnostico de Rede:"
+            Log-Message "INFO" "   > IP: $ipv4  |  Gateway: $gw"
+            Log-Message "INFO" "   > DNS: $(if ($dns.Count -gt 0) { $dns -join ', ' } else { '-' })"
+            Log-Message "INFO" "   > Internet: $(if ($okNet) { "OK ($msNet ms)" } else { 'FALHA' })  |  adm2: $(if ($okAdm) { "OK ($msAdm ms)" } else { 'FALHA' })"
+
+            # Mantem o comportamento antigo: o IP ja fica na area de transferencia
+            try { [System.Windows.Forms.Clipboard]::SetText($ipv4) } catch {}
         }
-        else {
-            [System.Windows.Forms.MessageBox]::Show("Sem adaptadores de rede conectados.", "Rede", "OK", "Warning") | Out-Null
+
+        New-ToolButton $f "REEXECUTAR TESTES" 20 614 190 36 $Script:UiAzul $diagnosticar "Roda o diagnostico de novo" | Out-Null
+
+        New-ToolButton $f "LIMPAR CACHE DNS" 220 614 180 36 $Script:UiCinza {
+            try {
+                Clear-DnsClientCache
+                Log-Message "SUCESSO" "Cache DNS limpo."
+                & $diagnosticar
+            }
+            catch { Log-Message "ERRO" "Falha ao limpar cache DNS: $_" }
+        } "Resolve boa parte dos problemas de nome/DNS" | Out-Null
+
+        New-ToolButton $f "RENOVAR IP" 410 614 140 36 $Script:UiCinza {
+            $r = [System.Windows.Forms.MessageBox]::Show("Vou liberar e pedir um IP novo ao roteador.`n`nA conexao cai por alguns segundos. Continuar?",
+                "Renovar IP", [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Question)
+            if ($r -eq [System.Windows.Forms.DialogResult]::Yes) {
+                try {
+                    Log-Message "INFO" "Renovando IP (ipconfig /release + /renew)..."
+                    Start-Process "ipconfig" "/release" -Wait -WindowStyle Hidden
+                    Start-Process "ipconfig" "/renew" -Wait -WindowStyle Hidden
+                    Log-Message "SUCESSO" "IP renovado."
+                    & $diagnosticar
+                }
+                catch { Log-Message "ERRO" "Falha ao renovar IP: $_" }
+            }
+        } "Pede um endereco novo ao roteador (ipconfig /renew)" | Out-Null
+
+        New-ToolButton $f "COPIAR RELATORIO" 560 614 185 36 $Script:UiCinza {
+            Set-Clipboard -Value $Script:RedeRelatorio
+            [System.Windows.Forms.MessageBox]::Show("Relatorio copiado. Pode colar no chamado com Ctrl+V.", "Copiado", "OK", "Information") | Out-Null
+        } "Copia o diagnostico completo em texto" | Out-Null
+
+        $f.Add_FormClosing({ $Script:RedeForm = $null })
+        $f.Add_Shown({ & $diagnosticar })
+        [void]$f.ShowDialog($Script:MainForm)
+    }
+    catch {
+        Log-Message "ERRO" "Falha no diagnostico de rede: $_"
+        [System.Windows.Forms.MessageBox]::Show("Falha no diagnostico: $($_.Exception.Message)", "Rede", "OK", "Error") | Out-Null
+    }
+}
+
+
+# -----------------------------------------------------------------------------
+# ENERGIA DO USB: impressora termica USB que "some" depois de um tempo
+# geralmente e a porta sendo suspensa pelo Windows.
+# -----------------------------------------------------------------------------
+function Invoke-UsbPowerFix {
+    Log-Message "INFO" "Desligando economia de energia das portas USB..."
+    $feitos = @()
+    $falhas = @()
+
+    # 1) Suspensao seletiva de USB no plano de energia atual (tomada e bateria)
+    #    Subgrupo "Configuracoes USB" / "Configuracao de suspensao seletiva USB"
+    $subUsb = "2a737441-1930-4402-8d77-b2bebba308a3"
+    $cfgUsb = "48e6b7a6-50f5-4782-a5d4-53bb8f07e226"
+    try {
+        Start-Process "powercfg" "/setacvalueindex SCHEME_CURRENT $subUsb $cfgUsb 0" -Wait -WindowStyle Hidden
+        Start-Process "powercfg" "/setdcvalueindex SCHEME_CURRENT $subUsb $cfgUsb 0" -Wait -WindowStyle Hidden
+        Start-Process "powercfg" "/setactive SCHEME_CURRENT" -Wait -WindowStyle Hidden
+        $feitos += "Suspensao seletiva de USB desativada"
+        Log-Message "SUCESSO" "   > Suspensao seletiva de USB: desativada."
+    }
+    catch {
+        $falhas += "Suspensao seletiva de USB"
+        Log-Message "ERRO" "   > Falha na suspensao seletiva de USB: $($_.Exception.Message)"
+    }
+
+    # 2) Disco e suspensao do computador na tomada: PDV nao pode dormir
+    try {
+        Start-Process "powercfg" "/change disk-timeout-ac 0" -Wait -WindowStyle Hidden
+        Start-Process "powercfg" "/change standby-timeout-ac 0" -Wait -WindowStyle Hidden
+        Start-Process "powercfg" "/change hibernate-timeout-ac 0" -Wait -WindowStyle Hidden
+        $feitos += "Suspensao do computador e do disco desligadas (na tomada)"
+        Log-Message "SUCESSO" "   > Suspensao de disco/computador na tomada: desligada."
+    }
+    catch {
+        $falhas += "Timeouts de energia"
+        Log-Message "ERRO" "   > Falha nos timeouts de energia: $($_.Exception.Message)"
+    }
+
+    # 3) Aquele checkbox do Gerenciador de Dispositivos:
+    #    "Permitir que o computador desligue este dispositivo para economizar energia"
+    $ajustados = 0
+    $negados = 0
+    $jaOk = 0
+    try {
+        $dispositivos = @(Get-CimInstance -Namespace root\wmi -ClassName MSPower_DeviceEnable -ErrorAction Stop)
+        foreach ($d in $dispositivos) {
+            # So mexe em portas e hubs USB, nao em placa de rede
+            if ($d.InstanceName -notmatch 'USB\\(ROOT_HUB|VID_)') { continue }
+            if (-not $d.Enable) { $jaOk++; continue }
+            try {
+                Set-CimInstance -InputObject $d -Property @{ Enable = $false } -ErrorAction Stop
+                $ajustados++
+            }
+            catch { $negados++ }
+        }
+        if ($ajustados -gt 0) {
+            $feitos += "$ajustados porta(s)/hub(s) USB sem desligamento automatico"
+            Log-Message "SUCESSO" "   > $ajustados dispositivo(s) USB com economia de energia desativada."
+        }
+        if ($negados -gt 0) {
+            # Sem privilegio o WMI recusa a escrita: precisa avisar, nao dizer que deu certo
+            $falhas += "$negados porta(s) USB recusaram o ajuste (execute como administrador)"
+            Log-Message "ERRO" "   > $negados dispositivo(s) USB recusaram a alteracao (acesso negado)."
+        }
+        if ($ajustados -eq 0 -and $negados -eq 0) {
+            $feitos += "Portas USB ja estavam sem desligamento automatico ($jaOk)"
+            Log-Message "INFO" "   > Nenhum hub USB precisava de ajuste."
         }
     }
-    catch { Log-Message "ERRO" "Falha ao ler IPs: $_" }
+    catch {
+        Log-Message "INFO" "   > Ajuste por dispositivo indisponivel nesta maquina (WMI de energia)."
+    }
+
+    $texto = "AJUSTE DE ENERGIA DAS PORTAS USB`r`n`r`n"
+    if ($feitos.Count -gt 0) {
+        $texto += "Aplicado:`r`n"
+        foreach ($x in $feitos) { $texto += "  - $x`r`n" }
+    }
+    if ($falhas.Count -gt 0) {
+        $texto += "`r`nNao foi possivel aplicar:`r`n"
+        foreach ($x in $falhas) { $texto += "  - $x`r`n" }
+    }
+    $texto += "`r`nIsso evita que a impressora termica USB pare de responder`r`ndepois de um tempo parada. Se ela ja estiver travada,`r`ndesconecte e reconecte o cabo uma vez."
+
+    [System.Windows.Forms.MessageBox]::Show($texto, "Energia das portas USB", "OK",
+        $(if ($falhas.Count -gt 0) { "Warning" } else { "Information" })) | Out-Null
+}
+
+# -----------------------------------------------------------------------------
+# PAINEL DE SERVICOS (SQL SERVER, SPOOLER E SISTEMA NETCONTROLL)
+# -----------------------------------------------------------------------------
+function Get-ServicosRelevantes {
+    $lista = @()
+    try {
+        $todos = @(Get-Service -ErrorAction SilentlyContinue)
+        foreach ($s in $todos) {
+            $grupo = $null
+            if ($s.Name -like 'MSSQL$*' -or $s.Name -eq 'MSSQLSERVER') { $grupo = "SQL Server (banco)" }
+            elseif ($s.Name -eq 'SQLBrowser') { $grupo = "SQL Browser (localiza instancias)" }
+            elseif ($s.Name -eq 'SQLWriter') { $grupo = "SQL Writer (backup)" }
+            elseif ($s.Name -like 'SQLAgent$*' -or $s.Name -eq 'SQLSERVERAGENT') { $grupo = "SQL Agent (tarefas)" }
+            elseif ($s.Name -eq 'Spooler') { $grupo = "Spooler de impressao" }
+            elseif ($s.Name -match 'netcontroll|concentrador|xmenu|netpdv|xbot' -or
+                $s.DisplayName -match 'NetControll|Concentrador|XMenu|NetPDV|XBot') { $grupo = "Sistema NetControll" }
+
+            if ($grupo) {
+                $inicio = "-"
+                try { $inicio = (Get-CimInstance Win32_Service -Filter "Name='$($s.Name)'" -ErrorAction Stop).StartMode } catch {}
+                $lista += [PSCustomObject]@{
+                    Nome    = $s.Name
+                    Titulo  = $s.DisplayName
+                    Grupo   = $grupo
+                    Estado  = [string]$s.Status
+                    Inicio  = $inicio
+                }
+            }
+        }
+    }
+    catch {}
+    return ($lista | Sort-Object Grupo, Nome)
+}
+
+function Show-ServiceManager {
+    try {
+        if ($null -ne $Script:SrvForm -and -not $Script:SrvForm.IsDisposed) {
+            $Script:SrvForm.Activate(); return
+        }
+
+        $f = New-ToolForm "Servicos do Sistema (SQL / Impressao)" 820 660
+        $Script:SrvForm = $f
+
+        New-ToolLabel $f "SERVICOS DO SQL SERVER E DO SISTEMA" 20 14 12 -Negrito | Out-Null
+        $lblInst = New-ToolLabel $f "" 20 40 8.5 -Cor $Script:UiSuave
+
+        $pnlAviso = New-Object System.Windows.Forms.Panel
+        $pnlAviso.Location = New-Object System.Drawing.Point(20, 66)
+        $pnlAviso.Size = New-Object System.Drawing.Size(765, 50)
+        $pnlAviso.Anchor = 'Top,Left,Right'
+        $pnlAviso.BackColor = $Script:UiFundo
+        $pnlAviso.Tag = @{ Cor = $Script:UiCinza; Texto = "Lendo servicos..." }
+        $pnlAviso.Add_Paint({
+                param($s, $e)
+                $g = $e.Graphics
+                $g.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
+                $g.Clear($s.Parent.BackColor)
+                $d = $s.Tag
+                $rect = New-Object System.Drawing.Rectangle(0, 0, $s.Width, $s.Height)
+                $caminho = New-RoundedRectPath -X 0 -Y 0 -W $s.Width -H $s.Height -R 8
+                $br = New-Object System.Drawing.Drawing2D.LinearGradientBrush($rect, (Get-UiTom $d.Cor 18), (Get-UiTom $d.Cor -28), [float]0)
+                $g.FillPath($br, $caminho)
+                $fw = New-Object System.Drawing.Font("Segoe UI", 11, [System.Drawing.FontStyle]::Bold)
+                [System.Windows.Forms.TextRenderer]::DrawText($g, $d.Texto, $fw, $rect, [System.Drawing.Color]::White,
+                    ([System.Windows.Forms.TextFormatFlags]::HorizontalCenter -bor [System.Windows.Forms.TextFormatFlags]::VerticalCenter -bor [System.Windows.Forms.TextFormatFlags]::WordBreak))
+                $fw.Dispose(); $br.Dispose(); $caminho.Dispose()
+            })
+        [void]$f.Controls.Add($pnlAviso)
+
+        $lv = New-Object System.Windows.Forms.ListView
+        $lv.Location = New-Object System.Drawing.Point(20, 128)
+        $lv.Size = New-Object System.Drawing.Size(765, 330)
+        $lv.Anchor = 'Top,Left,Right,Bottom'
+        Format-ToolListView $lv
+        [void]$lv.Columns.Add("Servico", 250)
+        [void]$lv.Columns.Add("Funcao", 230)
+        [void]$lv.Columns.Add("Estado", 110)
+        [void]$lv.Columns.Add("Inicializacao", 155)
+        [void]$f.Controls.Add($lv)
+
+        $Script:SrvSelecionado = ""
+
+        $carregar = {
+            $sel = ""
+            if ($lv.SelectedItems.Count -gt 0) { $sel = $lv.SelectedItems[0].Text }
+            $lv.BeginUpdate()
+            $lv.Items.Clear()
+            $servicos = @(Get-ServicosRelevantes)
+            foreach ($s in $servicos) {
+                $it = New-Object System.Windows.Forms.ListViewItem($s.Nome)
+                [void]$it.SubItems.Add($s.Grupo)
+                [void]$it.SubItems.Add($s.Estado)
+                [void]$it.SubItems.Add($s.Inicio)
+                if ($s.Estado -eq 'Running') { $it.ForeColor = $Script:UiVerde }
+                elseif ($s.Inicio -eq 'Disabled') { $it.ForeColor = $Script:UiVermelho }
+                else { $it.ForeColor = $Script:UiAmarelo }
+                if ($s.Nome -eq $sel) { $it.Selected = $true }
+                [void]$lv.Items.Add($it)
+            }
+            $lv.EndUpdate()
+
+            # Instancias instaladas (registro) - mostra mesmo se o servico estiver parado
+            $instancias = @()
+            try { $instancias = @((Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Microsoft SQL Server' -Name InstalledInstances -ErrorAction Stop).InstalledInstances) } catch {}
+            $lblInst.Text = "Instancias SQL instaladas: $(if ($instancias.Count -gt 0) { $instancias -join ', ' } else { 'nenhuma encontrada' })   |   $env:COMPUTERNAME"
+
+            # Veredito
+            $sqlBanco = @($servicos | Where-Object { $_.Grupo -eq "SQL Server (banco)" })
+            $sqlRodando = @($sqlBanco | Where-Object { $_.Estado -eq 'Running' })
+            if ($sqlBanco.Count -eq 0) {
+                $pnlAviso.Tag.Cor = $Script:UiCinza
+                $pnlAviso.Tag.Texto = "SQL SERVER NAO INSTALADO NESTA MAQUINA"
+            }
+            elseif ($sqlRodando.Count -eq 0) {
+                $pnlAviso.Tag.Cor = $Script:UiVermelho
+                $pnlAviso.Tag.Texto = "SQL SERVER PARADO - o sistema nao vai conectar. Selecione e clique em INICIAR."
+            }
+            else {
+                $manual = @($sqlBanco | Where-Object { $_.Inicio -eq 'Manual' -or $_.Inicio -eq 'Disabled' })
+                if ($manual.Count -gt 0) {
+                    $pnlAviso.Tag.Cor = $Script:UiAmarelo
+                    $pnlAviso.Tag.Texto = "SQL RODANDO, MAS SEM INICIO AUTOMATICO - vai parar no proximo boot"
+                }
+                else {
+                    $pnlAviso.Tag.Cor = $Script:UiVerde
+                    $pnlAviso.Tag.Texto = "SQL SERVER RODANDO E CONFIGURADO PARA INICIAR COM O WINDOWS"
+                }
+            }
+            $pnlAviso.Invalidate()
+        }
+
+        $servicoSelecionado = {
+            if ($lv.SelectedItems.Count -eq 0) {
+                [System.Windows.Forms.MessageBox]::Show("Selecione um servico na lista primeiro.", "Servicos", "OK", "Information") | Out-Null
+                return ""
+            }
+            return $lv.SelectedItems[0].Text
+        }
+
+        New-ToolButton $f "INICIAR" 20 470 120 34 $Script:UiVerde {
+            $n = & $servicoSelecionado
+            if (-not $n) { return }
+            try {
+                Start-Service -Name $n -ErrorAction Stop
+                Log-Message "SUCESSO" "Servico iniciado: $n"
+            }
+            catch { Log-Message "ERRO" "Falha ao iniciar ${n}: $($_.Exception.Message)" }
+            & $carregar
+        } "Inicia o servico selecionado" | Out-Null
+
+        New-ToolButton $f "PARAR" 148 470 120 34 $Script:UiVermelho {
+            $n = & $servicoSelecionado
+            if (-not $n) { return }
+            $r = [System.Windows.Forms.MessageBox]::Show("Parar o servico '$n'?`n`nSe for o SQL Server, o sistema fica sem banco ate iniciar de novo.",
+                "Confirmar", [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Warning)
+            if ($r -ne [System.Windows.Forms.DialogResult]::Yes) { return }
+            try {
+                Stop-Service -Name $n -Force -ErrorAction Stop
+                Log-Message "INFO" "Servico parado: $n"
+            }
+            catch { Log-Message "ERRO" "Falha ao parar ${n}: $($_.Exception.Message)" }
+            & $carregar
+        } "Para o servico selecionado" | Out-Null
+
+        New-ToolButton $f "REINICIAR" 276 470 130 34 $Script:UiAzul {
+            $n = & $servicoSelecionado
+            if (-not $n) { return }
+            try {
+                Restart-Service -Name $n -Force -ErrorAction Stop
+                Log-Message "SUCESSO" "Servico reiniciado: $n"
+            }
+            catch { Log-Message "ERRO" "Falha ao reiniciar ${n}: $($_.Exception.Message)" }
+            & $carregar
+        } "Para e inicia o servico de novo" | Out-Null
+
+        New-ToolButton $f "INICIO AUTOMATICO" 414 470 200 34 $Script:UiCinza {
+            $n = & $servicoSelecionado
+            if (-not $n) { return }
+            try {
+                Set-Service -Name $n -StartupType Automatic -ErrorAction Stop
+                Log-Message "SUCESSO" "Servico $n configurado para iniciar com o Windows."
+            }
+            catch { Log-Message "ERRO" "Falha ao configurar ${n}: $($_.Exception.Message)" }
+            & $carregar
+        } "Faz o servico subir junto com o Windows" | Out-Null
+
+        New-ToolButton $f "ATUALIZAR" 622 470 163 34 $Script:UiCinza $carregar "Le os servicos de novo" | Out-Null
+
+        # --- teste de conexao com o servidor de banco ---
+        New-ToolLabel $f "Testar acesso ao banco em:" 20 520 9 -Cor $Script:UiSuave | Out-Null
+        $txtSrv = New-Object System.Windows.Forms.TextBox
+        $txtSrv.Location = New-Object System.Drawing.Point(196, 517)
+        $txtSrv.Size = New-Object System.Drawing.Size(210, 24)
+        $txtSrv.BackColor = [System.Drawing.Color]::FromArgb(20, 24, 34)
+        $txtSrv.ForeColor = $Script:UiTexto
+        $txtSrv.BorderStyle = 'FixedSingle'
+        $txtSrv.Text = "127.0.0.1"
+        [void]$f.Controls.Add($txtSrv)
+        if ($Script:ToolTip) { $Script:ToolTip.SetToolTip($txtSrv, "IP ou nome do servidor onde fica o SQL Server") }
+
+        $lblTeste = New-ToolLabel $f "" 20 556 9 -Cor $Script:UiSuave -W 760
+
+        New-ToolButton $f "TESTAR PORTA 1433" 414 516 200 34 $Script:UiAzul {
+            $alvo = $txtSrv.Text.Trim()
+            if (-not $alvo) { return }
+            $lblTeste.Text = "Testando $alvo..."
+            $lblTeste.ForeColor = $Script:UiSuave
+            [System.Windows.Forms.Application]::DoEvents()
+            try {
+                $ip = $alvo
+                if ($alvo -notmatch '^\d{1,3}(\.\d{1,3}){3}$') {
+                    $ip = [System.Net.Dns]::GetHostAddresses($alvo)[0].IPAddressToString
+                }
+                $abertas = Test-PortasRapido -IP $ip -Portas @(1433) -TimeoutMs 900
+                if ($abertas -contains 1433) {
+                    $lblTeste.Text = "OK: a porta 1433 de $alvo ($ip) esta acessivel - o PDV consegue chegar no banco."
+                    $lblTeste.ForeColor = $Script:UiVerde
+                    Log-Message "SUCESSO" "Porta 1433 acessivel em $alvo."
+                }
+                else {
+                    $lblTeste.Text = "FALHA: a porta 1433 de $alvo ($ip) nao respondeu - veja servico parado, firewall ou TCP/IP desabilitado no SQL."
+                    $lblTeste.ForeColor = $Script:UiVermelho
+                    Log-Message "ERRO" "Porta 1433 inacessivel em $alvo."
+                }
+            }
+            catch {
+                $lblTeste.Text = "Nao consegui resolver '$alvo': $($_.Exception.Message)"
+                $lblTeste.ForeColor = $Script:UiVermelho
+            }
+        } "Verifica se o PDV consegue alcancar o banco de dados" | Out-Null
+
+        New-ToolButton $f "SERVICOS DO WINDOWS" 622 516 163 34 $Script:UiCinza {
+            Start-Process "services.msc"
+        } "Abre o painel completo de servicos do Windows" | Out-Null
+
+        $f.Add_FormClosing({ $Script:SrvForm = $null })
+        & $carregar
+        [void]$f.ShowDialog($Script:MainForm)
+    }
+    catch {
+        Log-Message "ERRO" "Falha no painel de servicos: $_"
+        [System.Windows.Forms.MessageBox]::Show("Falha ao abrir o painel: $($_.Exception.Message)", "Servicos", "OK", "Error") | Out-Null
+    }
 }
 
 function Invoke-SFC {
@@ -332,56 +935,459 @@ function Invoke-DeepClean {
     catch { Log-Message "ERRO" "Falha na limpeza: $_" }
 }
 
+# -----------------------------------------------------------------------------
+# KIT VISUAL DAS FERRAMENTAS DE SUPORTE
+# Paleta e controles compartilhados pelo monitor, avaliacao, scanner e ping,
+# para as quatro janelas terem a mesma cara.
+# -----------------------------------------------------------------------------
+$Script:UiFundo = [System.Drawing.Color]::FromArgb(24, 28, 38)
+$Script:UiCartao = [System.Drawing.Color]::FromArgb(33, 40, 54)
+$Script:UiBorda = [System.Drawing.Color]::FromArgb(52, 62, 82)
+$Script:UiTexto = [System.Drawing.Color]::FromArgb(234, 240, 250)
+$Script:UiSuave = [System.Drawing.Color]::FromArgb(146, 160, 184)
+$Script:UiAzul = [System.Drawing.Color]::FromArgb(28, 116, 232)
+$Script:UiVerde = [System.Drawing.Color]::FromArgb(0, 194, 146)
+$Script:UiAmarelo = [System.Drawing.Color]::FromArgb(226, 168, 40)
+$Script:UiVermelho = [System.Drawing.Color]::FromArgb(222, 70, 70)
+$Script:UiCinza = [System.Drawing.Color]::FromArgb(62, 72, 92)
+
+function Get-UiTom {
+    param($Cor, [int]$Delta)
+    $r = [Math]::Max(0, [Math]::Min(255, [int]$Cor.R + $Delta))
+    $g = [Math]::Max(0, [Math]::Min(255, [int]$Cor.G + $Delta))
+    $b = [Math]::Max(0, [Math]::Min(255, [int]$Cor.B + $Delta))
+    return [System.Drawing.Color]::FromArgb($r, $g, $b)
+}
+
+function New-ToolForm {
+    param([string]$Titulo, [int]$Largura, [int]$Altura)
+    $f = New-Object System.Windows.Forms.Form
+    $f.Text = $Titulo
+    $f.Size = New-Object System.Drawing.Size($Largura, $Altura)
+    $f.StartPosition = 'CenterParent'
+    $f.BackColor = $Script:UiFundo
+    $f.ForeColor = $Script:UiTexto
+    $f.Font = New-Object System.Drawing.Font("Segoe UI", 9.5)
+    $f.FormBorderStyle = 'Sizable'
+    $f.MinimizeBox = $true
+    $f.MaximizeBox = $true
+    return $f
+}
+
+# Botao chapado moderno: cantos arredondados, gradiente sutil e hover/clique
+$Script:ModernBtnPaint = {
+    param($s, $e)
+    $w = $s.Width; $h = $s.Height
+    if ($w -le 4 -or $h -le 4) { return }
+    $g = $e.Graphics
+    $g.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
+    $fundo = if ($s.Parent) { $s.Parent.BackColor } else { $Script:UiFundo }
+    $g.Clear($fundo)
+
+    $base = $s.BackColor
+    $estado = [string]$s.Tag
+    if (-not $s.Enabled) { $base = $Script:UiCinza }
+    elseif ($estado -eq 'hover') { $base = Get-UiTom $base 26 }
+    elseif ($estado -eq 'down') { $base = Get-UiTom $base -26 }
+
+    $rect = New-Object System.Drawing.Rectangle(0, 0, $w, $h)
+    $caminho = New-RoundedRectPath -X 0 -Y 0 -W $w -H $h -R 6
+    $br = New-Object System.Drawing.Drawing2D.LinearGradientBrush($rect, (Get-UiTom $base 14), (Get-UiTom $base -14), [float]90)
+    $g.FillPath($br, $caminho)
+    $pen = New-Object System.Drawing.Pen([System.Drawing.Color]::FromArgb(60, 255, 255, 255), 1)
+    $g.DrawPath($pen, $caminho)
+
+    $cor = if ($s.Enabled) { [System.Drawing.Color]::White } else { $Script:UiSuave }
+    $flags = [System.Windows.Forms.TextFormatFlags]::HorizontalCenter -bor `
+        [System.Windows.Forms.TextFormatFlags]::VerticalCenter -bor `
+        [System.Windows.Forms.TextFormatFlags]::EndEllipsis
+    [System.Windows.Forms.TextRenderer]::DrawText($g, $s.Text, $s.Font, $rect, $cor, $flags)
+
+    $pen.Dispose(); $br.Dispose(); $caminho.Dispose()
+}
+
+function New-ToolButton {
+    param($Pai, [string]$Texto, [int]$X, [int]$Y, [int]$W, [int]$H = 32, $Cor = $null, $AoClicar = $null, [string]$Dica = "")
+    if ($null -eq $Cor) { $Cor = $Script:UiAzul }
+    $b = New-Object System.Windows.Forms.Button
+    $b.Text = $Texto
+    $b.Location = New-Object System.Drawing.Point($X, $Y)
+    $b.Size = New-Object System.Drawing.Size($W, $H)
+    $b.FlatStyle = 'Flat'
+    $b.FlatAppearance.BorderSize = 0
+    $b.BackColor = $Cor
+    $b.ForeColor = 'White'
+    $b.Font = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold)
+    $b.Cursor = 'Hand'
+    $b.Tag = 'normal'
+    $b.Add_MouseEnter({ $this.Tag = 'hover'; $this.Invalidate() })
+    $b.Add_MouseLeave({ $this.Tag = 'normal'; $this.Invalidate() })
+    $b.Add_MouseDown({ $this.Tag = 'down'; $this.Invalidate() })
+    $b.Add_MouseUp({ $this.Tag = 'hover'; $this.Invalidate() })
+    $b.Add_EnabledChanged({ $this.Invalidate() })
+    $b.Add_Paint($Script:ModernBtnPaint)
+    if ($AoClicar) { $b.Add_Click($AoClicar) }
+    if ($Dica -and $Script:ToolTip) { $Script:ToolTip.SetToolTip($b, $Dica) }
+    if ($Pai) { [void]$Pai.Controls.Add($b) }
+    return $b
+}
+
+function New-ToolLabel {
+    param($Pai, [string]$Texto, [int]$X, [int]$Y, [int]$Tamanho = 9, [switch]$Negrito, $Cor = $null, [int]$W = 0)
+    $l = New-Object System.Windows.Forms.Label
+    $l.Text = $Texto
+    $l.Location = New-Object System.Drawing.Point($X, $Y)
+    if ($W -gt 0) { $l.Width = $W; $l.AutoSize = $false } else { $l.AutoSize = $true }
+    $estilo = if ($Negrito) { [System.Drawing.FontStyle]::Bold } else { [System.Drawing.FontStyle]::Regular }
+    $l.Font = New-Object System.Drawing.Font("Segoe UI", $Tamanho, $estilo)
+    $l.ForeColor = if ($Cor) { $Cor } else { $Script:UiTexto }
+    $l.BackColor = [System.Drawing.Color]::Transparent
+    if ($Pai) { [void]$Pai.Controls.Add($l) }
+    return $l
+}
+
+# Medidor (CPU / RAM / disco): titulo, valor grande e barra arredondada
+$Script:GaugePaint = {
+    param($s, $e)
+    $w = $s.Width; $h = $s.Height
+    if ($w -le 10 -or $h -le 10) { return }
+    $d = $s.Tag
+    if ($null -eq $d) { return }
+    $g = $e.Graphics
+    $g.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
+
+    $cartao = New-RoundedRectPath -X 0 -Y 0 -W $w -H $h -R 8
+    $bCartao = New-Object System.Drawing.SolidBrush($Script:UiCartao)
+    $g.Clear($s.Parent.BackColor)
+    $g.FillPath($bCartao, $cartao)
+    $bCartao.Dispose()
+
+    $rTitulo = New-Object System.Drawing.Rectangle(14, 10, ($w - 28), 18)
+    $fTitulo = New-Object System.Drawing.Font("Segoe UI", 8.5, [System.Drawing.FontStyle]::Bold)
+    [System.Windows.Forms.TextRenderer]::DrawText($g, $d.Titulo, $fTitulo, $rTitulo, $Script:UiSuave,
+        ([System.Windows.Forms.TextFormatFlags]::Left -bor [System.Windows.Forms.TextFormatFlags]::VerticalCenter))
+
+    $rValor = New-Object System.Drawing.Rectangle(14, 26, ($w - 28), 30)
+    $fValor = New-Object System.Drawing.Font("Segoe UI", 16, [System.Drawing.FontStyle]::Bold)
+    [System.Windows.Forms.TextRenderer]::DrawText($g, $d.Texto, $fValor, $rValor, $Script:UiTexto,
+        ([System.Windows.Forms.TextFormatFlags]::Left -bor [System.Windows.Forms.TextFormatFlags]::VerticalCenter))
+
+    # Barra
+    $bx = 14; $bw = $w - 28; $bh = 8; $by = $h - 26
+    if ($bw -gt 10) {
+        $trilho = New-RoundedRectPath -X $bx -Y $by -W $bw -H $bh -R 4
+        $bTrilho = New-Object System.Drawing.SolidBrush([System.Drawing.Color]::FromArgb(20, 24, 34))
+        $g.FillPath($bTrilho, $trilho)
+        $pct = [Math]::Max(0, [Math]::Min(100, [double]$d.Valor))
+        $fw = [int]($bw * $pct / 100)
+        if ($fw -gt 3) {
+            $cor = $d.Cor
+            $rFill = New-Object System.Drawing.Rectangle($bx, $by, $fw, $bh)
+            $preenche = New-RoundedRectPath -X $bx -Y $by -W $fw -H $bh -R 4
+            $bFill = New-Object System.Drawing.Drawing2D.LinearGradientBrush($rFill, (Get-UiTom $cor 30), $cor, [float]0)
+            $g.FillPath($bFill, $preenche)
+            $bFill.Dispose(); $preenche.Dispose()
+        }
+        $bTrilho.Dispose(); $trilho.Dispose()
+    }
+
+    # Legenda embaixo
+    if ($d.Legenda) {
+        $rLeg = New-Object System.Drawing.Rectangle(14, ($h - 16), ($w - 28), 14)
+        $fLeg = New-Object System.Drawing.Font("Segoe UI", 8)
+        [System.Windows.Forms.TextRenderer]::DrawText($g, $d.Legenda, $fLeg, $rLeg, $Script:UiSuave,
+            ([System.Windows.Forms.TextFormatFlags]::Left -bor [System.Windows.Forms.TextFormatFlags]::VerticalCenter))
+        $fLeg.Dispose()
+    }
+    $fTitulo.Dispose(); $fValor.Dispose(); $cartao.Dispose()
+}
+
+function New-Gauge {
+    param($Pai, [string]$Titulo, [int]$X, [int]$Y, [int]$W = 180, [int]$H = 92, $Cor = $null)
+    $p = New-Object System.Windows.Forms.Panel
+    $p.Location = New-Object System.Drawing.Point($X, $Y)
+    $p.Size = New-Object System.Drawing.Size($W, $H)
+    $p.BackColor = $Script:UiFundo
+    $p.Tag = @{ Titulo = $Titulo; Texto = "--"; Valor = 0; Legenda = ""; Cor = $(if ($Cor) { $Cor } else { $Script:UiAzul }) }
+    $p.Add_Paint($Script:GaugePaint)
+    if ($Pai) { [void]$Pai.Controls.Add($p) }
+    return $p
+}
+
+function Update-Gauge {
+    param($Gauge, [double]$Valor, [string]$Texto, [string]$Legenda = "", $Cor = $null)
+    if ($null -eq $Gauge -or $Gauge.IsDisposed) { return }
+    $d = $Gauge.Tag
+    $d.Valor = $Valor
+    $d.Texto = $Texto
+    $d.Legenda = $Legenda
+    if ($Cor) { $d.Cor = $Cor }
+    $Gauge.Invalidate()
+}
+
+function Get-CorPorUso {
+    param([double]$Pct)
+    if ($Pct -ge 90) { return $Script:UiVermelho }
+    if ($Pct -ge 70) { return $Script:UiAmarelo }
+    return $Script:UiVerde
+}
+
+function Format-ToolListView {
+    param($LV)
+    $LV.View = 'Details'
+    $LV.FullRowSelect = $true
+    $LV.GridLines = $false
+    $LV.HideSelection = $false
+    $LV.BackColor = [System.Drawing.Color]::FromArgb(20, 24, 34)
+    $LV.ForeColor = $Script:UiTexto
+    $LV.BorderStyle = 'None'
+    $LV.Font = New-Object System.Drawing.Font("Segoe UI", 9.5)
+}
+
+# -----------------------------------------------------------------------------
+# MONITOR DE CPU E MEMORIA
+# -----------------------------------------------------------------------------
 function Show-ResourceMonitor {
     try {
-        $fMon = New-Object System.Windows.Forms.Form
-        $fMon.Text = "Monitor de Recursos (Top 5)"; $fMon.Size = "450,480"; $fMon.StartPosition = 'CenterParent'
-        $fMon.BackColor = [System.Drawing.Color]::FromArgb(35, 35, 40); $fMon.ForeColor = 'White'
-        $fMon.FormBorderStyle = 'FixedDialog'; $fMon.MaximizeBox = $false
-
-        $lblHeader = New-Object System.Windows.Forms.Label; $lblHeader.Text = "PROCESSOS MAIS PESADOS AGORA"; $lblHeader.Location = '20,20'; $lblHeader.AutoSize = $true
-        $lblHeader.Font = New-Object System.Drawing.Font("Segoe UI", 12, [System.Drawing.FontStyle]::Bold)
-        [void]$fMon.Controls.Add($lblHeader)
-
-        $txtBox = New-Object System.Windows.Forms.RichTextBox; $txtBox.Location = '20,60'; $txtBox.Size = '395,300'
-        $txtBox.BackColor = [System.Drawing.Color]::FromArgb(45, 45, 50); $txtBox.ForeColor = 'PaleGreen'; $txtBox.ReadOnly = $true
-        $txtBox.Font = New-Object System.Drawing.Font("Consolas", 10); $txtBox.BorderStyle = 'None'
-        [void]$fMon.Controls.Add($txtBox)
-
-        $update = {
-            $cpu = Get-Process | Where-Object { $_.CPU -ne $null } | Sort-Object CPU -Descending | Select-Object -First 5
-            $ram = Get-Process | Sort-Object WorkingSet64 -Descending | Select-Object -First 5
-            $text = "--- TOP CPU ---`n"
-            foreach ($p in $cpu) { $text += "$($p.ProcessName.PadRight(15)) : $([Math]::Round($p.CPU,1)) %`n" }
-            $text += "`n--- TOP RAM (Memória) ---`n"
-            foreach ($p in $ram) { $text += "$($p.ProcessName.PadRight(15)) : $([Math]::Round($p.WorkingSet64 / 1MB,1)) MB`n" }
-            $txtBox.Text = $text
+        if ($null -ne $Script:MonForm -and -not $Script:MonForm.IsDisposed) {
+            $Script:MonForm.Activate(); return
         }
-        &$update
 
-        $btnRefresh = New-Object System.Windows.Forms.Button; $btnRefresh.Text = "ATUALIZAR AGORA"; $btnRefresh.Location = '20,380'; $btnRefresh.Size = '395,40'
-        $btnRefresh.BackColor = [System.Drawing.Color]::FromArgb(0, 120, 215); $btnRefresh.FlatStyle = 'Flat'; $btnRefresh.Font = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold)
-        $btnRefresh.Add_Click({ &$update })
-        [void]$fMon.Controls.Add($btnRefresh)
-        [void]$fMon.ShowDialog()
+        $Script:MonAnterior = @{}
+        $Script:MonUltimaHora = $null
+        $Script:MonNucleos = [Math]::Max(1, [int]$env:NUMBER_OF_PROCESSORS)
+
+        $f = New-ToolForm "Monitor de Recursos" 760 620
+        $Script:MonForm = $f
+
+        New-ToolLabel $f "USO DO SISTEMA EM TEMPO REAL" 20 16 12 -Negrito | Out-Null
+        $lblUptime = New-ToolLabel $f "" 20 40 8.5 -Cor $Script:UiSuave
+
+        $gCpu = New-Gauge $f "CPU" 20 66 225 92 $Script:UiAzul
+        $gRam = New-Gauge $f "MEMORIA RAM" 257 66 225 92 $Script:UiVerde
+        $gDisco = New-Gauge $f "DISCO C:" 494 66 225 92 $Script:UiAmarelo
+
+        New-ToolLabel $f "PROCESSOS QUE MAIS CONSOMEM" 20 174 10 -Negrito | Out-Null
+        $lblStat = New-ToolLabel $f "" 300 176 8.5 -Cor $Script:UiSuave
+
+        $lv = New-Object System.Windows.Forms.ListView
+        $lv.Location = New-Object System.Drawing.Point(20, 200)
+        $lv.Size = New-Object System.Drawing.Size(699, 320)
+        $lv.Anchor = 'Top,Left,Right,Bottom'
+        Format-ToolListView $lv
+        [void]$lv.Columns.Add("Processo", 215)
+        [void]$lv.Columns.Add("CPU %", 70)
+        [void]$lv.Columns.Add("Memoria", 100)
+        [void]$lv.Columns.Add("PID", 65)
+        [void]$lv.Columns.Add("Descricao", 178)
+        [void]$f.Controls.Add($lv)
+
+        $Script:MonPausado = $false
+
+        $atualizar = {
+            try {
+                $agora = Get-Date
+                $procs = Get-Process -ErrorAction SilentlyContinue
+                $atual = @{}
+                $linhas = @()
+                $somaCpu = 0.0
+
+                $dt = 0
+                if ($null -ne $Script:MonUltimaHora) { $dt = ($agora - $Script:MonUltimaHora).TotalSeconds }
+
+                foreach ($p in $procs) {
+                    $seg = 0.0
+                    try { $seg = $p.TotalProcessorTime.TotalSeconds } catch { continue }
+                    $atual[$p.Id] = $seg
+
+                    $pct = 0.0
+                    if ($dt -gt 0.2 -and $Script:MonAnterior.ContainsKey($p.Id)) {
+                        $delta = $seg - $Script:MonAnterior[$p.Id]
+                        if ($delta -gt 0) { $pct = ($delta / $dt) / $Script:MonNucleos * 100 }
+                    }
+                    $somaCpu += $pct
+
+                    $desc = ""
+                    try { if ($p.Description) { $desc = $p.Description } } catch {}
+                    $linhas += [PSCustomObject]@{
+                        Nome = $p.ProcessName
+                        Cpu  = $pct
+                        Ram  = $p.WorkingSet64
+                        Pid  = $p.Id
+                        Desc = $desc
+                    }
+                }
+                $Script:MonAnterior = $atual
+                $Script:MonUltimaHora = $agora
+
+                # Ordena por CPU e, em empate, por memoria
+                $top = $linhas | Sort-Object -Property @{Expression = 'Cpu'; Descending = $true }, @{Expression = 'Ram'; Descending = $true } | Select-Object -First 18
+
+                $selecionado = if ($lv.SelectedItems.Count -gt 0) { $lv.SelectedItems[0].SubItems[3].Text } else { "" }
+                $lv.BeginUpdate()
+                $lv.Items.Clear()
+                foreach ($l in $top) {
+                    $item = New-Object System.Windows.Forms.ListViewItem($l.Nome)
+                    [void]$item.SubItems.Add(("{0:N1}" -f $l.Cpu))
+                    [void]$item.SubItems.Add(("{0:N1} MB" -f ($l.Ram / 1MB)))
+                    [void]$item.SubItems.Add([string]$l.Pid)
+                    [void]$item.SubItems.Add($l.Desc)
+                    if ($l.Cpu -ge 25) { $item.ForeColor = $Script:UiVermelho }
+                    elseif ($l.Cpu -ge 10) { $item.ForeColor = $Script:UiAmarelo }
+                    elseif ($l.Ram -ge 800MB) { $item.ForeColor = $Script:UiAmarelo }
+                    if ([string]$l.Pid -eq $selecionado) { $item.Selected = $true }
+                    [void]$lv.Items.Add($item)
+                }
+                $lv.EndUpdate()
+
+                # Medidores. Na primeira leitura ainda nao ha base de comparacao
+                # para calcular o uso de CPU (precisa de duas amostras).
+                if ($dt -le 0.2) {
+                    Update-Gauge $gCpu 0 "medindo..." "$($Script:MonNucleos) nucleos logicos" $Script:UiAzul
+                }
+                else {
+                    $cpuPct = [Math]::Min(100, $somaCpu)
+                    Update-Gauge $gCpu $cpuPct ("{0:N0} %" -f $cpuPct) "$($Script:MonNucleos) nucleos logicos" (Get-CorPorUso $cpuPct)
+                }
+
+                $osi = Get-CimInstance Win32_OperatingSystem -ErrorAction SilentlyContinue
+                if ($osi) {
+                    $ramTotal = $osi.TotalVisibleMemorySize / 1MB
+                    $ramLivre = $osi.FreePhysicalMemory / 1MB
+                    $ramUso = $ramTotal - $ramLivre
+                    $ramPct = if ($ramTotal -gt 0) { $ramUso / $ramTotal * 100 } else { 0 }
+                    Update-Gauge $gRam $ramPct ("{0:N0} %" -f $ramPct) ("{0:N1} de {1:N1} GB em uso" -f $ramUso, $ramTotal) (Get-CorPorUso $ramPct)
+
+                    try {
+                        $up = $agora - $osi.LastBootUpTime
+                        $lblUptime.Text = "Ligado ha $([int]$up.TotalDays)d $($up.Hours)h $($up.Minutes)min   |   $env:COMPUTERNAME"
+                    }
+                    catch {}
+                }
+
+                $disco = Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='C:'" -ErrorAction SilentlyContinue
+                if ($disco -and $disco.Size -gt 0) {
+                    $usado = ($disco.Size - $disco.FreeSpace) / 1GB
+                    $totalD = $disco.Size / 1GB
+                    $dPct = $usado / $totalD * 100
+                    Update-Gauge $gDisco $dPct ("{0:N0} %" -f $dPct) ("{0:N0} GB livres de {1:N0} GB" -f ($disco.FreeSpace / 1GB), $totalD) (Get-CorPorUso $dPct)
+                }
+
+                $lblStat.Text = "$($procs.Count) processos  -  atualizado $(Get-Date -Format 'HH:mm:ss')"
+            }
+            catch {
+                $lblStat.Text = "Falha ao ler: $($_.Exception.Message)"
+            }
+        }
+
+        $timer = New-Object System.Windows.Forms.Timer
+        $timer.Interval = 2000
+        $timer.Add_Tick($atualizar)
+
+        $btnPausar = New-ToolButton $f "PAUSAR" 20 536 130 34 $Script:UiCinza $null "Congela a atualizacao automatica"
+        $btnPausar.Anchor = 'Bottom,Left'
+        $btnPausar.Add_Click({
+                if ($timer.Enabled) { $timer.Stop(); $btnPausar.Text = "CONTINUAR"; $btnPausar.BackColor = $Script:UiVerde }
+                else { $timer.Start(); $btnPausar.Text = "PAUSAR"; $btnPausar.BackColor = $Script:UiCinza }
+                $btnPausar.Invalidate()
+            })
+
+        $btnAgora = New-ToolButton $f "ATUALIZAR AGORA" 160 536 170 34 $Script:UiAzul $atualizar
+        $btnAgora.Anchor = 'Bottom,Left'
+
+        $btnMatar = New-ToolButton $f "ENCERRAR PROCESSO" 340 536 190 34 $Script:UiVermelho $null "Finaliza o processo selecionado na lista"
+        $btnMatar.Anchor = 'Bottom,Left'
+        $btnMatar.Add_Click({
+                if ($lv.SelectedItems.Count -eq 0) {
+                    [System.Windows.Forms.MessageBox]::Show("Selecione um processo na lista primeiro.", "Encerrar processo", "OK", "Information") | Out-Null
+                    return
+                }
+                $nome = $lv.SelectedItems[0].Text
+                $procId = [int]$lv.SelectedItems[0].SubItems[3].Text
+                $r = [System.Windows.Forms.MessageBox]::Show("Encerrar '$nome' (PID $procId)?`n`nTrabalhos nao salvos desse programa serao perdidos.",
+                    "Confirmar", [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Warning)
+                if ($r -eq [System.Windows.Forms.DialogResult]::Yes) {
+                    try {
+                        Stop-Process -Id $procId -Force -ErrorAction Stop
+                        Log-Message "INFO" "Processo encerrado: $nome (PID $procId)"
+                        & $atualizar
+                    }
+                    catch {
+                        [System.Windows.Forms.MessageBox]::Show("Nao foi possivel encerrar: $($_.Exception.Message)", "Erro", "OK", "Error") | Out-Null
+                    }
+                }
+            })
+
+        $btnTarefas = New-ToolButton $f "GERENCIADOR DE TAREFAS" 540 536 179 34 $Script:UiCinza { Start-Process taskmgr.exe }
+        $btnTarefas.Anchor = 'Bottom,Right'
+
+        $f.Add_FormClosing({
+                try { $timer.Stop(); $timer.Dispose() } catch {}
+                $Script:MonForm = $null
+            })
+
+        & $atualizar
+        $timer.Start()
+        [void]$f.ShowDialog($Script:MainForm)
     }
     catch { Log-Message "ERRO" "Monitor falhou: $_" }
 }
 
+# -----------------------------------------------------------------------------
+# AVALIACAO DE HARDWARE
+# -----------------------------------------------------------------------------
 function Show-SystemInfo {
-    Log-Message "INFO" "Iniciando Avaliação de Hardware..."
+    Log-Message "INFO" "Iniciando Avaliacao de Hardware..."
     try {
-        $os = Get-WmiObject Win32_OperatingSystem
-        $cpu = Get-WmiObject Win32_Processor
-        $ram = Get-WmiObject Win32_ComputerSystem
-        $drive = Get-WmiObject Win32_LogicalDisk -Filter "DeviceID='C:'"
-        
-        $ramGB = [Math]::Round($ram.TotalPhysicalMemory / 1GB, 1)
+        $os = Get-CimInstance Win32_OperatingSystem
+        $cpu = Get-CimInstance Win32_Processor | Select-Object -First 1
+        $cs = Get-CimInstance Win32_ComputerSystem
+        $bios = Get-CimInstance Win32_BIOS -ErrorAction SilentlyContinue
+        $drive = Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='C:'"
+        $video = Get-CimInstance Win32_VideoController -ErrorAction SilentlyContinue | Select-Object -First 1
+
+        $ramGB = [Math]::Round($cs.TotalPhysicalMemory / 1GB, 1)
         $diskGB = [Math]::Round($drive.Size / 1GB, 1)
         $freeGB = [Math]::Round($drive.FreeSpace / 1GB, 1)
         $cpuName = $cpu.Name.Trim()
+        $nucleos = "$($cpu.NumberOfCores) nucleos / $($cpu.NumberOfLogicalProcessors) threads"
 
-        # Tabela de Benchmarks Conhecidos
+        # Tipo de disco onde fica o C: (SSD x HD mecanico)
+        $tipoDisco = "Nao identificado"
+        try {
+            $fisico = Get-PhysicalDisk -ErrorAction Stop | Where-Object { $_.MediaType -and $_.MediaType -ne 'Unspecified' } | Select-Object -First 1
+            if ($fisico) { $tipoDisco = [string]$fisico.MediaType }
+        }
+        catch {}
+        $ehSSD = ($tipoDisco -match 'SSD')
+
+        # Memoria: velocidade e pentes usados
+        $pentes = @()
+        try { $pentes = @(Get-CimInstance Win32_PhysicalMemory -ErrorAction Stop) } catch {}
+        $ramDetalhe = "$ramGB GB"
+        if ($pentes.Count -gt 0) {
+            $vel = ($pentes | Where-Object { $_.Speed } | Select-Object -First 1).Speed
+            $ramDetalhe = "$ramGB GB  -  $($pentes.Count) pente(s)"
+            if ($vel) { $ramDetalhe += " a $vel MHz" }
+        }
+
+        # Rede: adaptador ativo e velocidade do link
+        $redeInfo = "Sem conexao identificada"
+        try {
+            $ad = Get-CimInstance Win32_NetworkAdapter -Filter "NetEnabled=True" -ErrorAction Stop |
+                Where-Object { $_.PhysicalAdapter -and $_.Speed } | Sort-Object Speed -Descending | Select-Object -First 1
+            if ($ad) { $redeInfo = "$($ad.Name)  -  $([Math]::Round($ad.Speed / 1MB)) Mbps" }
+        }
+        catch {}
+
+        # Antivirus ativo (util para saber quem pode estar bloqueando instalacao)
+        $antivirus = "Nao identificado"
+        try {
+            $avs = @(Get-CimInstance -Namespace "root\SecurityCenter2" -ClassName AntiVirusProduct -ErrorAction Stop)
+            if ($avs.Count -gt 0) { $antivirus = ($avs | ForEach-Object { $_.displayName }) -join ", " }
+        }
+        catch {}
+
         $benchTable = @{
             "AMD Ryzen 3 3200GE"  = 7309
             "AMD Ryzen 3 3200G"   = 7131
@@ -389,306 +1395,562 @@ function Show-SystemInfo {
             "Intel Core i5-8400"  = 9205
             "Intel Core i3-10100" = 8645
         }
-        
-        $score = "N/A"
+        $score = "Nao catalogado"
         foreach ($key in $benchTable.Keys) {
             if ($cpuName -match [regex]::Escape($key)) { $score = $benchTable[$key]; break }
         }
 
-        # Lógica de Cores e Status
         $passRAM = $ramGB -ge 15.5
         $passDisk = $diskGB -ge 210
+        $passLivre = $freeGB -ge 20
         $passOS = $os.Caption -match "Windows 10|Windows 11"
-        $passBench = if ($score -is [int]) { $score -ge 3500 } else { $true } # Se nao souber, assume ok p/ nao alarmar
+        $passBench = if ($score -is [int]) { $score -ge 3500 } else { $true }
 
-        $fEval = New-Object System.Windows.Forms.Form
-        $fEval.Text = "Avaliacao de Hardware XMenu"; $fEval.Size = "550,500"; $fEval.StartPosition = 'CenterParent'
-        $fEval.BackColor = [System.Drawing.Color]::FromArgb(30, 30, 35); $fEval.ForeColor = 'White'
-        $fEval.FormBorderStyle = 'FixedDialog'; $fEval.MaximizeBox = $false
-
-        $title = New-Object System.Windows.Forms.Label; $title.Text = "RELATORIO DE COMPATIBILIDADE"; $title.Location = '20,20'; $title.AutoSize = $true
-        $title.Font = New-Object System.Drawing.Font("Segoe UI", 12, [System.Drawing.FontStyle]::Bold)
-        [void]$fEval.Controls.Add($title)
-
-        $AddLabel = {
-            param($txt, $val, $pass, $y)
-            $lblT = New-Object System.Windows.Forms.Label; $lblT.Text = $txt; $lblT.Location = "25,$y"; $lblT.AutoSize = $true
-            $lblV = New-Object System.Windows.Forms.Label; $lblV.Text = $val; $lblV.Location = "180,$y"; $lblV.AutoSize = $true
-            $lblV.Width = 330 # Largura fixa para nao cortar texto longo
-            $lblV.ForeColor = if ($pass) { [System.Drawing.Color]::PaleGreen } else { [System.Drawing.Color]::Salmon }
-            $lblV.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
-            [void]$fEval.Controls.Add($lblT); [void]$fEval.Controls.Add($lblV)
-        }
-
-        &$AddLabel "Sistema Op.:" "$($os.Caption)" $passOS 70
-        &$AddLabel "Memoria RAM:" "$ramGB GB" $passRAM 110
-        &$AddLabel "Disco C: (SSD):" "$diskGB GB" $passDisk 150
-        &$AddLabel "Processador:" "$cpuName" $true 190
-        &$AddLabel "Benchmark Est.:" "$score" ($score -ge 3500) 235
-
-        # Gerar Link Dinamico
         $cleanCpu = $cpuName -replace '\s+', '+'
         $benchUrl = "https://www.cpubenchmark.net/cpu.php?cpu=$cleanCpu"
 
-        $note = New-Object System.Windows.Forms.Label; $note.Text = "* Benchmark minimo recomendado: 3500"; $note.Location = '20,280'; $note.ForeColor = 'Gray'; $note.AutoSize = $true
-        [void]$fEval.Controls.Add($note)
+        $f = New-ToolForm "Avaliacao de Hardware" 700 720
+        $f.MaximizeBox = $false
 
-        $btnVisit = New-Object System.Windows.Forms.Button; $btnVisit.Text = "VER BENCHMARK ONLINE"; $btnVisit.Location = '20,310'; $btnVisit.Size = '495,40'
-        $btnVisit.BackColor = [System.Drawing.Color]::FromArgb(50, 50, 55); $btnVisit.FlatStyle = 'Flat'; $btnVisit.Font = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold)
-        $btnVisit.Add_Click({ Start-Process $benchUrl })
-        [void]$fEval.Controls.Add($btnVisit)
+        New-ToolLabel $f "RELATORIO DE COMPATIBILIDADE" 22 16 13 -Negrito | Out-Null
+        New-ToolLabel $f "$($cs.Manufacturer) $($cs.Model)   |   Serie: $(if ($bios) { $bios.SerialNumber } else { '-' })" 22 42 8.5 -Cor $Script:UiSuave | Out-Null
 
-        $btnCopy = New-Object System.Windows.Forms.Button; $btnCopy.Text = "COPIAR RELATORIO E FECHAR"; $btnCopy.Location = '20,370'; $btnCopy.Size = '495,50'
-        $btnCopy.BackColor = [System.Drawing.Color]::FromArgb(0, 120, 215); $btnCopy.FlatStyle = 'Flat'; $btnCopy.Font = New-Object System.Drawing.Font("Segoe UI", 11, [System.Drawing.FontStyle]::Bold)
-        $btnCopy.Cursor = 'Hand'
-        
-        $passBench = if ($score -is [int]) { $score -ge 3500 } else { $true }
-        
-        $infoText = @"
-Processador:
-$cpuName $(if($passBench){"✔️"}else{"❌"})
+        # Resumo geral no topo
+        $reprovados = @()
+        if (-not $passRAM) { $reprovados += "RAM" }
+        if (-not $passDisk) { $reprovados += "tamanho do disco" }
+        if (-not $passLivre) { $reprovados += "espaco livre" }
+        if (-not $passOS) { $reprovados += "versao do Windows" }
+        if (-not $passBench) { $reprovados += "desempenho da CPU" }
+        if (-not $ehSSD -and $tipoDisco -ne "Nao identificado") { $reprovados += "disco nao e SSD" }
 
-Memória
-Ram: $($ramGB)GB $(if($passRAM){"✔️"}else{"❌"})
+        $resumoOk = ($reprovados.Count -eq 0)
+        $pnlResumo = New-Object System.Windows.Forms.Panel
+        $pnlResumo.Location = New-Object System.Drawing.Point(20, 66)
+        $pnlResumo.Size = New-Object System.Drawing.Size(645, 56)
+        $pnlResumo.BackColor = $Script:UiFundo
+        $pnlResumo.Tag = @{
+            Ok    = $resumoOk
+            Texto = $(if ($resumoOk) { "MAQUINA APROVADA PARA O SISTEMA" } else { "ATENCAO: " + (($reprovados) -join ", ") })
+        }
+        $pnlResumo.Add_Paint({
+                param($s, $e)
+                $g = $e.Graphics
+                $g.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
+                $g.Clear($s.Parent.BackColor)
+                $d = $s.Tag
+                $c1 = if ($d.Ok) { $Script:UiVerde } else { $Script:UiVermelho }
+                $rect = New-Object System.Drawing.Rectangle(0, 0, $s.Width, $s.Height)
+                $caminho = New-RoundedRectPath -X 0 -Y 0 -W $s.Width -H $s.Height -R 8
+                $br = New-Object System.Drawing.Drawing2D.LinearGradientBrush($rect, (Get-UiTom $c1 18), (Get-UiTom $c1 -28), [float]0)
+                $g.FillPath($br, $caminho)
+                $fw = New-Object System.Drawing.Font("Segoe UI", 12, [System.Drawing.FontStyle]::Bold)
+                $icone = if ($d.Ok) { [string][char]0x2714 } else { "!" }
+                [System.Windows.Forms.TextRenderer]::DrawText($g, "$icone  $($d.Texto)", $fw, $rect, [System.Drawing.Color]::White,
+                    ([System.Windows.Forms.TextFormatFlags]::HorizontalCenter -bor [System.Windows.Forms.TextFormatFlags]::VerticalCenter -bor [System.Windows.Forms.TextFormatFlags]::EndEllipsis))
+                $fw.Dispose(); $br.Dispose(); $caminho.Dispose()
+            })
+        [void]$f.Controls.Add($pnlResumo)
 
-Disco
-Sólido: $($diskGB)GB $(if($passDisk){"✔️"}else{"❌"})
+        # Lista de itens avaliados
+        $lv = New-Object System.Windows.Forms.ListView
+        $lv.Location = New-Object System.Drawing.Point(20, 136)
+        $lv.Size = New-Object System.Drawing.Size(645, 430)
+        Format-ToolListView $lv
+        [void]$lv.Columns.Add("Item", 170)
+        [void]$lv.Columns.Add("Valor encontrado", 390)
+        [void]$lv.Columns.Add("Status", 80)
+        [void]$f.Controls.Add($lv)
 
-Pontuação:
- $score $(if($passBench){"✔️"}else{"❌"})
+        $addItem = {
+            param([string]$Item, [string]$Valor, $Pass)
+            $it = New-Object System.Windows.Forms.ListViewItem($Item)
+            [void]$it.SubItems.Add($Valor)
+            if ($null -eq $Pass) {
+                [void]$it.SubItems.Add("-")
+                $it.ForeColor = $Script:UiTexto
+            }
+            elseif ($Pass) {
+                [void]$it.SubItems.Add("OK")
+                $it.ForeColor = $Script:UiVerde
+            }
+            else {
+                [void]$it.SubItems.Add("ATENCAO")
+                $it.ForeColor = $Script:UiVermelho
+            }
+            [void]$lv.Items.Add($it)
+        }
 
-Benchmark: $benchUrl
+        & $addItem "Sistema Operacional" "$($os.Caption) (build $($os.BuildNumber))" $passOS
+        & $addItem "Arquitetura" "$($os.OSArchitecture)" $null
+        & $addItem "Processador" $cpuName $passBench
+        & $addItem "Nucleos" $nucleos $null
+        & $addItem "Benchmark estimado" $(if ($score -is [int]) { "$score  (minimo recomendado: 3500)" } else { "$score  -  use o botao BENCHMARK ONLINE para consultar" }) $(if ($score -is [int]) { $passBench } else { $null })
+        & $addItem "Memoria RAM" $ramDetalhe $passRAM
+        & $addItem "Disco C: capacidade" "$diskGB GB" $passDisk
+        & $addItem "Disco C: espaco livre" "$freeGB GB" $passLivre
+        & $addItem "Tipo de disco" $tipoDisco $(if ($tipoDisco -eq "Nao identificado") { $null } else { $ehSSD })
+        & $addItem "Placa de video" $(if ($video) { $video.Name } else { "-" }) $null
+        & $addItem "Rede" $redeInfo $null
+        & $addItem "Antivirus" $antivirus $null
+        & $addItem "Fabricante / Modelo" "$($cs.Manufacturer) $($cs.Model)" $null
+        & $addItem "Numero de serie" $(if ($bios) { $bios.SerialNumber } else { "-" }) $null
+        & $addItem "Usuario / Maquina" "$env:USERNAME @ $env:COMPUTERNAME" $null
+
+        $marca = { param($ok) if ($ok) { [string][char]0x2714 } else { "X" } }
+        $relatorio = @"
+=== AVALIACAO DE HARDWARE - $env:COMPUTERNAME ===
+Data: $(Get-Date -Format 'dd/MM/yyyy HH:mm')
+
+Sistema:      $($os.Caption) (build $($os.BuildNumber)) $(& $marca $passOS)
+Processador:  $cpuName $(& $marca $passBench)
+              $nucleos
+Benchmark:    $score  (minimo 3500) $(& $marca $passBench)
+Memoria RAM:  $ramDetalhe $(& $marca $passRAM)
+Disco C:      $diskGB GB, $freeGB GB livres $(& $marca $passDisk)
+Tipo:         $tipoDisco $(& $marca $ehSSD)
+Video:        $(if ($video) { $video.Name } else { '-' })
+Rede:         $redeInfo
+Antivirus:    $antivirus
+Maquina:      $($cs.Manufacturer) $($cs.Model)  -  Serie: $(if ($bios) { $bios.SerialNumber } else { '-' })
+
+Resultado: $(if ($resumoOk) { 'APROVADA' } else { 'ATENCAO - ' + ($reprovados -join ', ') })
+Benchmark online: $benchUrl
 "@
-        Set-Clipboard -Value $infoText
+        Set-Clipboard -Value $relatorio
 
-        $btnCopy.Add_Click({ $fEval.Close() })
-        [void]$fEval.Controls.Add($btnCopy)
+        $lblCopia = New-ToolLabel $f "Relatorio ja copiado para a area de transferencia." 22 578 8.5 -Cor $Script:UiSuave
 
-        [void]$fEval.ShowDialog()
+        New-ToolButton $f "COPIAR RELATORIO" 20 604 200 38 $Script:UiAzul {
+            Set-Clipboard -Value $relatorio
+            $lblCopia.Text = "Copiado! Pode colar no chamado (Ctrl+V)."
+            $lblCopia.ForeColor = $Script:UiVerde
+        } "Copia o relatorio completo em texto" | Out-Null
+
+        New-ToolButton $f "SALVAR EM TXT" 230 604 190 38 $Script:UiCinza {
+            try {
+                $caminho = Join-Path $Script:DesktopPath "Avaliacao_$($env:COMPUTERNAME)_$(Get-Date -Format 'yyyyMMdd_HHmm').txt"
+                $relatorio | Out-File $caminho -Encoding utf8
+                $lblCopia.Text = "Salvo em: $caminho"
+                $lblCopia.ForeColor = $Script:UiVerde
+                Log-Message "SUCESSO" "Relatorio salvo: $caminho"
+            }
+            catch {
+                $lblCopia.Text = "Falha ao salvar: $($_.Exception.Message)"
+                $lblCopia.ForeColor = $Script:UiVermelho
+            }
+        } "Grava o relatorio na Area de Trabalho" | Out-Null
+
+        New-ToolButton $f "BENCHMARK ONLINE" 430 604 235 38 $Script:UiCinza {
+            Start-Process $benchUrl
+        } "Abre a pontuacao desta CPU no cpubenchmark.net" | Out-Null
+
+        [void]$f.ShowDialog($Script:MainForm)
         Log-Message "SUCESSO" "Avaliacao concluida e copiada."
     }
     catch {
         Log-Message "ERRO" "Falha na avaliacao: $_"
+        [System.Windows.Forms.MessageBox]::Show("Falha ao avaliar o hardware: $($_.Exception.Message)", "Erro", "OK", "Error") | Out-Null
     }
 }
 
-function Get-VendorName {
+function Get-MacDeIP {
     param($IP, $ArpTable)
     try {
-        $mac = ""
-        $targetTable = if ($null -ne $ArpTable) { $ArpTable } else { arp -a }
-        
-        foreach ($line in $targetTable) {
-            if ($line -match "^\s+$IP\s+([0-9a-fA-F-]+)") {
-                $mac = $matches[1].Replace('-', ':').ToUpper()
-                break
+        $tabela = if ($null -ne $ArpTable) { $ArpTable } else { arp -a }
+        foreach ($linha in $tabela) {
+            if ($linha -match "^\s+$([regex]::Escape($IP))\s+([0-9a-fA-F-]{11,17})") {
+                return $matches[1].Replace('-', ':').ToUpper()
             }
         }
-        
-        if ($mac -match '([0-9a-fA-F:]{17})') {
-            $oui = $mac.Substring(0, 8)
+    }
+    catch {}
+    return ""
+}
+
+function Get-VendorName {
+    param($IP, $ArpTable, $Mac = $null)
+    try {
+        $macAddr = if ($Mac) { $Mac } else { Get-MacDeIP $IP $ArpTable }
+        if ($macAddr -match '([0-9a-fA-F:]{17})') {
+            $oui = $macAddr.Substring(0, 8)
             $vendors = @{
                 "00:26:AB" = "EPSON"; "00:00:48" = "EPSON"; "FC:BA:B1" = "EPSON"
+                "64:EB:8C" = "EPSON"; "A4:EE:57" = "EPSON"
                 "00:0B:AB" = "ELGIN"; "00:00:5E" = "ELGIN"; "00:0B:E0" = "DIEXA"
-                "00:13:21" = "BEMATECH"; "00:21:40" = "BEMATECH"
-                "00:1C:18" = "DARUMA"; "00:1E:E3" = "TANCA"
-                "00:50:C2" = "CONTROL ID"; "FC:1A:11" = "CONTROL ID"
-                "00:07:4D" = "ZEBRA"; "00:05:9A" = "ZEBRA"; "8C:11:CB" = "ZEBRA"
-                "00:11:0A" = "HP"; "00:1E:0B" = "HP"; "30:8D:99" = "HP"; "00:15:99" = "SAMSUNG"
-                "00:21:29" = "TP-LINK"; "B0:4E:26" = "TP-LINK"; "00:1D:AA" = "D-LINK"
-                "00:22:3F" = "NETGEAR"; "C8:3A:35" = "Tenda"; "E0:43:DB" = "VIVO"
+                "00:13:21" = "BEMATECH"; "00:21:40" = "BEMATECH"; "00:1A:C5" = "BEMATECH"
+                "00:1C:18" = "DARUMA"; "00:1E:E3" = "TANCA"; "00:0E:8F" = "SWEDA"
+                "00:50:C2" = "CONTROL ID"; "FC:1A:11" = "CONTROL ID"; "00:1F:54" = "GERTEC"
+                "00:07:4D" = "ZEBRA"; "00:05:9A" = "ZEBRA"; "8C:11:CB" = "ZEBRA"; "00:15:70" = "ZEBRA"
+                "00:80:92" = "STAR"; "00:11:62" = "STAR"
+                "00:11:0A" = "HP"; "00:1E:0B" = "HP"; "30:8D:99" = "HP"; "3C:D9:2B" = "HP"
+                "00:15:99" = "SAMSUNG"; "00:00:F0" = "SAMSUNG"; "00:00:85" = "CANON"; "00:1E:8F" = "CANON"
+                "00:00:74" = "RICOH"; "00:26:73" = "RICOH"; "00:20:00" = "LEXMARK"; "00:04:00" = "LEXMARK"
+                "00:80:77" = "BROTHER"; "00:1B:A9" = "BROTHER"; "00:0B:78" = "XPRINTER"
+                "00:21:29" = "TP-LINK"; "B0:4E:26" = "TP-LINK"; "50:C7:BF" = "TP-LINK"; "00:1D:AA" = "D-LINK"
+                "00:22:3F" = "NETGEAR"; "C8:3A:35" = "TENDA"; "E0:43:DB" = "VIVO"; "00:1A:3F" = "INTELBRAS"
+                "E8:94:F6" = "INTELBRAS"; "00:16:6C" = "SAMSUNG"; "00:1D:7E" = "CISCO"; "00:0C:29" = "VMWARE"
+                "08:00:27" = "VIRTUALBOX"; "00:15:5D" = "HYPER-V"; "00:50:56" = "VMWARE"
+                "3C:2A:F4" = "BROTHER"; "9C:5A:44" = "MULTILASER"; "00:1F:3B" = "INTEL"
+                "DC:A6:32" = "RASPBERRY PI"; "B8:27:EB" = "RASPBERRY PI"
             }
             if ($vendors.ContainsKey($oui)) { return $vendors[$oui] }
         }
         return "Desconhecido"
     }
-    catch { return "Erro API" }
+    catch { return "Desconhecido" }
+}
+
+# Testa varias portas ao mesmo tempo (bem mais rapido que uma de cada vez)
+function Test-PortasRapido {
+    param([string]$IP, [int[]]$Portas, [int]$TimeoutMs = 260)
+    $abertas = @()
+    $conexoes = @()
+    try {
+        $end = [System.Net.IPAddress]::Parse($IP)
+        foreach ($p in $Portas) {
+            $cli = New-Object System.Net.Sockets.TcpClient
+            try { $conexoes += [PSCustomObject]@{ Porta = $p; Cliente = $cli; Async = $cli.BeginConnect($end, $p, $null, $null) } }
+            catch { try { $cli.Close() } catch {} }
+        }
+        Start-Sleep -Milliseconds $TimeoutMs
+        foreach ($c in $conexoes) {
+            try {
+                if ($c.Async.IsCompleted -and $c.Cliente.Connected) { $abertas += $c.Porta }
+            }
+            catch {}
+            try { $c.Cliente.Close() } catch {}
+        }
+    }
+    catch {}
+    return ($abertas | Sort-Object)
+}
+
+function Get-NomePorta {
+    param([int]$Porta)
+    switch ($Porta) {
+        9100 { "RAW/JetDirect" }
+        515 { "LPR" }
+        631 { "IPP" }
+        80 { "HTTP" }
+        443 { "HTTPS" }
+        445 { "SMB" }
+        135 { "RPC" }
+        139 { "NetBIOS" }
+        3389 { "RDP" }
+        22 { "SSH" }
+        1433 { "SQL Server" }
+        default { "$Porta" }
+    }
 }
 
 function Show-PrinterScanner {
     try {
-        if ($null -ne $Script:ScannerForm -and $Script:ScannerForm.Visible) {
+        if ($null -ne $Script:ScannerForm -and -not $Script:ScannerForm.IsDisposed) {
             $Script:ScannerForm.Activate(); return
         }
 
-        $Script:ScannerForm = New-Object System.Windows.Forms.Form
-        $Script:ScannerForm.Text = "Scanner de Rede XMenu"; $Script:ScannerForm.Size = "700,550"; $Script:ScannerForm.StartPosition = 'CenterParent'
-        $Script:ScannerForm.BackColor = [System.Drawing.Color]::FromArgb(30, 30, 30); $Script:ScannerForm.ForeColor = 'White'
-        $Script:ScannerForm.FormBorderStyle = 'FixedDialog'; $Script:ScannerForm.MaximizeBox = $false
+        $f = New-ToolForm "Scanner de Rede" 940 660
+        $Script:ScannerForm = $f
+        $Script:ScannerTodos = @()
+        $Script:ScannerParar = $false
 
-        $Script:ScannerBtnScan = New-Object System.Windows.Forms.Button; $Script:ScannerBtnScan.Text = "INICIAR SCAN"; $Script:ScannerBtnScan.Location = '20,20'; $Script:ScannerBtnScan.Width = 140
-        $Script:ScannerBtnScan.BackColor = [System.Drawing.Color]::FromArgb(0, 120, 215); $Script:ScannerBtnScan.FlatStyle = 'Flat'; $Script:ScannerBtnScan.Font = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold)
-        [void]$Script:ScannerForm.Controls.Add($Script:ScannerBtnScan)
+        New-ToolLabel $f "DISPOSITIVOS NA REDE LOCAL" 20 14 12 -Negrito | Out-Null
+        $lblRede = New-ToolLabel $f "" 20 38 8.5 -Cor $Script:UiSuave
 
-        $Script:ScannerBtnPing = New-Object System.Windows.Forms.Button; $Script:ScannerBtnPing.Text = "TESTAR PING"; $Script:ScannerBtnPing.Location = '170,20'; $Script:ScannerBtnPing.Width = 110
-        $Script:ScannerBtnPing.BackColor = [System.Drawing.Color]::FromArgb(60, 60, 65); $Script:ScannerBtnPing.FlatStyle = 'Flat'; $Script:ScannerBtnPing.Font = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold)
-        [void]$Script:ScannerForm.Controls.Add($Script:ScannerBtnPing)
-        $Script:ScannerLblStat = New-Object System.Windows.Forms.Label; $Script:ScannerLblStat.Text = "Pronto."; $Script:ScannerLblStat.Location = '300,25'; $Script:ScannerLblStat.AutoSize = $true
-        [void]$Script:ScannerForm.Controls.Add($Script:ScannerLblStat)
+        $btnScan = New-ToolButton $f "INICIAR SCAN" 20 64 150 34 $Script:UiAzul $null "Procura todos os equipamentos ligados na rede"
+        $btnParar = New-ToolButton $f "PARAR" 178 64 90 34 $Script:UiVermelho $null "Interrompe a busca"
+        $btnParar.Enabled = $false
 
-        $Script:ScannerProgress = New-Object System.Windows.Forms.ProgressBar; $Script:ScannerProgress.Location = '20,50'; $Script:ScannerProgress.Size = '600,10'; $Script:ScannerProgress.Style = 'Continuous'
-        [void]$Script:ScannerForm.Controls.Add($Script:ScannerProgress)
+        $lblFiltro = New-ToolLabel $f "Filtrar:" 286 72 9 -Cor $Script:UiSuave
+        $txtFiltro = New-Object System.Windows.Forms.TextBox
+        $txtFiltro.Location = New-Object System.Drawing.Point(336, 69)
+        $txtFiltro.Size = New-Object System.Drawing.Size(180, 24)
+        $txtFiltro.BackColor = [System.Drawing.Color]::FromArgb(20, 24, 34)
+        $txtFiltro.ForeColor = $Script:UiTexto
+        $txtFiltro.BorderStyle = 'FixedSingle'
+        [void]$f.Controls.Add($txtFiltro)
+        if ($Script:ToolTip) { $Script:ToolTip.SetToolTip($txtFiltro, "Digite IP, fabricante, nome ou tipo para filtrar a lista") }
 
-        $Script:ScannerLblPct = New-Object System.Windows.Forms.Label; $Script:ScannerLblPct.Text = "0%"; $Script:ScannerLblPct.Location = '625,48'; $Script:ScannerLblPct.AutoSize = $true; $Script:ScannerLblPct.Font = New-Object System.Drawing.Font("Segoe UI", 8, [System.Drawing.FontStyle]::Bold)
-        [void]$Script:ScannerForm.Controls.Add($Script:ScannerLblPct)
+        $chkSoImp = New-Object System.Windows.Forms.CheckBox
+        $chkSoImp.Text = "Somente impressoras"
+        $chkSoImp.Location = New-Object System.Drawing.Point(528, 70)
+        $chkSoImp.AutoSize = $true
+        $chkSoImp.ForeColor = $Script:UiTexto
+        [void]$f.Controls.Add($chkSoImp)
 
-        $Script:ScannerLV = New-Object System.Windows.Forms.ListView; $Script:ScannerLV.Location = '20,70'; $Script:ScannerLV.Size = '640,420'
-        $Script:ScannerLV.View = 'Details'; $Script:ScannerLV.FullRowSelect = $true; $Script:ScannerLV.GridLines = $false; $Script:ScannerLV.BackColor = [System.Drawing.Color]::FromArgb(25, 25, 28); $Script:ScannerLV.ForeColor = 'WhiteSmoke'
-        $Script:ScannerLV.BorderStyle = 'None'; $Script:ScannerLV.Font = New-Object System.Drawing.Font("Segoe UI", 10)
-        
-        $Script:ScannerLV.Columns.Add("IP", 100) | Out-Null
-        $Script:ScannerLV.Columns.Add("Fabricante", 120) | Out-Null
-        $Script:ScannerLV.Columns.Add("Nome/Host", 150) | Out-Null
-        $Script:ScannerLV.Columns.Add("Tipo", 100) | Out-Null
-        $Script:ScannerLV.Columns.Add("Portas", 120) | Out-Null
-        [void]$Script:ScannerForm.Controls.Add($Script:ScannerLV)
+        $lblStat = New-ToolLabel $f "Pronto para escanear." 700 72 9 -Cor $Script:UiSuave
 
-        $DoPing = {
-            if ($Script:ScannerLV.SelectedItems.Count -gt 0) {
-                Show-PingTester -InitialIP $Script:ScannerLV.SelectedItems[0].Text
-            }
+        $barra = New-Object System.Windows.Forms.Panel
+        $barra.Location = New-Object System.Drawing.Point(20, 106)
+        $barra.Size = New-Object System.Drawing.Size(880, 8)
+        $barra.Anchor = 'Top,Left,Right'
+        $barra.BackColor = $Script:UiFundo
+        $barra.Tag = @{ Valor = 0 }
+        $barra.Add_Paint({
+                param($s, $e)
+                $g = $e.Graphics
+                $g.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
+                $g.Clear($s.Parent.BackColor)
+                $trilho = New-RoundedRectPath -X 0 -Y 0 -W $s.Width -H $s.Height -R 4
+                $bt = New-Object System.Drawing.SolidBrush([System.Drawing.Color]::FromArgb(20, 24, 34))
+                $g.FillPath($bt, $trilho)
+                $pct = [double]$s.Tag.Valor
+                $fw = [int]($s.Width * $pct / 100)
+                if ($fw -gt 3) {
+                    $r = New-Object System.Drawing.Rectangle(0, 0, $fw, $s.Height)
+                    $p = New-RoundedRectPath -X 0 -Y 0 -W $fw -H $s.Height -R 4
+                    $b = New-Object System.Drawing.Drawing2D.LinearGradientBrush($r, [System.Drawing.Color]::FromArgb(28, 116, 232), [System.Drawing.Color]::FromArgb(0, 208, 158), [float]0)
+                    $g.FillPath($b, $p)
+                    $b.Dispose(); $p.Dispose()
+                }
+                $bt.Dispose(); $trilho.Dispose()
+            })
+        [void]$f.Controls.Add($barra)
+
+        $lv = New-Object System.Windows.Forms.ListView
+        $lv.Location = New-Object System.Drawing.Point(20, 124)
+        $lv.Size = New-Object System.Drawing.Size(880, 430)
+        $lv.Anchor = 'Top,Left,Right,Bottom'
+        Format-ToolListView $lv
+        [void]$lv.Columns.Add("IP", 120)
+        [void]$lv.Columns.Add("Tipo", 150)
+        [void]$lv.Columns.Add("Fabricante", 120)
+        [void]$lv.Columns.Add("Nome / Host", 180)
+        [void]$lv.Columns.Add("MAC", 140)
+        [void]$lv.Columns.Add("Servicos", 160)
+        [void]$f.Controls.Add($lv)
+
+        # --- menu do botao direito ---
+        $menu = New-Object System.Windows.Forms.ContextMenuStrip
+        $menu.BackColor = $Script:UiCartao
+        $menu.ForeColor = $Script:UiTexto
+        $ipSelecionado = {
+            if ($lv.SelectedItems.Count -gt 0) { return $lv.SelectedItems[0].Text }
+            return ""
         }
-        $Script:ScannerBtnPing.Add_Click($DoPing)
-        $Script:ScannerLV.Add_DoubleClick($DoPing)
+        [void]$menu.Items.Add("Testar ping continuo", $null, {
+                $ip = & $ipSelecionado
+                if ($ip) { Show-PingTester -InitialIP $ip }
+            })
+        [void]$menu.Items.Add("Abrir no navegador (http)", $null, {
+                $ip = & $ipSelecionado
+                if ($ip) { Start-Process "http://$ip" }
+            })
+        [void]$menu.Items.Add("Abrir compartilhamentos", $null, {
+                $ip = & $ipSelecionado
+                if ($ip) { Start-Process "explorer.exe" "\\$ip" }
+            })
+        [void]$menu.Items.Add("Copiar IP", $null, {
+                $ip = & $ipSelecionado
+                if ($ip) { Set-Clipboard -Value $ip }
+            })
+        [void]$menu.Items.Add("Copiar linha inteira", $null, {
+                if ($lv.SelectedItems.Count -gt 0) {
+                    $it = $lv.SelectedItems[0]
+                    $partes = @()
+                    foreach ($si in $it.SubItems) { $partes += $si.Text }
+                    Set-Clipboard -Value ($partes -join "  |  ")
+                }
+            })
+        [void]$menu.Items.Add("Adicionar impressora de rede (Windows)", $null, {
+                Start-Process "rundll32.exe" "printui.dll,PrintUIEntry /il"
+            })
+        $lv.ContextMenuStrip = $menu
 
-        $Script:ScannerBtnScan.Add_Click({
-                $Script:ScannerBtnScan.Enabled = $false; $Script:ScannerBtnScan.Text = "Escaneando..."
-                $Script:ScannerLV.Items.Clear(); $Script:ScannerLblStat.Text = "Buscando IPs (ARP)..."
-                $Script:ScannerProgress.Value = 0; $Script:ScannerProgress.Maximum = 255
+        # --- filtro e ordenacao ---
+        $aplicarFiltro = {
+            $termo = $txtFiltro.Text.Trim().ToLower()
+            $soImp = $chkSoImp.Checked
+            $lv.BeginUpdate()
+            $lv.Items.Clear()
+            foreach ($d in $Script:ScannerTodos) {
+                if ($soImp -and $d.Tipo -ne "IMPRESSORA") { continue }
+                if ($termo) {
+                    $alvo = "$($d.IP) $($d.Tipo) $($d.Fabricante) $($d.Host) $($d.Mac) $($d.Servicos)".ToLower()
+                    if ($alvo -notlike "*$termo*") { continue }
+                }
+                $it = New-Object System.Windows.Forms.ListViewItem($d.IP)
+                [void]$it.SubItems.Add($d.Tipo)
+                [void]$it.SubItems.Add($d.Fabricante)
+                [void]$it.SubItems.Add($d.Host)
+                [void]$it.SubItems.Add($d.Mac)
+                [void]$it.SubItems.Add($d.Servicos)
+                switch ($d.Tipo) {
+                    "MAQUINA ATUAL" { $it.ForeColor = [System.Drawing.Color]::Gold }
+                    "IMPRESSORA" { $it.ForeColor = $Script:UiVerde }
+                    "ROTEADOR (GATEWAY)" { $it.ForeColor = [System.Drawing.Color]::LightSkyBlue }
+                    "ROTEADOR/DISP. WEB" { $it.ForeColor = [System.Drawing.Color]::LightSkyBlue }
+                    "COMPUTADOR" { $it.ForeColor = [System.Drawing.Color]::Wheat }
+                    default { $it.ForeColor = $Script:UiTexto }
+                }
+                [void]$lv.Items.Add($it)
+            }
+            $lv.EndUpdate()
+            $imp = @($Script:ScannerTodos | Where-Object { $_.Tipo -eq "IMPRESSORA" }).Count
+            $lblStat.Text = "$($lv.Items.Count) de $($Script:ScannerTodos.Count) exibidos  -  $imp impressora(s)"
+        }
+        $txtFiltro.Add_TextChanged($aplicarFiltro)
+        $chkSoImp.Add_CheckedChanged($aplicarFiltro)
+        $lv.Add_DoubleClick({
+                $ip = & $ipSelecionado
+                if ($ip) { Show-PingTester -InitialIP $ip }
+            })
+
+        # --- o scan em si ---
+        $btnScan.Add_Click({
+                $btnScan.Enabled = $false; $btnScan.Text = "ESCANEANDO..."
+                $btnParar.Enabled = $true
+                $Script:ScannerParar = $false
+                $Script:ScannerTodos = @()
+                $lv.Items.Clear()
+                $barra.Tag.Valor = 0; $barra.Invalidate()
                 [System.Windows.Forms.Application]::DoEvents()
 
                 try {
-                    $myIps = [System.Net.Dns]::GetHostAddresses([System.Net.Dns]::GetHostName()) | Where-Object { $_.AddressFamily -eq 'InterNetwork' } | ForEach-Object { $_.IPAddressToString }
-                    $localIP = $myIps[0]
-                    
-                    # Detecta IP do Gateway (Roteador principal)
+                    $meusIps = [System.Net.Dns]::GetHostAddresses([System.Net.Dns]::GetHostName()) |
+                        Where-Object { $_.AddressFamily -eq 'InterNetwork' } | ForEach-Object { $_.IPAddressToString }
+                    $localIP = $meusIps[0]
+
                     $gwIP = $null
                     try {
-                        $netConfig = Get-NetIPConfiguration | Where-Object { $_.IPv4DefaultGateway -ne $null } | Select-Object -First 1
-                        if ($netConfig) { $gwIP = $netConfig.IPv4DefaultGateway.NextHop }
-                    } catch {}
+                        $cfg = Get-NetIPConfiguration | Where-Object { $null -ne $_.IPv4DefaultGateway } | Select-Object -First 1
+                        if ($cfg) { $gwIP = $cfg.IPv4DefaultGateway.NextHop }
+                    }
+                    catch {}
 
                     if ($localIP -match '^(\d{1,3}\.\d{1,3}\.\d{1,3})\.') {
                         $subnet = $matches[1]
-                        $Script:ScannerLblStat.Text = "Descoberta Ativa ($subnet.0/24)..."
+                        $lblRede.Text = "Rede $subnet.0/24   |   Este PC: $localIP   |   Gateway: $(if ($gwIP) { $gwIP } else { '-' })"
+                        $lblStat.Text = "Acordando a rede..."
+                        [System.Windows.Forms.Application]::DoEvents()
+
+                        # Dispara pings em massa para popular a tabela ARP
                         $ping = New-Object System.Net.NetworkInformation.Ping
-                        foreach ($i in 1..255) {
-                            try { $ping.SendAsync("$subnet.$i", 85, $null) | Out-Null } catch {}
-                            $Script:ScannerProgress.Value = $i
-                            $Script:ScannerLblPct.Text = "$([Math]::Round(($i / 255) * 100))%"
-                            if ($i % 25 -eq 0) { [System.Windows.Forms.Application]::DoEvents() }
+                        foreach ($i in 1..254) {
+                            try { [void]$ping.SendAsync("$subnet.$i", 90, $null) } catch {}
+                            if ($i % 16 -eq 0) {
+                                $barra.Tag.Valor = ($i / 254) * 35
+                                $barra.Invalidate()
+                                [System.Windows.Forms.Application]::DoEvents()
+                                if ($Script:ScannerParar) { break }
+                            }
                         }
-                        Start-Sleep -Seconds 2.5
+                        Start-Sleep -Milliseconds 1800
                     }
 
-                    $arpOutput = arp -a
+                    $arp = arp -a
                     $ips = @()
-                    foreach ($line in $arpOutput) {
-                        if ($line -match '(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})') {
+                    foreach ($linha in $arp) {
+                        if ($linha -match '(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})\s+([0-9a-fA-F-]{11,17})') {
                             $fIP = $matches[1]
-                            if ($fIP -notlike "224.*" -and $fIP -ne "255.255.255.255" -and $fIP -ne "0.0.0.0") {
+                            if ($fIP -notlike "224.*" -and $fIP -notlike "239.*" -and $fIP -ne "255.255.255.255" -and $fIP -ne "0.0.0.0" -and $fIP -notlike "*.255") {
                                 $ips += $fIP
                             }
                         }
                     }
-                    $ips = $ips | Select-Object -Unique
+                    foreach ($meu in $meusIps) { if ($ips -notcontains $meu) { $ips += $meu } }
+                    $ips = @($ips | Select-Object -Unique | Sort-Object { [version]$_ })
 
                     if ($ips.Count -eq 0) {
-                        $Script:ScannerLblStat.Text = "Nada encontrado. Tente novamente."
-                        $Script:ScannerProgress.Value = 0
+                        $lblStat.Text = "Nenhum equipamento respondeu. Verifique o cabo/Wi-Fi."
                     }
                     else {
-                        $count = 0; $processed = 0
-                        $Script:ScannerProgress.Maximum = $ips.Count
-                        $Script:ScannerProgress.Value = 0
-                        
+                        $portas = @(9100, 515, 631, 80, 443, 445, 135, 3389, 22, 1433)
+                        $n = 0
                         foreach ($ip in $ips) {
-                            $processed++
-                            try {
-                                $Script:ScannerLblStat.Text = "Identificando $ip... ($count encontradas)"
-                                $Script:ScannerProgress.Value = $processed
-                                $Script:ScannerLblPct.Text = "$([Math]::Round(($processed / $ips.Count) * 100))%"
-                                [System.Windows.Forms.Application]::DoEvents()
-                                
-                                $hn = "Desconhecido"
-                                try { $hn = [System.Net.Dns]::GetHostEntry($ip).HostName } catch {}
-                                
-                                $ports = @()
-                                $ipAddr = [System.Net.IPAddress]::Parse($ip)
-                                
-                                foreach ($p in @(9100, 515, 631, 80, 443, 445, 135, 3389)) {
-                                    $socket = New-Object System.Net.Sockets.TcpClient
-                                    try {
-                                        $res = $socket.BeginConnect($ipAddr, $p, $null, $null)
-                                        if ($res.AsyncWaitHandle.WaitOne(120, $false)) {
-                                            $socket.EndConnect($res)
-                                            $ports += $p
-                                        }
-                                    }
-                                    catch {}
-                                    $socket.Close()
-                                }
+                            if ($Script:ScannerParar) { break }
+                            $n++
+                            $lblStat.Text = "Identificando $ip  ($n de $($ips.Count))..."
+                            $barra.Tag.Valor = 35 + (($n / $ips.Count) * 65)
+                            $barra.Invalidate()
+                            [System.Windows.Forms.Application]::DoEvents()
 
-                                $vendor = Get-VendorName $ip $arpOutput
-                                
-                                # Classificação Inteligente de Dispositivo
-                                $isLocal = ($ip -in $myIps)
-                                $isGateway = ($null -ne $gwIP -and $ip -eq $gwIP)
-                                $isPrinter = ($ports -contains 9100 -or $ports -contains 515 -or $ports -contains 631 -or $vendor -in @("EPSON", "ELGIN", "BEMATECH", "DARUMA", "TANCA", "ZEBRA"))
-                                $isPC = ($ports -contains 445 -or $ports -contains 135 -or $ports -contains 3389 -or $hn -match "pc|note|desktop|laptop|workstation|server")
-                                $isWeb = ($ports -contains 80 -or $ports -contains 443)
-                                
-                                $type = "Dispositivo"
-                                if ($isLocal) {
-                                    $type = "MAQUINA ATUAL"
-                                } elseif ($isGateway) {
-                                    $type = "ROTEADOR (GATEWAY)"
-                                } elseif ($isPrinter) {
-                                    $type = "IMPRESSORA"
-                                } elseif ($isPC) {
-                                    $type = "COMPUTADOR"
-                                } elseif ($isWeb) {
-                                    $type = "ROTEADOR/DISP. WEB"
-                                }
-                                
-                                $row = New-Object System.Windows.Forms.ListViewItem($ip)
-                                $row.SubItems.Add($vendor) | Out-Null
-                                $row.SubItems.Add($hn) | Out-Null
-                                $row.SubItems.Add($type) | Out-Null
-                                $row.SubItems.Add(($ports -join ", ")) | Out-Null
-                                
-                                if ($isLocal) { 
-                                    $row.ForeColor = [System.Drawing.Color]::Yellow
-                                    $row.Font = New-Object System.Drawing.Font($Script:ScannerLV.Font, [System.Drawing.FontStyle]::Bold) 
-                                }
-                                elseif ($type -eq "IMPRESSORA") { 
-                                    $row.ForeColor = [System.Drawing.Color]::PaleGreen
-                                    $count++ 
-                                }
-                                elseif ($type -eq "ROTEADOR (GATEWAY)" -or $type -eq "ROTEADOR/DISP. WEB") { 
-                                    $row.ForeColor = [System.Drawing.Color]::LightSkyBlue 
-                                }
-                                elseif ($type -eq "COMPUTADOR") { 
-                                    $row.ForeColor = [System.Drawing.Color]::Wheat 
-                                }
-                                
-                                [void]$Script:ScannerLV.Items.Add($row)
+                            $host_ = ""
+                            try { $host_ = [System.Net.Dns]::GetHostEntry($ip).HostName } catch { $host_ = "-" }
+                            $mac = Get-MacDeIP $ip $arp
+                            $fab = Get-VendorName $ip $arp $mac
+                            $abertas = Test-PortasRapido -IP $ip -Portas $portas
+
+                            $ehLocal = ($ip -in $meusIps)
+                            $ehGw = ($null -ne $gwIP -and $ip -eq $gwIP)
+                            $ehImp = ($abertas -contains 9100 -or $abertas -contains 515 -or $abertas -contains 631 -or
+                                $fab -in @("EPSON", "ELGIN", "BEMATECH", "DARUMA", "TANCA", "ZEBRA", "STAR", "SWEDA", "GERTEC", "BROTHER", "XPRINTER", "LEXMARK", "RICOH", "CANON"))
+                            $ehPC = ($abertas -contains 445 -or $abertas -contains 135 -or $abertas -contains 3389 -or $host_ -match "pc|note|desktop|laptop|workstation|server|caixa|pdv")
+                            $ehWeb = ($abertas -contains 80 -or $abertas -contains 443)
+
+                            $tipo = "Dispositivo"
+                            if ($ehLocal) { $tipo = "MAQUINA ATUAL" }
+                            elseif ($ehGw) { $tipo = "ROTEADOR (GATEWAY)" }
+                            elseif ($ehImp) { $tipo = "IMPRESSORA" }
+                            elseif ($ehPC) { $tipo = "COMPUTADOR" }
+                            elseif ($ehWeb) { $tipo = "ROTEADOR/DISP. WEB" }
+
+                            $servicos = (($abertas | ForEach-Object { Get-NomePorta $_ }) -join ", ")
+
+                            $Script:ScannerTodos += [PSCustomObject]@{
+                                IP         = $ip
+                                Tipo       = $tipo
+                                Fabricante = $fab
+                                Host       = $host_
+                                Mac        = $(if ($mac) { $mac } else { "-" })
+                                Servicos   = $(if ($servicos) { $servicos } else { "-" })
                             }
-                            catch {}
+                            & $aplicarFiltro
                         }
-                        $Script:ScannerLblStat.Text = "Scan completo. $count impressoras encontradas."
-                        $Script:ScannerProgress.Value = $Script:ScannerProgress.Maximum
+                        $barra.Tag.Valor = 100; $barra.Invalidate()
+                        & $aplicarFiltro
+                        $imp = @($Script:ScannerTodos | Where-Object { $_.Tipo -eq "IMPRESSORA" }).Count
+                        Log-Message "INFO" "Scan de rede: $($Script:ScannerTodos.Count) equipamentos, $imp impressora(s)."
                     }
                 }
-                catch { $Script:ScannerLblStat.Text = "Erro: $_" }
-                finally { $Script:ScannerBtnScan.Enabled = $true; $Script:ScannerBtnScan.Text = "INICIAR SCAN" }
+                catch { $lblStat.Text = "Erro: $($_.Exception.Message)" }
+                finally {
+                    $btnScan.Enabled = $true; $btnScan.Text = "INICIAR SCAN"
+                    $btnParar.Enabled = $false
+                    $btnScan.Invalidate(); $btnParar.Invalidate()
+                }
             })
 
-        $Script:ScannerForm.Add_FormClosing({ $Script:ScannerForm = $null })
-        $Script:ScannerForm.ShowDialog($Script:MainForm)
+        $btnParar.Add_Click({
+                $Script:ScannerParar = $true
+                $lblStat.Text = "Interrompendo..."
+            })
+
+        New-ToolButton $f "PING NO SELECIONADO" 20 566 200 34 $Script:UiCinza {
+            if ($lv.SelectedItems.Count -gt 0) { Show-PingTester -InitialIP $lv.SelectedItems[0].Text }
+            else { [System.Windows.Forms.MessageBox]::Show("Selecione um equipamento na lista.", "Ping", "OK", "Information") | Out-Null }
+        } "Abre o teste de ping no equipamento selecionado" | Out-Null
+
+        New-ToolButton $f "ABRIR NO NAVEGADOR" 230 566 190 34 $Script:UiCinza {
+            if ($lv.SelectedItems.Count -gt 0) { Start-Process "http://$($lv.SelectedItems[0].Text)" }
+        } "Abre a pagina de configuracao do equipamento" | Out-Null
+
+        New-ToolButton $f "EXPORTAR CSV" 430 566 160 34 $Script:UiCinza {
+            if ($Script:ScannerTodos.Count -eq 0) {
+                [System.Windows.Forms.MessageBox]::Show("Faca um scan antes de exportar.", "Exportar", "OK", "Information") | Out-Null
+                return
+            }
+            try {
+                $caminho = Join-Path $Script:DesktopPath "ScanRede_$(Get-Date -Format 'yyyyMMdd_HHmm').csv"
+                $Script:ScannerTodos | Export-Csv -Path $caminho -NoTypeInformation -Encoding UTF8
+                Log-Message "SUCESSO" "Scan exportado: $caminho"
+                [System.Windows.Forms.MessageBox]::Show("Salvo em:`n$caminho", "Exportado", "OK", "Information") | Out-Null
+            }
+            catch {
+                [System.Windows.Forms.MessageBox]::Show("Falha ao exportar: $($_.Exception.Message)", "Erro", "OK", "Error") | Out-Null
+            }
+        } "Salva a lista em planilha na Area de Trabalho" | Out-Null
+
+        New-ToolButton $f "GERENCIAR IMPRESSORAS" 600 566 220 34 $Script:UiAzul {
+            Show-PrinterManager
+        } "Abre o gerenciador de impressoras e drivers" | Out-Null
+
+        $f.Add_FormClosing({ $Script:ScannerParar = $true; $Script:ScannerForm = $null })
+        [void]$f.ShowDialog($Script:MainForm)
     }
     catch {
-        [System.Windows.Forms.MessageBox]::Show("Erro ao abrir Scanner: $_", "XMenu Error") | Out-Null
+        [System.Windows.Forms.MessageBox]::Show("Erro ao abrir Scanner: $_", "XMenu") | Out-Null
     }
 }
 
@@ -1504,62 +2766,224 @@ COLA RÁPIDA - INSTALAR VIA LPR
 
 function Show-PingTester {
     param([string]$InitialIP = "")
-    if ($null -ne $Script:PingForm -and $Script:PingForm.Visible) {
+
+    if ($null -ne $Script:PingForm -and -not $Script:PingForm.IsDisposed) {
         if ($InitialIP) { $Script:PingTxtIP.Text = $InitialIP }
         $Script:PingForm.Activate()
         return
     }
 
-    $Script:PingForm = New-Object System.Windows.Forms.Form
-    $Script:PingForm.Text = "Teste de Ping Contínuo"; $Script:PingForm.Size = "450,480"; $Script:PingForm.StartPosition = 'CenterParent'
-    $Script:PingForm.BackColor = [System.Drawing.Color]::FromArgb(30, 30, 30); $Script:PingForm.ForeColor = 'White'
-    $Script:PingForm.FormBorderStyle = 'FixedDialog'; $Script:PingForm.MaximizeBox = $false; $Script:PingForm.MinimizeBox = $true
+    # Esta janela nao e modal: quando a funcao retorna o escopo local morre.
+    # Por isso tudo que os eventos usam fica em $Script: (mesmo padrao do
+    # codigo original) - closures aqui nao servem, porque dentro de
+    # GetNewClosure() o prefixo $Script: passa a apontar para outro escopo.
+    $Script:PingHist = New-Object System.Collections.ArrayList
+    $Script:PingEnviados = 0
+    $Script:PingRecebidos = 0
+    $Script:PingLogPath = ""
+    $Script:PingInicial = $InitialIP
 
-    $lbl = New-Object System.Windows.Forms.Label; $lbl.Text = "IP ou Hostname:"; $lbl.Location = '20,20'; $lbl.AutoSize = $true
-    [void]$Script:PingForm.Controls.Add($lbl)
+    $f = New-ToolForm "Teste de Ping" 720 640
+    $Script:PingForm = $f
 
-    $Script:PingTxtIP = New-Object System.Windows.Forms.TextBox; $Script:PingTxtIP.Location = '120,18'; $Script:PingTxtIP.Width = 200
-    $Script:PingTxtIP.BackColor = [System.Drawing.Color]::FromArgb(50, 50, 60); $Script:PingTxtIP.ForeColor = 'White'; $Script:PingTxtIP.BorderStyle = 'FixedSingle'
+    New-ToolLabel $f "TESTE DE CONEXAO CONTINUO" 20 14 12 -Negrito | Out-Null
+    New-ToolLabel $f "Destino (IP ou nome):" 20 48 9 -Cor $Script:UiSuave | Out-Null
+
+    $Script:PingTxtIP = New-Object System.Windows.Forms.TextBox
+    $Script:PingTxtIP.Location = New-Object System.Drawing.Point(160, 45)
+    $Script:PingTxtIP.Size = New-Object System.Drawing.Size(220, 24)
+    $Script:PingTxtIP.BackColor = [System.Drawing.Color]::FromArgb(20, 24, 34)
+    $Script:PingTxtIP.ForeColor = $Script:UiTexto
+    $Script:PingTxtIP.BorderStyle = 'FixedSingle'
+    $Script:PingTxtIP.Font = New-Object System.Drawing.Font("Segoe UI", 10)
     if ($InitialIP) { $Script:PingTxtIP.Text = $InitialIP }
-    [void]$Script:PingForm.Controls.Add($Script:PingTxtIP)
+    [void]$f.Controls.Add($Script:PingTxtIP)
 
-    $Script:PingChkLog = New-Object System.Windows.Forms.CheckBox; $Script:PingChkLog.Text = "Salvar log na Área de Trabalho"; $Script:PingChkLog.Location = '20,50'
-    $Script:PingChkLog.AutoSize = $true; [void]$Script:PingForm.Controls.Add($Script:PingChkLog)
+    New-ToolLabel $f "Intervalo:" 396 48 9 -Cor $Script:UiSuave | Out-Null
+    $Script:PingCmbInt = New-Object System.Windows.Forms.ComboBox
+    $Script:PingCmbInt.Location = New-Object System.Drawing.Point(462, 45)
+    $Script:PingCmbInt.Size = New-Object System.Drawing.Size(90, 24)
+    $Script:PingCmbInt.DropDownStyle = 'DropDownList'
+    $Script:PingCmbInt.BackColor = [System.Drawing.Color]::FromArgb(20, 24, 34)
+    $Script:PingCmbInt.ForeColor = $Script:UiTexto
+    $Script:PingCmbInt.FlatStyle = 'Flat'
+    [void]$Script:PingCmbInt.Items.AddRange(@("0,5 seg", "1 seg", "2 seg", "5 seg"))
+    $Script:PingCmbInt.SelectedIndex = 1
+    [void]$f.Controls.Add($Script:PingCmbInt)
 
-    $Script:PingBtnRun = New-Object System.Windows.Forms.Button; $Script:PingBtnRun.Text = "INICIAR"; $Script:PingBtnRun.Location = '330,17'; $Script:PingBtnRun.Width = 80
-    $Script:PingBtnRun.BackColor = [System.Drawing.Color]::FromArgb(0, 120, 215); $Script:PingBtnRun.FlatStyle = 'Flat'
-    [void]$Script:PingForm.Controls.Add($Script:PingBtnRun)
+    $Script:PingBtnRun = New-ToolButton $f "INICIAR" 566 44 130 34 $Script:UiAzul $null "Comeca ou para o teste"
 
-    $Script:PingRtb = New-Object System.Windows.Forms.RichTextBox; $Script:PingRtb.Location = '20,80'; $Script:PingRtb.Size = '390,320'
-    $Script:PingRtb.BackColor = [System.Drawing.Color]::Black; $Script:PingRtb.ForeColor = 'Lime'; $Script:PingRtb.ReadOnly = $true; $Script:PingRtb.BorderStyle = 'None'
-    [void]$Script:PingForm.Controls.Add($Script:PingRtb)
+    # Atalhos para os destinos que mais aparecem no suporte
+    New-ToolLabel $f "Atalhos:" 20 90 8.5 -Cor $Script:UiSuave | Out-Null
+    $Script:PingGw = ""
+    try {
+        $cfgRede = Get-NetIPConfiguration | Where-Object { $null -ne $_.IPv4DefaultGateway } | Select-Object -First 1
+        if ($cfgRede) { $Script:PingGw = $cfgRede.IPv4DefaultGateway.NextHop }
+    }
+    catch {}
+
+    $bAt1 = New-ToolButton $f "Gateway" 82 86 120 28 $Script:UiCinza { $Script:PingTxtIP.Text = $Script:PingGw } "Testa o roteador da rede local"
+    $bAt2 = New-ToolButton $f "Google DNS" 210 86 120 28 $Script:UiCinza { $Script:PingTxtIP.Text = "8.8.8.8" } "Testa a internet (8.8.8.8)"
+    $bAt3 = New-ToolButton $f "NetControll" 338 86 140 28 $Script:UiCinza { $Script:PingTxtIP.Text = "adm2.netcontroll.com.br" } "Testa o servidor NetControll"
+    $bAt4 = New-ToolButton $f "Site (DNS)" 486 86 120 28 $Script:UiCinza { $Script:PingTxtIP.Text = "google.com" } "Testa resolucao de nomes"
+    foreach ($bb in @($bAt1, $bAt2, $bAt3, $bAt4)) {
+        $bb.Font = New-Object System.Drawing.Font("Segoe UI", 8.5, [System.Drawing.FontStyle]::Bold)
+    }
+    if (-not $Script:PingGw) { $bAt1.Enabled = $false }
+
+    # Cartoes de estatistica
+    $Script:PingGPerda = New-Gauge $f "PERDA DE PACOTES" 20 124 216 86 $Script:UiVerde
+    $Script:PingGMedia = New-Gauge $f "TEMPO MEDIO" 246 124 216 86 $Script:UiAzul
+    $Script:PingGUltimo = New-Gauge $f "ULTIMA RESPOSTA" 472 124 216 86 $Script:UiAzul
+
+    # Grafico das ultimas respostas
+    $Script:PingGraf = New-Object System.Windows.Forms.Panel
+    $Script:PingGraf.Location = New-Object System.Drawing.Point(20, 220)
+    $Script:PingGraf.Size = New-Object System.Drawing.Size(668, 96)
+    $Script:PingGraf.Anchor = 'Top,Left,Right'
+    $Script:PingGraf.BackColor = $Script:UiFundo
+    $Script:PingGraf.Add_Paint({
+            param($s, $e)
+            $g = $e.Graphics
+            $g.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
+            $g.Clear($s.Parent.BackColor)
+            $cartao = New-RoundedRectPath -X 0 -Y 0 -W $s.Width -H $s.Height -R 8
+            $bc = New-Object System.Drawing.SolidBrush($Script:UiCartao)
+            $g.FillPath($bc, $cartao)
+            $bc.Dispose(); $cartao.Dispose()
+
+            $dados = @($Script:PingHist)
+            if ($dados.Count -lt 1) {
+                $fnt = New-Object System.Drawing.Font("Segoe UI", 9)
+                [System.Windows.Forms.TextRenderer]::DrawText($g, "O grafico das respostas aparece aqui durante o teste", $fnt,
+                    (New-Object System.Drawing.Rectangle(0, 0, $s.Width, $s.Height)), $Script:UiSuave,
+                    ([System.Windows.Forms.TextFormatFlags]::HorizontalCenter -bor [System.Windows.Forms.TextFormatFlags]::VerticalCenter))
+                $fnt.Dispose()
+                return
+            }
+
+            $margem = 10
+            $larg = $s.Width - ($margem * 2)
+            $alt = $s.Height - ($margem * 2)
+            $maxV = 20
+            foreach ($v in $dados) { if ($v -gt $maxV) { $maxV = $v } }
+
+            $n = $dados.Count
+            $lb = [Math]::Max(2, [int]($larg / $n) - 1)
+            $i = 0
+            foreach ($v in $dados) {
+                $x = $margem + [int]($i * ($larg / $n))
+                if ($v -lt 0) {
+                    $b = New-Object System.Drawing.SolidBrush([System.Drawing.Color]::FromArgb(190, 222, 70, 70))
+                    $g.FillRectangle($b, $x, $margem, $lb, $alt)
+                    $b.Dispose()
+                }
+                else {
+                    $hb = [int](($v / $maxV) * $alt)
+                    if ($hb -lt 2) { $hb = 2 }
+                    $cor = if ($v -lt 50) { $Script:UiVerde } elseif ($v -lt 150) { $Script:UiAmarelo } else { $Script:UiVermelho }
+                    $b = New-Object System.Drawing.SolidBrush($cor)
+                    $g.FillRectangle($b, $x, ($margem + $alt - $hb), $lb, $hb)
+                    $b.Dispose()
+                }
+                $i++
+            }
+
+            $fnt2 = New-Object System.Drawing.Font("Segoe UI", 8)
+            [System.Windows.Forms.TextRenderer]::DrawText($g, "pico $maxV ms  -  vermelho = sem resposta", $fnt2,
+                (New-Object System.Drawing.Rectangle(0, 4, ($s.Width - 12), 14)), $Script:UiSuave,
+                ([System.Windows.Forms.TextFormatFlags]::Right))
+            $fnt2.Dispose()
+        })
+    [void]$f.Controls.Add($Script:PingGraf)
+
+    $Script:PingRtb = New-Object System.Windows.Forms.RichTextBox
+    $Script:PingRtb.Location = New-Object System.Drawing.Point(20, 326)
+    $Script:PingRtb.Size = New-Object System.Drawing.Size(668, 214)
+    $Script:PingRtb.Anchor = 'Top,Left,Right,Bottom'
+    $Script:PingRtb.BackColor = [System.Drawing.Color]::FromArgb(14, 17, 24)
+    $Script:PingRtb.ForeColor = $Script:UiTexto
+    $Script:PingRtb.ReadOnly = $true
+    $Script:PingRtb.BorderStyle = 'None'
+    $Script:PingRtb.Font = New-Object System.Drawing.Font("Consolas", 9.5)
+    [void]$f.Controls.Add($Script:PingRtb)
+
+    $Script:PingChkLog = New-Object System.Windows.Forms.CheckBox
+    $Script:PingChkLog.Text = "Salvar log na Area de Trabalho"
+    $Script:PingChkLog.Location = New-Object System.Drawing.Point(20, 558)
+    $Script:PingChkLog.AutoSize = $true
+    $Script:PingChkLog.ForeColor = $Script:UiTexto
+    $Script:PingChkLog.Anchor = 'Bottom,Left'
+    [void]$f.Controls.Add($Script:PingChkLog)
+
+    $Script:PingAtualizarCartoes = {
+        $perdidos = $Script:PingEnviados - $Script:PingRecebidos
+        $perdaPct = if ($Script:PingEnviados -gt 0) { ($perdidos / $Script:PingEnviados) * 100 } else { 0 }
+        $corPerda = if ($perdaPct -ge 20) { $Script:UiVermelho } elseif ($perdaPct -ge 5) { $Script:UiAmarelo } else { $Script:UiVerde }
+        Update-Gauge $Script:PingGPerda $perdaPct ("{0:N0} %" -f $perdaPct) "$perdidos perdidos de $($Script:PingEnviados)" $corPerda
+
+        $ok = @($Script:PingHist | Where-Object { $_ -ge 0 })
+        if ($ok.Count -gt 0) {
+            $med = ($ok | Measure-Object -Average).Average
+            $mn = ($ok | Measure-Object -Minimum).Minimum
+            $mx = ($ok | Measure-Object -Maximum).Maximum
+            $corMed = if ($med -ge 150) { $Script:UiVermelho } elseif ($med -ge 50) { $Script:UiAmarelo } else { $Script:UiVerde }
+            Update-Gauge $Script:PingGMedia ([Math]::Min(100, $med / 3)) ("{0:N0} ms" -f $med) ("min $mn ms  -  max $mx ms") $corMed
+
+            $ult = $Script:PingHist[$Script:PingHist.Count - 1]
+            if ($ult -lt 0) {
+                Update-Gauge $Script:PingGUltimo 100 "SEM RESPOSTA" "o destino nao respondeu" $Script:UiVermelho
+            }
+            else {
+                $corU = if ($ult -ge 150) { $Script:UiVermelho } elseif ($ult -ge 50) { $Script:UiAmarelo } else { $Script:UiVerde }
+                Update-Gauge $Script:PingGUltimo ([Math]::Min(100, $ult / 3)) ("{0:N0} ms" -f $ult) "resposta mais recente" $corU
+            }
+        }
+        else {
+            Update-Gauge $Script:PingGMedia 0 "--" "aguardando respostas" $Script:UiAzul
+            Update-Gauge $Script:PingGUltimo 0 "--" "aguardando respostas" $Script:UiAzul
+        }
+        $Script:PingGraf.Invalidate()
+    }
 
     $Script:PingTimerObj = New-Object System.Windows.Forms.Timer
     $Script:PingTimerObj.Interval = 1000
 
     $Script:PingTimerObj.Add_Tick({
-            $target = $Script:PingTxtIP.Text.Trim()
-            if ([string]::IsNullOrEmpty($target)) { return }
+            $alvo = $Script:PingTxtIP.Text.Trim()
+            if ([string]::IsNullOrEmpty($alvo)) { return }
 
-            # Usa Ping .NET com timeout fixo de 800ms para nao travar a UI
             $pingObj = New-Object System.Net.NetworkInformation.Ping
-            $pingReply = $null
-            try { $pingReply = $pingObj.Send($target, 800) } catch {}
-            $time = Get-Date -Format "HH:mm:ss"
-            $msg = ""
+            $resp = $null
+            try { $resp = $pingObj.Send($alvo, 1200) } catch {}
+            $hora = Get-Date -Format "HH:mm:ss"
+            $Script:PingEnviados++
 
-            if ($pingReply -ne $null -and $pingReply.Status -eq [System.Net.NetworkInformation.IPStatus]::Success) {
-                $msg = "[$time] Resposta de ${target}: tempo=$($pingReply.RoundtripTime)ms`n"
-                $Script:PingRtb.SelectionColor = [System.Drawing.Color]::Lime
+            if ($null -ne $resp -and $resp.Status -eq [System.Net.NetworkInformation.IPStatus]::Success) {
+                $Script:PingRecebidos++
+                $ms = [int]$resp.RoundtripTime
+                [void]$Script:PingHist.Add($ms)
+                $msg = "[$hora] Resposta de $($resp.Address): $ms ms   (TTL $($resp.Options.Ttl))`n"
+                $Script:PingRtb.SelectionColor = if ($ms -lt 50) { $Script:UiVerde } elseif ($ms -lt 150) { $Script:UiAmarelo } else { $Script:UiVermelho }
             }
             else {
-                $statusDesc = if ($pingReply -ne $null) { $pingReply.Status } else { "Timeout" }
-                $msg = "[$time] FALHA ($statusDesc): Host inacessivel.`n"
-                $Script:PingRtb.SelectionColor = [System.Drawing.Color]::Salmon
+                [void]$Script:PingHist.Add(-1)
+                $estado = if ($null -ne $resp) { $resp.Status } else { "Timeout" }
+                $msg = "[$hora] FALHA ($estado) - sem resposta de $alvo`n"
+                $Script:PingRtb.SelectionColor = $Script:UiVermelho
             }
+
+            while ($Script:PingHist.Count -gt 120) { $Script:PingHist.RemoveAt(0) }
 
             $Script:PingRtb.AppendText($msg)
             $Script:PingRtb.ScrollToCaret()
+            # Nao deixa o texto crescer sem limite dentro da janela
+            if ($Script:PingRtb.Lines.Count -gt 600) {
+                $Script:PingRtb.Text = ($Script:PingRtb.Lines | Select-Object -Last 300) -join "`n"
+                $Script:PingRtb.SelectionStart = $Script:PingRtb.TextLength
+            }
+
+            & $Script:PingAtualizarCartoes
 
             if ($Script:PingChkLog.Checked -and $Script:PingLogPath -ne "") {
                 $msg.Trim() | Out-File $Script:PingLogPath -Append -Encoding utf8
@@ -1569,46 +2993,92 @@ function Show-PingTester {
     $Script:PingBtnRun.Add_Click({
             if ($Script:PingTimerObj.Enabled) {
                 $Script:PingTimerObj.Stop()
-                $Script:PingBtnRun.Text = "INICIAR"; $Script:PingBtnRun.BackColor = [System.Drawing.Color]::FromArgb(0, 120, 215)
+                $Script:PingBtnRun.Text = "INICIAR"
+                $Script:PingBtnRun.BackColor = $Script:UiAzul
+                $Script:PingBtnRun.Invalidate()
                 $Script:PingTxtIP.Enabled = $true
+                $Script:PingCmbInt.Enabled = $true
                 $Script:PingChkLog.Enabled = $true
+                $Script:PingRtb.SelectionColor = $Script:UiSuave
+                $Script:PingRtb.AppendText("--- Parado. Enviados: $($Script:PingEnviados) | Recebidos: $($Script:PingRecebidos) | Perdidos: $($Script:PingEnviados - $Script:PingRecebidos) ---`n")
             }
             else {
-                $target = $Script:PingTxtIP.Text.Trim()
-                if ([string]::IsNullOrEmpty($target)) { return }
-
-                $Script:PingBtnRun.Text = "PARAR"; $Script:PingBtnRun.BackColor = [System.Drawing.Color]::Salmon
+                $alvo = $Script:PingTxtIP.Text.Trim()
+                if ([string]::IsNullOrEmpty($alvo)) {
+                    [System.Windows.Forms.MessageBox]::Show("Digite um IP ou nome de destino.", "Ping", "OK", "Information") | Out-Null
+                    return
+                }
+                switch ($Script:PingCmbInt.SelectedIndex) {
+                    0 { $Script:PingTimerObj.Interval = 500 }
+                    1 { $Script:PingTimerObj.Interval = 1000 }
+                    2 { $Script:PingTimerObj.Interval = 2000 }
+                    3 { $Script:PingTimerObj.Interval = 5000 }
+                }
+                $Script:PingEnviados = 0
+                $Script:PingRecebidos = 0
+                $Script:PingHist.Clear()
+                $Script:PingBtnRun.Text = "PARAR"
+                $Script:PingBtnRun.BackColor = $Script:UiVermelho
+                $Script:PingBtnRun.Invalidate()
                 $Script:PingTxtIP.Enabled = $false
+                $Script:PingCmbInt.Enabled = $false
                 $Script:PingChkLog.Enabled = $false
-            
+
                 if ($Script:PingChkLog.Checked) {
-                    $Script:PingLogPath = Join-Path $Script:DesktopPath "PingLog_$($target.Replace('.', '_')).txt"
-                    "--- Iniciando Log de Ping: $(Get-Date) Target: $target ---" | Out-File $Script:PingLogPath -Encoding utf8
-                    $Script:PingRtb.AppendText(">> Logging em: $Script:PingLogPath`n")
+                    $Script:PingLogPath = Join-Path $Script:DesktopPath "PingLog_$($alvo.Replace('.', '_').Replace(':', '_'))_$(Get-Date -Format 'yyyyMMdd_HHmm').txt"
+                    "--- Log de ping para $alvo iniciado em $(Get-Date) ---" | Out-File $Script:PingLogPath -Encoding utf8
+                    $Script:PingRtb.SelectionColor = $Script:UiSuave
+                    $Script:PingRtb.AppendText(">> Gravando em: $Script:PingLogPath`n")
                 }
                 else { $Script:PingLogPath = "" }
                 $Script:PingTimerObj.Start()
             }
         })
 
-    $Script:PingForm.Add_FormClosing({
+    New-ToolButton $f "LIMPAR" 300 552 120 32 $Script:UiCinza {
+        $Script:PingRtb.Clear()
+        $Script:PingHist.Clear()
+        $Script:PingEnviados = 0
+        $Script:PingRecebidos = 0
+        & $Script:PingAtualizarCartoes
+    } "Zera o historico e as estatisticas" | Out-Null
+
+    $Script:PingBtnCopiar = New-ToolButton $f "COPIAR RESUMO" 430 552 258 32 $Script:UiCinza {
+        $perdidos = $Script:PingEnviados - $Script:PingRecebidos
+        $perdaPct = if ($Script:PingEnviados -gt 0) { ($perdidos / $Script:PingEnviados) * 100 } else { 0 }
+        $ok = @($Script:PingHist | Where-Object { $_ -ge 0 })
+        $med = if ($ok.Count -gt 0) { ($ok | Measure-Object -Average).Average } else { 0 }
+        $mn = if ($ok.Count -gt 0) { ($ok | Measure-Object -Minimum).Minimum } else { 0 }
+        $mx = if ($ok.Count -gt 0) { ($ok | Measure-Object -Maximum).Maximum } else { 0 }
+        $txt = @"
+=== TESTE DE PING ===
+Destino:   $($Script:PingTxtIP.Text)
+Data:      $(Get-Date -Format 'dd/MM/yyyy HH:mm')
+Enviados:  $($Script:PingEnviados)
+Recebidos: $($Script:PingRecebidos)
+Perdidos:  $perdidos ($([Math]::Round($perdaPct, 1))%)
+Tempo:     minimo $mn ms | medio $([Math]::Round($med, 1)) ms | maximo $mx ms
+"@
+        Set-Clipboard -Value $txt
+        $Script:PingBtnCopiar.Text = "COPIADO!"
+        $Script:PingBtnCopiar.Invalidate()
+    } "Copia um resumo pronto para colar no chamado"
+
+    $f.Add_FormClosing({
             param($s, $e)
-            $res = [System.Windows.Forms.MessageBox]::Show("O teste de ping sera interrompido. Deseja realmente fechar?", "Confirmar Saida", [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Question)
-            if ($res -eq [System.Windows.Forms.DialogResult]::No) {
-                $e.Cancel = $true
+            if ($Script:PingTimerObj.Enabled) {
+                $r = [System.Windows.Forms.MessageBox]::Show("O teste esta rodando. Deseja parar e fechar?", "Confirmar",
+                    [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Question)
+                if ($r -eq [System.Windows.Forms.DialogResult]::No) { $e.Cancel = $true; return }
             }
-            else {
-                $Script:PingTimerObj.Stop()
-                $Script:PingTimerObj.Dispose()
-                $Script:PingForm = $null
-            }
+            try { $Script:PingTimerObj.Stop(); $Script:PingTimerObj.Dispose() } catch {}
+            $Script:PingForm = $null
         })
 
-    $Script:PingForm.Add_Shown({
-            if ($InitialIP) { $Script:PingBtnRun.PerformClick() }
-        })
+    $f.Add_Shown({ if ($Script:PingInicial) { $Script:PingBtnRun.PerformClick() } })
 
-    $Script:PingForm.Show()
+    & $Script:PingAtualizarCartoes
+    $f.Show()
 }
 
 # -----------------------------------------------------------------------------
@@ -3333,6 +4803,14 @@ $Script:ToolTip.SetToolTip($bRes, "Utiliza 'Get-Process' para listar os 5 proces
 $bRes.Add_Click({ Show-ResourceMonitor })
 [void]$tbl.Controls.Add($bRes)
 
+$bSrv = New-Object System.Windows.Forms.Button; $bSrv.Height = 50; $bSrv.Dock = 'Top'
+$bSrv.Text = "Serviços do SQL Server e do Sistema"; $bSrv.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
+$bSrv.Cursor = 'Hand'
+Format-SupportBtn $bSrv $colorDiag
+$Script:ToolTip.SetToolTip($bSrv, "Mostra o estado do SQL Server, SQL Browser, Spooler e serviços do sistema. Permite iniciar, parar, reiniciar, deixar em início automático e testar a porta 1433 do servidor.")
+$bSrv.Add_Click({ Show-ServiceManager })
+[void]$tbl.Controls.Add($bSrv)
+
 # --- REPAROS E RESETS (VERMELHO) ---
 $bSfc = New-Object System.Windows.Forms.Button; $bSfc.Height = 50; $bSfc.Dock = 'Top'
 $bSfc.Text = "SFC /Scannow (Reparar Sistema)"; $bSfc.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
@@ -3373,6 +4851,14 @@ Format-SupportBtn $bSpool $colorGray
 $Script:ToolTip.SetToolTip($bSpool, "Comando 'Stop-Service Spooler', deleta conteúdo de C:\Windows\System32\spool\PRINTERS\* e reinicia o serviço.")
 $bSpool.Add_Click({ Invoke-SpoolerReset })
 [void]$tbl.Controls.Add($bSpool)
+
+$bUsb = New-Object System.Windows.Forms.Button; $bUsb.Height = 50; $bUsb.Dock = 'Top'
+$bUsb.Text = "Corrigir Impressora USB que Desconecta"; $bUsb.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
+$bUsb.Cursor = 'Hand'
+Format-SupportBtn $bUsb $colorGray
+$Script:ToolTip.SetToolTip($bUsb, "Desliga a suspensão seletiva de USB no plano de energia e a economia de energia das portas USB. Resolve a impressora térmica USB que para de responder depois de um tempo parada.")
+$bUsb.Add_Click({ Invoke-UsbPowerFix })
+[void]$tbl.Controls.Add($bUsb)
 
 $bNetR = New-Object System.Windows.Forms.Button; $bNetR.Height = 50; $bNetR.Dock = 'Top'
 $bNetR.Text = "Reset de Rede e DNS"; $bNetR.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
