@@ -37,7 +37,21 @@ $Script:LogBox = $null
 $Script:ProgressBar = $null
 $Script:StatusLabel = $null
 $Script:MainForm = $null
-$Script:BtnCancel = $null
+$Script:CancelOverlay = $null
+$Script:CancelOverlayTarget = $null
+$Script:CancelOverlayActive = $false
+$Script:CancelOverlayTimer = $null
+$Script:CancelOverlayLabel = "✕  CANCELAR"
+$Script:CancelOverlayState = 'normal'
+$Script:CancelOverlayFont = $null
+$Script:ScrollPanel = $null
+$Script:ProgressButton = $null
+$Script:ProgressPercent = 0
+$Script:ProgressHooked = $null
+$Script:CancelOverlayDX = 0
+$Script:CancelOverlayDY = 0
+$Script:DoneMap = $null
+$Script:DoneFont = $null
 $Script:DownloadComplete = $false
 $Script:DownloadError = $null
 $Script:IsDownloading = $false
@@ -948,6 +962,63 @@ function Show-PrinterManager {
         Add-DriverButton $pnlDrivers ([ref]$drvY) "  [UTILITÁRIO] Sweda Utility  (v2.03)" "$baseUrl/Utilities/Sweda_Utility_v2.03.exe" "Sweda_Utility_v2.03.exe" $colorSweda
         Add-DriverButton $pnlDrivers ([ref]$drvY) "  [UTILITÁRIO] Control iD Utility  (v1.0)" "$baseUrl/Utilities/PrintID_Utility_v1.0.exe" "PrintID_Utility_v1.0.exe" $colorCtrlID
 
+        $drvY += 8
+
+        # --- TOMATE / C3TECH / GENERICAS POS-80 ---
+        # Tomate MDK, Knup, Kmex, Evadin e a maioria das 80mm chinesas usam
+        # o mesmo "POS Printer Driver" generico.
+        $colorPos     = [System.Drawing.Color]::FromArgb(150, 45, 30)
+        $colorPosUtil = [System.Drawing.Color]::FromArgb(115, 30, 20)
+        $colorC3      = [System.Drawing.Color]::FromArgb(20, 85, 115)
+
+        Add-DriverSection $pnlDrivers ([ref]$drvY) "TOMATE / C3TECH / GENÉRICAS 80mm" ([System.Drawing.Color]::FromArgb(255, 130, 100))
+        Add-DriverButton $pnlDrivers ([ref]$drvY) "  [DRIVER] Tomate MDK-006 / 007 / 008 / 080 / 081  (POS-80 genérico v11.3)" "$baseUrl/POS/POS_Printer_Driver_Setup_v11.3.0.0.exe" "POS_Printer_Driver_Setup_v11.3.0.0.exe" $colorPos
+        Add-DriverButton $pnlDrivers ([ref]$drvY) "  [DRIVER] Knup / Kmex / Evadin / demais POS-58 e POS-80  (mesmo driver v11.3)" "$baseUrl/POS/POS_Printer_Driver_Setup_v11.3.0.0.exe" "POS_Printer_Driver_Setup_v11.3.0.0.exe" $colorPos
+        Add-DriverButton $pnlDrivers ([ref]$drvY) "  [UTILITÁRIO] POS Utilities  (teste, autoteste e configuração POS-80)" "$baseUrl/Utilities/POS_Utilities.exe" "POS_Utilities.exe" $colorPosUtil
+        Add-DriverButton $pnlDrivers ([ref]$drvY) "  [DRIVER] C3Tech IT-100  (pacote oficial C3Tech - RAR, ~87 MB)" "https://c3technology.com.br/download/DRIVES%20IT-100.rar" "C3Tech_IT-100_Drivers.rar" $colorC3
+        Add-DriverButton $pnlDrivers ([ref]$drvY) "  [DRIVER] C3Tech IT-110  (drivers + utilitários oficiais - ZIP, ~103 MB)" "https://c3technology.com.br/download/DRIVES%20E%20UTILITARIOS%20IT-110.zip" "C3Tech_IT-110_Drivers_Utilitarios.zip" $colorC3
+        Add-DriverLinkButton $pnlDrivers ([ref]$drvY) "  [SITE] Tomate - suporte oficial (tutoriais e drivers por modelo)" "https://tomate.tv/support" $colorPosUtil
+        $drvY += 8
+
+        # --- FEASSO / JETWAY ---
+        $colorFeasso = [System.Drawing.Color]::FromArgb(120, 60, 130)
+        $colorJetway = [System.Drawing.Color]::FromArgb(35, 95, 105)
+        Add-DriverSection $pnlDrivers ([ref]$drvY) "FEASSO / JETWAY" ([System.Drawing.Color]::FromArgb(200, 150, 255))
+        Add-DriverButton $pnlDrivers ([ref]$drvY) "  [DRIVER] Feasso F-IMTER-01  (v1.7)" "$baseUrl/Feasso/Feasso_F-IMTER-01_Driver_v1.7.exe" "Feasso_F-IMTER-01_Driver_v1.7.exe" $colorFeasso
+        Add-DriverButton $pnlDrivers ([ref]$drvY) "  [DRIVER] Feasso F-IMTER-02  (v2.0)" "$baseUrl/Feasso/Feasso_F-IMTER-02_Driver_v2.0.exe" "Feasso_F-IMTER-02_Driver_v2.0.exe" $colorFeasso
+        Add-DriverButton $pnlDrivers ([ref]$drvY) "  [DRIVER] Feasso F-IMTER-03  (v1.5)" "$baseUrl/Feasso/Feasso_F-IMTER-03_Driver_v1.5.exe" "Feasso_F-IMTER-03_Driver_v1.5.exe" $colorFeasso
+        Add-DriverButton $pnlDrivers ([ref]$drvY) "  [DRIVER] Jetway JP-500  (v7.17)" "$baseUrl/Jetway/Jetway_JP-500_Printer_Driver_v7.17.exe" "Jetway_JP-500_Printer_Driver_v7.17.exe" $colorJetway
+        Add-DriverButton $pnlDrivers ([ref]$drvY) "  [DRIVER] Jetway JP-800  (v2.38E)" "$baseUrl/Jetway/Jetway_JP-800_PrinterDriver_v2.38E.exe" "Jetway_JP-800_PrinterDriver_v2.38E.exe" $colorJetway
+        Add-DriverButton $pnlDrivers ([ref]$drvY) "  [DRIVER] Jetway JMP-100  (v2.61J)" "$baseUrl/Jetway/Jetway_JMP-100_Driver_v2.61J.exe" "Jetway_JMP-100_Driver_v2.61J.exe" $colorJetway
+        $drvY += 8
+
+        # --- GERTEC / DIEBOLD / DIMEP / PERTO ---
+        $colorGertec  = [System.Drawing.Color]::FromArgb(150, 100, 20)
+        $colorDiebold = [System.Drawing.Color]::FromArgb(45, 70, 130)
+        $colorPerto   = [System.Drawing.Color]::FromArgb(90, 45, 60)
+        Add-DriverSection $pnlDrivers ([ref]$drvY) "GERTEC / DIEBOLD / DIMEP / PERTO" ([System.Drawing.Color]::FromArgb(255, 200, 90))
+        Add-DriverButton $pnlDrivers ([ref]$drvY) "  [DRIVER] Gertec G250  (v1.0)" "$baseUrl/Gertec/Gertec_G250_Driver_v1.0.exe" "Gertec_G250_Driver_v1.0.exe" $colorGertec
+        Add-DriverButton $pnlDrivers ([ref]$drvY) "  [UTILITÁRIO] Gertec G250 Utility  (v2.57)" "$baseUrl/Utilities/Gertec_G250_Utility_v2.57.exe" "Gertec_G250_Utility_v2.57.exe" $colorGertec
+        Add-DriverButton $pnlDrivers ([ref]$drvY) "  [DRIVER] Diebold Mecaf / Perfecta  (v1.34 drv 1.9)" "$baseUrl/Diebold/Diebold_Printers_v1.34_drv_1.9.exe" "Diebold_Printers_v1.34_drv_1.9.exe" $colorDiebold
+        Add-DriverButton $pnlDrivers ([ref]$drvY) "  [DRIVER] Diebold IM113ID  (v1.2.0.10 x64)" "$baseUrl/Diebold/Diebold_IM113ID_v1.2.0.10_x64.exe" "Diebold_IM113ID_v1.2.0.10_x64.exe" $colorDiebold
+        Add-DriverButton $pnlDrivers ([ref]$drvY) "  [DRIVER] Dimep D-PRINT DUAL  (v2.1.4.4)" "$baseUrl/Dimep/Dimep_D-PRINT_DUAL_v2.1.4.4.exe" "Dimep_D-PRINT_DUAL_v2.1.4.4.exe" $colorPerto
+        Add-DriverButton $pnlDrivers ([ref]$drvY) "  [DRIVER] Perto PertoPrinter  (v2.5)" "$baseUrl/PertoPrinter/PertoPrinter_Driver_2.5.exe" "PertoPrinter_Driver_2.5.exe" $colorPerto
+        $drvY += 8
+
+        # --- STAR / WAYTEC / MENNO / DASCOM ---
+        $colorStar   = [System.Drawing.Color]::FromArgb(25, 70, 95)
+        $colorWaytec = [System.Drawing.Color]::FromArgb(70, 90, 40)
+        $colorMenno  = [System.Drawing.Color]::FromArgb(100, 55, 25)
+        Add-DriverSection $pnlDrivers ([ref]$drvY) "STAR / WAYTEC / MENNO / DASCOM" ([System.Drawing.Color]::FromArgb(140, 210, 255))
+        Add-DriverButton $pnlDrivers ([ref]$drvY) "  [DRIVER] Star (todos os modelos)  (x64 v3.7.2)" "$baseUrl/Star/Star_PrinterDrivers_x64_v3.7.2.exe" "Star_PrinterDrivers_x64_v3.7.2.exe" $colorStar
+        Add-DriverButton $pnlDrivers ([ref]$drvY) "  [DRIVER] Waytec WP-100  (v7.17)" "$baseUrl/Waytec/Waytec_WP-100_Driver_v7.17.exe" "Waytec_WP-100_Driver_v7.17.exe" $colorWaytec
+        Add-DriverButton $pnlDrivers ([ref]$drvY) "  [DRIVER] Waytec WP-50  (v7.17.50)" "$baseUrl/Waytec/WayTec_WP-50_Driver_v7.17.50.exe" "WayTec_WP-50_Driver_v7.17.50.exe" $colorWaytec
+        Add-DriverButton $pnlDrivers ([ref]$drvY) "  [UTILITÁRIO] Waytec Utility  (v3.2.0.1)" "$baseUrl/Utilities/Waytec_Utility_v3.2.0.1.exe" "Waytec_Utility_v3.2.0.1.exe" $colorWaytec
+        Add-DriverButton $pnlDrivers ([ref]$drvY) "  [DRIVER] Menno  (v2.52)" "$baseUrl/Menno/Menno_Printer_Driver_v2.52.exe" "Menno_Printer_Driver_v2.52.exe" $colorMenno
+        Add-DriverButton $pnlDrivers ([ref]$drvY) "  [UTILITÁRIO] Menno Printer Tool  (v1.56)" "$baseUrl/Utilities/Menno_PrinterTool_v1.56.exe" "Menno_PrinterTool_v1.56.exe" $colorMenno
+        Add-DriverButton $pnlDrivers ([ref]$drvY) "  [DRIVER] Dascom DT-210 / DT-230  (v1.0.0.7)" "$baseUrl/Dascom/Dascom_DT-210_DT-230_Driver_v1.0.0.7.exe" "Dascom_DT-210_DT-230_Driver_v1.0.0.7.exe" $colorStar
+        $drvY += 8
+
         # --- IMPRESSORAS XTAG (ETIQUETA) ---
         $colorXtag = [System.Drawing.Color]::FromArgb(0, 140, 130)
         $colorXtagUtil = [System.Drawing.Color]::FromArgb(0, 95, 90)
@@ -1670,11 +1741,425 @@ function Deploy-WithBackup {
 # 4. MOTOR DE DOWNLOAD E INSTALACAO
 # -----------------------------------------------------------------------------
 
+# --- BOTAO CANCELAR SOBREPOSTO ---
+# Aparece em cima do proprio botao que o usuario clicou para baixar.
+# Desenhado na mao (cantos arredondados + gradiente + sombra) para nao
+# ficar com a cara quadrada padrao do WinForms.
+function New-RoundedRectPath {
+    param([int]$X, [int]$Y, [int]$W, [int]$H, [int]$R)
+    $p = New-Object System.Drawing.Drawing2D.GraphicsPath
+    $d = $R * 2
+    $p.AddArc($X, $Y, $d, $d, 180, 90)
+    $p.AddArc(($X + $W - $d), $Y, $d, $d, 270, 90)
+    $p.AddArc(($X + $W - $d), ($Y + $H - $d), $d, $d, 0, 90)
+    $p.AddArc($X, ($Y + $H - $d), $d, $d, 90, 90)
+    $p.CloseFigure()
+    return $p
+}
+
+function Get-CancelOverlay {
+    if ($null -eq $Script:CancelOverlay) {
+        $Script:CancelOverlayLabel = "✕  CANCELAR"
+        $Script:CancelOverlayState = 'normal'
+        $Script:CancelOverlayFont = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold)
+
+        $ov = New-Object System.Windows.Forms.Button
+        $ov.Text = ""            # o texto e desenhado no evento Paint
+        $ov.FlatStyle = 'Flat'
+        $ov.FlatAppearance.BorderSize = 0
+        $ov.BackColor = [System.Drawing.Color]::FromArgb(200, 140, 0)
+        $ov.Cursor = 'Hand'
+        $ov.TabStop = $false
+        $ov.Visible = $false
+
+        # Double buffer: evita piscar ao repintar sobre o botao de download
+        try {
+            $pi = [System.Windows.Forms.Control].GetProperty('DoubleBuffered', 'Instance,NonPublic')
+            $pi.SetValue($ov, $true, $null)
+        }
+        catch {}
+
+        $ov.Add_MouseEnter({ $Script:CancelOverlayState = 'hover'; $this.Invalidate() })
+        $ov.Add_MouseLeave({ $Script:CancelOverlayState = 'normal'; $this.Invalidate() })
+        $ov.Add_MouseDown({ $Script:CancelOverlayState = 'down'; $this.Invalidate() })
+        $ov.Add_MouseUp({ $Script:CancelOverlayState = 'hover'; $this.Invalidate() })
+
+        $ov.Add_Paint({
+                param($s, $e)
+                $w = $s.Width; $h = $s.Height
+                if ($w -le 6 -or $h -le 6) { return }
+
+                $g = $e.Graphics
+                $g.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
+
+                # Fundo: repinta o pedaco da barra de progresso que fica embaixo,
+                # para os cantos arredondados casarem com o botao (sem "degraus")
+                $tgt = $Script:CancelOverlayTarget
+                if ($tgt -and -not $tgt.IsDisposed -and $Script:ProgressButton -eq $tgt) {
+                    $estado = $g.Save()
+                    $g.TranslateTransform([float](-$Script:CancelOverlayDX), [float](-$Script:CancelOverlayDY))
+                    Draw-ButtonProgress -G $g -Btn $tgt -Pct $Script:ProgressPercent
+                    $g.Restore($estado)
+                }
+                else {
+                    $g.Clear($s.BackColor)
+                }
+
+                if (-not $s.Enabled) {
+                    $c1 = [System.Drawing.Color]::FromArgb(122, 52, 52)
+                    $c2 = [System.Drawing.Color]::FromArgb(96, 36, 36)
+                    $fg = [System.Drawing.Color]::FromArgb(228, 196, 196)
+                }
+                elseif ($Script:CancelOverlayState -eq 'down') {
+                    $c1 = [System.Drawing.Color]::FromArgb(178, 28, 28)
+                    $c2 = [System.Drawing.Color]::FromArgb(146, 16, 16)
+                    $fg = [System.Drawing.Color]::White
+                }
+                elseif ($Script:CancelOverlayState -eq 'hover') {
+                    $c1 = [System.Drawing.Color]::FromArgb(246, 102, 102)
+                    $c2 = [System.Drawing.Color]::FromArgb(216, 48, 48)
+                    $fg = [System.Drawing.Color]::White
+                }
+                else {
+                    $c1 = [System.Drawing.Color]::FromArgb(230, 78, 78)
+                    $c2 = [System.Drawing.Color]::FromArgb(198, 34, 40)
+                    $fg = [System.Drawing.Color]::White
+                }
+
+                $bw = $w - 2
+                $bh = $h - 3
+                $raio = 8
+
+                # Sombra suave deslocada
+                $sombra = New-RoundedRectPath -X 2 -Y 3 -W $bw -H $bh -R $raio
+                $bSombra = New-Object System.Drawing.SolidBrush([System.Drawing.Color]::FromArgb(60, 0, 0, 0))
+                $g.FillPath($bSombra, $sombra)
+
+                # Corpo com gradiente vertical
+                $corpo = New-RoundedRectPath -X 0 -Y 0 -W $bw -H $bh -R $raio
+                $rect = New-Object System.Drawing.Rectangle(0, 0, $bw, $bh)
+                $bCorpo = New-Object System.Drawing.Drawing2D.LinearGradientBrush($rect, $c1, $c2, [float]90)
+                $g.FillPath($bCorpo, $corpo)
+
+                # Borda clara de 1px (efeito vidro)
+                $pBorda = New-Object System.Drawing.Pen([System.Drawing.Color]::FromArgb(110, 255, 255, 255), 1)
+                $g.DrawPath($pBorda, $corpo)
+
+                $flags = [System.Windows.Forms.TextFormatFlags]::HorizontalCenter -bor `
+                    [System.Windows.Forms.TextFormatFlags]::VerticalCenter -bor `
+                    [System.Windows.Forms.TextFormatFlags]::EndEllipsis
+                [System.Windows.Forms.TextRenderer]::DrawText($g, $Script:CancelOverlayLabel, $Script:CancelOverlayFont, $rect, $fg, $flags)
+
+                $pBorda.Dispose(); $bCorpo.Dispose(); $bSombra.Dispose()
+                $corpo.Dispose(); $sombra.Dispose()
+            })
+
+        $ov.Add_Click({ Cancel-Download })
+        if ($Script:ToolTip) { $Script:ToolTip.SetToolTip($ov, "Cancelar o download em andamento") }
+        $Script:CancelOverlay = $ov
+    }
+    return $Script:CancelOverlay
+}
+
+function Update-CancelOverlay {
+    if (-not $Script:CancelOverlayActive) { return }
+    $ov = $Script:CancelOverlay
+    $target = $Script:CancelOverlayTarget
+    if ($null -eq $ov -or $null -eq $target) { return }
+    try {
+        if ($target.IsDisposed -or -not $target.IsHandleCreated) { return }
+        $owner = $ov.Parent
+        if ($null -eq $owner) { return }
+
+        # Converte a posicao do botao alvo para as coordenadas do formulario
+        $ptScreen = $target.Parent.PointToScreen($target.Location)
+        $pt = $owner.PointToClient($ptScreen)
+
+        $w = 132
+        $h = [Math]::Max(26, $target.Height - 12)
+        $x = $pt.X + $target.Width - $w - 8
+        $y = $pt.Y + [int](($target.Height - $h) / 2)
+
+        # Se o botao alvo saiu da area visivel (rolagem), esconde o overlay
+        $visivel = $true
+        if ($Script:ScrollPanel -and -not $Script:ScrollPanel.IsDisposed -and $Script:ScrollPanel.IsHandleCreated) {
+            $spTop = $owner.PointToClient($Script:ScrollPanel.PointToScreen((New-Object System.Drawing.Point(0, 0))))
+            if ($y -lt $spTop.Y -or ($y + $h) -gt ($spTop.Y + $Script:ScrollPanel.Height)) { $visivel = $false }
+        }
+
+        if (-not $visivel) {
+            if ($ov.Visible) { $ov.Visible = $false }
+            return
+        }
+
+        # Deslocamento do overlay dentro do botao: o Paint usa isso para
+        # repintar o trecho da barra que fica atras dos cantos arredondados
+        $Script:CancelOverlayDX = $x - $pt.X
+        $Script:CancelOverlayDY = $y - $pt.Y
+        if ($ov.BackColor -ne $target.BackColor) { $ov.BackColor = $target.BackColor }
+
+        if ($ov.Width -ne $w -or $ov.Height -ne $h) { $ov.Size = New-Object System.Drawing.Size($w, $h) }
+        if ($ov.Left -ne $x -or $ov.Top -ne $y) { $ov.Location = New-Object System.Drawing.Point($x, $y) }
+        if (-not $ov.Visible) { $ov.Visible = $true }
+        $ov.Invalidate()
+        $ov.BringToFront()
+    }
+    catch {}
+}
+
+function Show-CancelOverlay {
+    param($Button)
+    if ($null -eq $Button) { return }
+    try {
+        $frm = $Button.FindForm()
+        if ($null -eq $frm) { $frm = $Script:MainForm }
+        if ($null -eq $frm) { return }
+
+        $ov = Get-CancelOverlay
+        $Script:CancelOverlayLabel = "✕  CANCELAR"
+        $Script:CancelOverlayState = 'normal'
+        $ov.Enabled = $true
+        $ov.BackColor = $Button.BackColor
+        $ov.Invalidate()
+
+        if ($ov.Parent -ne $frm) {
+            if ($ov.Parent) { $ov.Parent.Controls.Remove($ov) }
+            [void]$frm.Controls.Add($ov)
+        }
+
+        $Script:CancelOverlayTarget = $Button
+        $Script:CancelOverlayActive = $true
+        Update-CancelOverlay
+
+        # Timer mantem o overlay grudado no botao mesmo com rolagem/redimensionamento
+        if ($null -eq $Script:CancelOverlayTimer) {
+            $tmr = New-Object System.Windows.Forms.Timer
+            $tmr.Interval = 120
+            $tmr.Add_Tick({ Update-CancelOverlay })
+            $Script:CancelOverlayTimer = $tmr
+        }
+        $Script:CancelOverlayTimer.Start()
+    }
+    catch {}
+}
+
+function Hide-CancelOverlay {
+    $Script:CancelOverlayActive = $false
+    $Script:CancelOverlayTarget = $null
+    try { if ($Script:CancelOverlayTimer) { $Script:CancelOverlayTimer.Stop() } } catch {}
+    try { if ($Script:CancelOverlay) { $Script:CancelOverlay.Visible = $false } } catch {}
+}
+
+# --- BARRA DE PROGRESSO DENTRO DO PROPRIO BOTAO ---
+# Substitui o "[==== ] 52%" em texto por uma barra gradiente desenhada no botao.
+function Draw-ButtonProgress {
+    param($G, $Btn, [int]$Pct)
+    $w = $Btn.Width; $h = $Btn.Height
+    if ($w -le 10 -or $h -le 10) { return }
+
+    $G.Clear($Btn.BackColor)                        # trilho
+    $pct = [Math]::Max(0, [Math]::Min(100, $Pct))
+    $fw = [int]($w * $pct / 100)
+
+    if ($fw -gt 1) {
+        # Gradiente calculado sobre a largura total: a cor de cada ponto nao
+        # muda enquanto a barra cresce (fica bem mais suave que reescalar).
+        $rectFull = New-Object System.Drawing.Rectangle(0, 0, $w, $h)
+        $br = New-Object System.Drawing.Drawing2D.LinearGradientBrush($rectFull, `
+            [System.Drawing.Color]::FromArgb(28, 116, 232), `
+            [System.Drawing.Color]::FromArgb(0, 208, 158), [float]0)
+        $antigo = $G.Clip
+        $G.SetClip((New-Object System.Drawing.Rectangle(0, 0, $fw, $h)), [System.Drawing.Drawing2D.CombineMode]::Intersect)
+        $G.FillRectangle($br, $rectFull)
+        $G.Clip = $antigo
+        $br.Dispose()
+
+        # Brilho na ponta da barra
+        if ($fw -lt ($w - 1)) {
+            $pen = New-Object System.Drawing.Pen([System.Drawing.Color]::FromArgb(150, 255, 255, 255), 2)
+            $G.DrawLine($pen, $fw, 1, $fw, ($h - 2))
+            $pen.Dispose()
+        }
+    }
+
+    $reserva = 150   # espaco reservado do botao CANCELAR na direita
+    $flagsNome = [System.Windows.Forms.TextFormatFlags]::Left -bor `
+        [System.Windows.Forms.TextFormatFlags]::VerticalCenter -bor `
+        [System.Windows.Forms.TextFormatFlags]::EndEllipsis
+    $rNome = New-Object System.Drawing.Rectangle(12, 0, [Math]::Max(20, $w - $reserva - 65), $h)
+    [System.Windows.Forms.TextRenderer]::DrawText($G, $Btn.Text, $Btn.Font, $rNome, [System.Drawing.Color]::White, $flagsNome)
+
+    $flagsPct = [System.Windows.Forms.TextFormatFlags]::Right -bor `
+        [System.Windows.Forms.TextFormatFlags]::VerticalCenter
+    $rPct = New-Object System.Drawing.Rectangle(0, 0, [Math]::Max(30, $w - $reserva), $h)
+    [System.Windows.Forms.TextRenderer]::DrawText($G, "$pct%", $Btn.Font, $rPct, [System.Drawing.Color]::White, $flagsPct)
+}
+
+# Estado final do botao: cor cheia (como antes), porem com gradiente,
+# brilho no topo e selo de vidro na direita em vez da cor chapada.
+#   ok     = verde   (baixado / extraido / executado)
+#   cancel = salmao  (cancelado pelo usuario)
+#   erro   = vermelho
+function Draw-ButtonDone {
+    param($G, $Btn, $Info)
+    $w = $Btn.Width; $h = $Btn.Height
+    if ($w -le 10 -or $h -le 10) { return }
+
+    $tipo = [string]$Info.Kind
+    $Label = [string]$Info.Label
+    switch ($tipo) {
+        'cancel' {
+            # Salmao (essencia do Salmon antigo), um tom abaixo para o texto
+            # branco ficar legivel em cima
+            $c1 = [System.Drawing.Color]::FromArgb(222, 104, 92)
+            $c2 = [System.Drawing.Color]::FromArgb(186, 66, 60)
+            $icone = "✕"
+        }
+        'erro' {
+            $c1 = [System.Drawing.Color]::FromArgb(216, 62, 62)
+            $c2 = [System.Drawing.Color]::FromArgb(172, 30, 38)
+            $icone = "!"
+        }
+        default {
+            $c1 = [System.Drawing.Color]::FromArgb(0, 194, 146)
+            $c2 = [System.Drawing.Color]::FromArgb(52, 208, 116)
+            $icone = "✔"
+        }
+    }
+
+    # Cor na largura toda, com gradiente horizontal
+    $rTudo = New-Object System.Drawing.Rectangle(0, 0, $w, $h)
+    $bFundo = New-Object System.Drawing.Drawing2D.LinearGradientBrush($rTudo, $c1, $c2, [float]0)
+    $G.FillRectangle($bFundo, $rTudo)
+    $bFundo.Dispose()
+
+    # Brilho suave na metade de cima (da profundidade, tira o ar de "chapado")
+    $hTopo = [int]($h / 2)
+    if ($hTopo -gt 2) {
+        $rTopo = New-Object System.Drawing.Rectangle(0, 0, $w, $hTopo)
+        $bTopo = New-Object System.Drawing.Drawing2D.LinearGradientBrush($rTopo, `
+            [System.Drawing.Color]::FromArgb(50, 255, 255, 255), `
+            [System.Drawing.Color]::FromArgb(0, 255, 255, 255), [float]90)
+        $G.FillRectangle($bTopo, $rTopo)
+        $bTopo.Dispose()
+    }
+
+    # Selo de vidro na direita (mesma forma/posicao do botao CANCELAR)
+    $pw = 132
+    $ph = [Math]::Max(24, $h - 16)
+    $px = $w - $pw - 8
+    $py = [int](($h - $ph) / 2)
+    if ($px -gt 40) {
+        $rSelo = New-Object System.Drawing.Rectangle($px, $py, $pw, $ph)
+        $pSelo = New-RoundedRectPath -X $px -Y $py -W $pw -H $ph -R 8
+        $bSelo = New-Object System.Drawing.SolidBrush([System.Drawing.Color]::FromArgb(60, 255, 255, 255))
+        $G.FillPath($bSelo, $pSelo)
+        $pBorda = New-Object System.Drawing.Pen([System.Drawing.Color]::FromArgb(150, 255, 255, 255), 1)
+        $G.DrawPath($pBorda, $pSelo)
+        $flagsSelo = [System.Windows.Forms.TextFormatFlags]::HorizontalCenter -bor `
+            [System.Windows.Forms.TextFormatFlags]::VerticalCenter -bor `
+            [System.Windows.Forms.TextFormatFlags]::EndEllipsis
+        [System.Windows.Forms.TextRenderer]::DrawText($G, "$icone $Label", $Script:DoneFont, $rSelo, [System.Drawing.Color]::White, $flagsSelo)
+        $pBorda.Dispose(); $bSelo.Dispose(); $pSelo.Dispose()
+    }
+
+    # Nome do item. Em cancelamento/erro o texto do botao vira so a palavra de
+    # estado ("Cancelado", "Erro"), que o selo ja mostra - entao usa o nome real.
+    if ($tipo -eq 'ok' -or [string]::IsNullOrEmpty([string]$Info.Nome)) {
+        $txt = [string]$Btn.Text
+    }
+    else {
+        $txt = [string]$Info.Nome
+    }
+    $txt = $txt.TrimStart([char]0x2714, ' ')
+    $flagsNome = [System.Windows.Forms.TextFormatFlags]::Left -bor `
+        [System.Windows.Forms.TextFormatFlags]::VerticalCenter -bor `
+        [System.Windows.Forms.TextFormatFlags]::EndEllipsis
+    $rNome = New-Object System.Drawing.Rectangle(12, 0, [Math]::Max(20, $w - $pw - 32), $h)
+    [System.Windows.Forms.TextRenderer]::DrawText($G, $txt, $Btn.Font, $rNome, [System.Drawing.Color]::White, $flagsNome)
+}
+
+function Set-ButtonDone {
+    param($Button, [string]$Label = "CONCLUÍDO", [string]$Kind = 'ok', [string]$Nome = "")
+    try {
+        if ($null -eq $Script:DoneMap) { $Script:DoneMap = @{} }
+        if ($null -eq $Script:DoneFont) {
+            $Script:DoneFont = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold)
+        }
+        $Script:DoneMap[$Button] = @{ Label = $Label; Kind = $Kind; Nome = $Nome }
+        $Button.Invalidate()
+    }
+    catch {}
+}
+
+function Clear-ButtonDone {
+    param($Button)
+    try {
+        if ($Script:DoneMap -and $Script:DoneMap.ContainsKey($Button)) {
+            $Script:DoneMap.Remove($Button)
+            $Button.Invalidate()
+        }
+    }
+    catch {}
+}
+
+$Script:ButtonProgressPaint = {
+    param($s, $e)
+    if ($Script:ProgressButton -eq $s) {
+        $e.Graphics.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
+        Draw-ButtonProgress -G $e.Graphics -Btn $s -Pct $Script:ProgressPercent
+        return
+    }
+    if ($Script:DoneMap -and $Script:DoneMap.ContainsKey($s)) {
+        $e.Graphics.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
+        Draw-ButtonDone -G $e.Graphics -Btn $s -Info $Script:DoneMap[$s]
+        return
+    }
+    # Sem download nem conclusao: pintura normal do WinForms
+}
+
+function Enable-ButtonProgress {
+    param($Button)
+    try {
+        if ($null -eq $Script:ProgressHooked) { $Script:ProgressHooked = New-Object System.Collections.ArrayList }
+        # Add_Paint so uma vez por botao: o handler se anula sozinho quando
+        # o botao nao e o do download atual.
+        if (-not $Script:ProgressHooked.Contains($Button)) {
+            $Button.Add_Paint($Script:ButtonProgressPaint)
+            [void]$Script:ProgressHooked.Add($Button)
+        }
+        Clear-ButtonDone -Button $Button      # re-download: sai do estado concluido
+        $Script:ProgressPercent = 0
+        $Script:ProgressButton = $Button
+        $Button.BackColor = [System.Drawing.Color]::FromArgb(22, 30, 46)  # trilho
+        $Button.Invalidate()
+    }
+    catch {}
+}
+
+function Disable-ButtonProgress {
+    try {
+        $b = $Script:ProgressButton
+        $Script:ProgressButton = $null
+        $Script:ProgressPercent = 0
+        if ($b -and -not $b.IsDisposed) { $b.Invalidate() }
+    }
+    catch {}
+}
+
 function Cancel-Download {
     if ($Script:CurrentWebClient -ne $null -and $Global:XM_DOWNLOAD_IN_PROGRESS) {
         $Script:CancelRequested = $true
         try { $Script:CurrentWebClient.CancelAsync() } catch {}
         Log-Message "CANCEL" "Solicitacao de cancelamento enviada..."
+
+        # Feedback imediato: o botao muda de estado assim que e clicado
+        if ($Script:CancelOverlay) {
+            $Script:CancelOverlayLabel = "CANCELANDO..."
+            $Script:CancelOverlay.Enabled = $false
+            $Script:CancelOverlay.Invalidate()
+        }
+        if ($Script:StatusLabel) { $Script:StatusLabel.Text = "Cancelando download..." }
         [System.Windows.Forms.Application]::DoEvents()
     }
 }
@@ -1690,31 +2175,29 @@ function Start-Download {
     if ($Button.Text -like "*Instalado" -or $Button.Text -like "*Aberto" -or $Button.Text -like "*Extraido") { return }
 
     $originalText = $Button.Text
+    $originalBack = $Button.BackColor
     $Global:XM_DOWNLOAD_IN_PROGRESS = $true
     $Script:CancelRequested = $false
-    
+
     # Bloqueio visual de toda a tabela para evitar cliques fantasmas
     try { if ($tbl) { $tbl.Enabled = $false } } catch {}
 
-    if ($Script:BtnCancel) { 
-        $Script:BtnCancel.Visible = $true
-        $Script:BtnCancel.Enabled = $true
-        $Script:BtnCancel.BringToFront()
-    }
-    
+    # Barra de progresso desenhada no botao + botao de cancelar sobreposto
+    Enable-ButtonProgress -Button $Button
+    Show-CancelOverlay -Button $Button
+
     try {
         $Script:DownloadComplete = $false
         $Script:DownloadError = $null
-        
+
         if ($Script:ProgressBar) { $Script:ProgressBar.Value = 0 }
-        
+
         $Button.Text = "Conectando..."
-        $Button.Enabled = $false 
-        $Button.BackColor = [System.Drawing.Color]::FromArgb(200, 140, 0)
-        
+        $Button.Enabled = $false
+
         $destPath = Join-Path $Script:DownloadFolder $FileName
         Log-Message "DOWN" "Iniciando download: $FileName"
-        if ($Script:StatusLabel) { $Script:StatusLabel.Text = "Baixando $FileName... (Pressione Cancelar para parar)" }
+        if ($Script:StatusLabel) { $Script:StatusLabel.Text = "Baixando $FileName...  -  clique em ✕ CANCELAR sobre o botao para parar" }
 
         $maxRetries = 3
         $retryCount = 0
@@ -1738,18 +2221,13 @@ function Start-Download {
                 $wc.Add_DownloadProgressChanged({
                         param($s, $e)
                         if ($Script:ProgressBar) { $Script:ProgressBar.Value = $e.ProgressPercentage }
-                        
-                        $pct = $e.ProgressPercentage
-                        $barSize = 10
-                        $filled = [Math]::Floor($pct / (100 / $barSize))
-                        $bar = ("=" * $filled) + (" " * ($barSize - $filled))
-                        
+
                         if ($Script:CancelRequested) { try { $s.CancelAsync() } catch {} }
                         else {
-                            $Button.Text = "[$bar] $pct%"
-                            # Color animation: Transitions from Orange/Amber to Green
-                            if ($pct -gt 90) { $Button.BackColor = [System.Drawing.Color]::FromArgb(46, 204, 113) }
-                            elseif ($pct -gt 20) { $Button.BackColor = [System.Drawing.Color]::FromArgb(211, 84, 0) }
+                            # A barra e o percentual sao desenhados pelo ButtonProgressPaint
+                            $Script:ProgressPercent = $e.ProgressPercentage
+                            $Button.Text = $originalText
+                            $Button.Invalidate()
                         }
                     })
 
@@ -1793,18 +2271,23 @@ function Start-Download {
             }
         }
 
+        # Download encerrado: barra e cancelar nao se aplicam mais (instalacao/extracao)
+        Disable-ButtonProgress
+        Hide-CancelOverlay
+
         if ($Script:CancelRequested) {
-            $Button.BackColor = [System.Drawing.Color]::Salmon
             $Button.Text = "Cancelado"
+            Set-ButtonDone -Button $Button -Label "CANCELADO" -Kind 'cancel' -Nome $originalText
             $Script:StatusLabel.Text = "Cancelado."
-            if (Test-Path $destPath) { 
-                Wait-UI 0.5 
+            if (Test-Path $destPath) {
+                Wait-UI 0.5
                 try { Remove-Item $destPath -Force -ErrorAction SilentlyContinue | Out-Null } catch {}
             }
-            Wait-UI 1 
-            $Button.BackColor = [System.Drawing.Color]::FromArgb(40, 40, 45)
+            Wait-UI 1
+            Clear-ButtonDone -Button $Button
+            $Button.BackColor = $originalBack
             $Button.Text = $originalText
-            
+
         }
         elseif ($downloadSuccessful) {
             
@@ -1812,14 +2295,15 @@ function Start-Download {
             if (-not (Test-DownloadIntegrity -Path $destPath -MinBytes 50000)) {
                 Log-Message "ERRO" "Arquivo corrompido ou link invalido (Tamanho: $((Get-Item $destPath).Length) bytes)."
                 Remove-Item $destPath -Force -ErrorAction SilentlyContinue
-                $Button.BackColor = [System.Drawing.Color]::Salmon
                 $Button.Text = "Erro (Arquivo Invalido)"
+                Set-ButtonDone -Button $Button -Label "ARQUIVO INVÁLIDO" -Kind 'erro' -Nome $originalText
                 return
             }
 
             Log-Message "SUCESSO" "Download concluido."
-            $Button.BackColor = [System.Drawing.Color]::FromArgb(46, 204, 113)
+            $Button.BackColor = $originalBack
             $Button.Text = "Instalado"
+            Set-ButtonDone -Button $Button -Label "BAIXADO"
             
             Unblock-File -Path $destPath -ErrorAction SilentlyContinue
 
@@ -1864,11 +2348,12 @@ function Start-Download {
                     Log-Message "SUCESSO" "Extraido com sucesso para: $folderName"
                     Wait-UI 1.5
                     $Button.Text = "✔ $originalText"
+                    Set-ButtonDone -Button $Button -Label "EXTRAÍDO"
                 }
                 catch {
                     Log-Message "ERRO" "Falha ao extrair ZIP: $($_.Exception.Message)"
                     $Button.Text = "Erro ZIP"
-                    $Button.BackColor = [System.Drawing.Color]::Salmon
+                    Set-ButtonDone -Button $Button -Label "ERRO NO ZIP" -Kind 'erro' -Nome $originalText
                 }
 
             }
@@ -1877,6 +2362,7 @@ function Start-Download {
                 Invoke-Item $destPath
                 Wait-UI 1.5
                 $Button.Text = "✔ $originalText"
+                Set-ButtonDone -Button $Button -Label "BAIXADO"
             }
             else {
                 Log-Message "EXEC" "Executando instalador..."
@@ -1886,15 +2372,17 @@ function Start-Download {
                 $Button.Text = "Executado"
                 Wait-UI 1.5
                 $Button.Text = "✔ $originalText"
+                Set-ButtonDone -Button $Button -Label "EXECUTADO"
             }
         }
         else {
             if (-not $Script:CancelRequested) {
                 Log-Message "ERRO" "Falha definitiva no download."
-                $Button.BackColor = [System.Drawing.Color]::Salmon
                 $Button.Text = "Erro"
+                Set-ButtonDone -Button $Button -Label "FALHOU" -Kind 'erro' -Nome $originalText
                 Wait-UI 2
-                $Button.BackColor = [System.Drawing.Color]::FromArgb(40, 40, 45)
+                Clear-ButtonDone -Button $Button
+                $Button.BackColor = $originalBack
                 $Button.Text = $originalText
             }
         }
@@ -1903,7 +2391,7 @@ function Start-Download {
     catch {
         Log-Message "ERRO" "Erro Fatal de Script: $($_.Exception.Message)"
         $Button.Text = "Erro Fatal"
-        $Button.BackColor = [System.Drawing.Color]::Red
+        Set-ButtonDone -Button $Button -Label "ERRO FATAL" -Kind 'erro' -Nome $originalText
     }
     finally {
         $Global:XM_DOWNLOAD_IN_PROGRESS = $false
@@ -1911,7 +2399,8 @@ function Start-Download {
         $Script:CancelRequested = $false
         
         try { if ($tbl) { $tbl.Enabled = $true } } catch {}
-        if ($Script:BtnCancel) { $Script:BtnCancel.Visible = $false }
+        Disable-ButtonProgress
+        Hide-CancelOverlay
         $Button.Enabled = $true
         
         if ($Script:ProgressBar) { $Script:ProgressBar.Value = 0 }
@@ -2612,19 +3101,8 @@ $stat = New-Object System.Windows.Forms.Label; $stat.Text = "Pronto."; $stat.Doc
 $stat.TextAlign = 'MiddleLeft'; $stat.Padding = '10,0,0,0'; $stat.ForeColor = 'Gray'
 [void]$foot.Controls.Add($stat); $Script:StatusLabel = $stat
 
-# BOTAO CANCELAR (NOVO)
-$btnCancel = New-Object System.Windows.Forms.Button
-$btnCancel.Text = "X"
-$btnCancel.Size = New-Object System.Drawing.Size(30, 25)
-$btnCancel.Dock = 'Right'
-$btnCancel.BackColor = [System.Drawing.Color]::Salmon
-$btnCancel.ForeColor = 'White'
-$btnCancel.FlatStyle = 'Flat'
-$btnCancel.Visible = $false # Oculto por padrao
-$btnCancel.Add_Click({ Cancel-Download })
-[void]$foot.Controls.Add($btnCancel)
-$Script:BtnCancel = $btnCancel
-
+# O cancelamento fica apenas no botao sobreposto (Show-CancelOverlay),
+# em cima do proprio item que esta sendo baixado.
 
 # MAIN LAYOUT
 $layout = New-Object System.Windows.Forms.TableLayoutPanel; $layout.Dock = 'Fill'; $layout.ColumnCount = 1
@@ -2661,6 +3139,8 @@ $bCfg.Add_Click({ Run-Config $this })
 
 $pScroll = New-Object System.Windows.Forms.Panel; $pScroll.Dock = 'Fill'; $pScroll.AutoScroll = $true
 [void]$layout.Controls.Add($pScroll, 0, 2)
+$Script:ScrollPanel = $pScroll
+$pScroll.Add_Scroll({ Update-CancelOverlay })
 $tbl = New-Object System.Windows.Forms.TableLayoutPanel; $tbl.Dock = 'Top'; $tbl.AutoSize = $true
 $tbl.ColumnCount = 2; [void]$tbl.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::Percent, 50)))
 [void]$tbl.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::Percent, 50)))
