@@ -1143,7 +1143,7 @@ $Script:UiCartao = [System.Drawing.Color]::FromArgb(33, 40, 54)
 $Script:UiBorda = [System.Drawing.Color]::FromArgb(52, 62, 82)
 $Script:UiTexto = [System.Drawing.Color]::FromArgb(234, 240, 250)
 $Script:UiSuave = [System.Drawing.Color]::FromArgb(146, 160, 184)
-$Script:UiAzul = [System.Drawing.Color]::FromArgb(28, 116, 232)
+$Script:UiAzul = [System.Drawing.Color]::FromArgb(14, 88, 62)
 $Script:UiVerde = [System.Drawing.Color]::FromArgb(0, 194, 146)
 $Script:UiAmarelo = [System.Drawing.Color]::FromArgb(226, 168, 40)
 $Script:UiVermelho = [System.Drawing.Color]::FromArgb(222, 70, 70)
@@ -2185,7 +2185,7 @@ function Show-PrinterManager {
         [void]$Script:PrinterManagerForm.Controls.Add($pnlDrivers)
 
         # Botões de Tabulação (Header da Janela) - 3 abas
-        $tabActiveColor = [System.Drawing.Color]::FromArgb(0, 120, 215)
+        $tabActiveColor = [System.Drawing.Color]::FromArgb(14, 88, 62)
         $tabInactiveColor = [System.Drawing.Color]::FromArgb(45, 45, 50)
 
         $btnTabLocal = New-Object System.Windows.Forms.Button
@@ -2569,10 +2569,10 @@ function Show-PrinterManager {
 
         $btnShare = New-Object System.Windows.Forms.Button
         $btnShare.Text = "Compartilhar"; $btnShare.Location = '305,330'; $btnShare.Size = '130,40'
-        $btnShare.BackColor = [System.Drawing.Color]::FromArgb(0, 120, 215); $btnShare.FlatStyle = 'Flat'; $btnShare.Font = New-Object System.Drawing.Font("Segoe UI", 9.5, [System.Drawing.FontStyle]::Bold)
+        $btnShare.BackColor = [System.Drawing.Color]::FromArgb(14, 88, 62); $btnShare.FlatStyle = 'Flat'; $btnShare.Font = New-Object System.Drawing.Font("Segoe UI", 9.5, [System.Drawing.FontStyle]::Bold)
         $btnShare.Cursor = 'Hand'; $btnShare.ForeColor = 'White'; $btnShare.FlatAppearance.BorderSize = 0
-        $btnShare.FlatAppearance.MouseOverBackColor = [System.Drawing.Color]::FromArgb(0, 140, 240)
-        $btnShare.FlatAppearance.MouseDownBackColor = [System.Drawing.Color]::FromArgb(0, 100, 190)
+        $btnShare.FlatAppearance.MouseOverBackColor = [System.Drawing.Color]::FromArgb(20, 112, 80)
+        $btnShare.FlatAppearance.MouseDownBackColor = [System.Drawing.Color]::FromArgb(10, 68, 48)
         $btnShare.Add_Click({
             if ($lv.SelectedItems.Count -eq 0) { 
                 [System.Windows.Forms.MessageBox]::Show("Selecione uma impressora na lista primeiro.", "Aviso", "OK", "Warning") | Out-Null
@@ -2596,7 +2596,7 @@ function Show-PrinterManager {
             [void]$fInput.Controls.Add($txt)
             
             $btnOk = New-Object System.Windows.Forms.Button; $btnOk.Text = "OK"; $btnOk.Location = '130,90'; $btnOk.Size = '80,30'
-            $btnOk.BackColor = [System.Drawing.Color]::FromArgb(0, 120, 215); $btnOk.FlatStyle = 'Flat'; $btnOk.Cursor = 'Hand'; $btnOk.ForeColor = 'White'; $btnOk.FlatAppearance.BorderSize = 0
+            $btnOk.BackColor = [System.Drawing.Color]::FromArgb(14, 88, 62); $btnOk.FlatStyle = 'Flat'; $btnOk.Cursor = 'Hand'; $btnOk.ForeColor = 'White'; $btnOk.FlatAppearance.BorderSize = 0
             $btnOk.Add_Click({ $fInput.DialogResult = 'OK'; $fInput.Close() })
             [void]$fInput.Controls.Add($btnOk)
             
@@ -2699,10 +2699,10 @@ function Show-PrinterManager {
 
         $btnCopyPath = New-Object System.Windows.Forms.Button
         $btnCopyPath.Text = "Copiar Caminho"; $btnCopyPath.Location = '595,330'; $btnCopyPath.Size = '125,40'
-        $btnCopyPath.BackColor = [System.Drawing.Color]::FromArgb(0, 120, 215); $btnCopyPath.FlatStyle = 'Flat'; $btnCopyPath.Font = New-Object System.Drawing.Font("Segoe UI", 9.5, [System.Drawing.FontStyle]::Bold)
+        $btnCopyPath.BackColor = [System.Drawing.Color]::FromArgb(14, 88, 62); $btnCopyPath.FlatStyle = 'Flat'; $btnCopyPath.Font = New-Object System.Drawing.Font("Segoe UI", 9.5, [System.Drawing.FontStyle]::Bold)
         $btnCopyPath.Cursor = 'Hand'; $btnCopyPath.ForeColor = 'White'; $btnCopyPath.FlatAppearance.BorderSize = 0
-        $btnCopyPath.FlatAppearance.MouseOverBackColor = [System.Drawing.Color]::FromArgb(0, 140, 240)
-        $btnCopyPath.FlatAppearance.MouseDownBackColor = [System.Drawing.Color]::FromArgb(0, 100, 190)
+        $btnCopyPath.FlatAppearance.MouseOverBackColor = [System.Drawing.Color]::FromArgb(20, 112, 80)
+        $btnCopyPath.FlatAppearance.MouseDownBackColor = [System.Drawing.Color]::FromArgb(10, 68, 48)
         $btnCopyPath.Add_Click({
             if ($lv.SelectedItems.Count -eq 0) { 
                 [System.Windows.Forms.MessageBox]::Show("Selecione uma impressora na lista primeiro.", "Aviso", "OK", "Warning") | Out-Null
@@ -2832,14 +2832,14 @@ function Show-PrinterManager {
 
         $btnGoShare = New-Object System.Windows.Forms.Button
         $btnGoShare.Text = "COMPARTILHAR IMPRESSORA AGORA"; $btnGoShare.Location = '15,270'; $btnGoShare.Size = '315,35'
-        $btnGoShare.BackColor = [System.Drawing.Color]::FromArgb(0, 120, 215); $btnGoShare.FlatStyle = 'Flat'; $btnGoShare.Font = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold)
+        $btnGoShare.BackColor = [System.Drawing.Color]::FromArgb(14, 88, 62); $btnGoShare.FlatStyle = 'Flat'; $btnGoShare.Font = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold)
         $btnGoShare.Cursor = 'Hand'; $btnGoShare.ForeColor = 'White'; $btnGoShare.FlatAppearance.BorderSize = 0
-        $btnGoShare.FlatAppearance.MouseOverBackColor = [System.Drawing.Color]::FromArgb(0, 140, 240)
-        $btnGoShare.FlatAppearance.MouseDownBackColor = [System.Drawing.Color]::FromArgb(0, 100, 190)
+        $btnGoShare.FlatAppearance.MouseOverBackColor = [System.Drawing.Color]::FromArgb(20, 112, 80)
+        $btnGoShare.FlatAppearance.MouseDownBackColor = [System.Drawing.Color]::FromArgb(10, 68, 48)
         $btnGoShare.Add_Click({
             $pnlLocal.Visible = $true
             $pnlLpr.Visible = $false
-            $btnTabLocal.BackColor = [System.Drawing.Color]::FromArgb(0, 120, 215); $btnTabLocal.ForeColor = 'White'
+            $btnTabLocal.BackColor = [System.Drawing.Color]::FromArgb(14, 88, 62); $btnTabLocal.ForeColor = 'White'
             $btnTabLpr.BackColor = [System.Drawing.Color]::FromArgb(45, 45, 50); $btnTabLpr.ForeColor = 'LightGray'
         })
         [void]$pnlServerCard.Controls.Add($btnGoShare)
@@ -2937,10 +2937,10 @@ COLA RÁPIDA - INSTALAR VIA LPR
 
         $btnWizard = New-Object System.Windows.Forms.Button
         $btnWizard.Text = "ABRIR ASSISTENTE DO WINDOWS"; $btnWizard.Location = '15,180'; $btnWizard.Size = '315,45'
-        $btnWizard.BackColor = [System.Drawing.Color]::FromArgb(0, 120, 215); $btnWizard.FlatStyle = 'Flat'; $btnWizard.Font = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold)
+        $btnWizard.BackColor = [System.Drawing.Color]::FromArgb(14, 88, 62); $btnWizard.FlatStyle = 'Flat'; $btnWizard.Font = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold)
         $btnWizard.Cursor = 'Hand'; $btnWizard.ForeColor = 'White'; $btnWizard.FlatAppearance.BorderSize = 0
-        $btnWizard.FlatAppearance.MouseOverBackColor = [System.Drawing.Color]::FromArgb(0, 140, 240)
-        $btnWizard.FlatAppearance.MouseDownBackColor = [System.Drawing.Color]::FromArgb(0, 100, 190)
+        $btnWizard.FlatAppearance.MouseOverBackColor = [System.Drawing.Color]::FromArgb(20, 112, 80)
+        $btnWizard.FlatAppearance.MouseDownBackColor = [System.Drawing.Color]::FromArgb(10, 68, 48)
         $btnWizard.Add_Click({
             Start-Process "rundll32.exe" -ArgumentList "printui.dll,PrintUIEntry /il"
             Log-Message "INFO" "Assistente de impressora aberto manualmente."
@@ -4204,7 +4204,7 @@ function Open-Selector {
 
     $btn = New-Object System.Windows.Forms.Button
     $btn.Text = "BAIXAR SELECIONADO"; $btn.Location = '20,80'; $btn.Size = '340,35'
-    $btn.BackColor = [System.Drawing.Color]::FromArgb(0, 120, 215); $btn.ForeColor = 'White'; $btn.FlatStyle = 'Flat'
+    $btn.BackColor = [System.Drawing.Color]::FromArgb(14, 88, 62); $btn.ForeColor = 'White'; $btn.FlatStyle = 'Flat'
     $btn.Add_Click({
             $selected = $versions[$cb.SelectedIndex]
             $deployFlag = if ($null -ne $chkDeploy) { $chkDeploy.Checked } else { $false }
@@ -4341,6 +4341,12 @@ function Run-Config {
             "sCurrency" = "R$"; "sMonDecimalSep" = ","; "sMonThousandSep" = ".";
             "sShortDate" = "dd/MM/yyyy"; "sTimeFormat" = "HH:mm:ss"; "sShortTime" = "HH:mm";
             "iDate" = "1"; "iTime" = "1"; "iCurrency" = "2"
+            # Itens que o Set-Culture nem sempre restaura quando existe override
+            # manual na maquina. Sem eles a validacao regional acusa diferenca.
+            "iDigits" = "2"; "sGrouping" = "3;0"; "sNegativeSign" = "-"
+            "iNegNumber" = "1"; "iLZero" = "1"; "sNativeDigits" = "0123456789"
+            "iMeasure" = "0"; "iCurrDigits" = "2"; "sMonGrouping" = "3;0"
+            "iNegCurr" = "9"; "sLongDate" = "dddd, d' de 'MMMM' de 'yyyy"
         }
         foreach ($name in $regValues.Keys) {
             Set-ItemProperty -Path $regPath -Name $name -Value $regValues[$name] -Force -ErrorAction SilentlyContinue
@@ -4648,7 +4654,7 @@ Add-CtxLink "Portal Xmenu" "https://portal.netcontroll.com.br/#/auth/login"
 
 # HEADER
 $head = New-Object System.Windows.Forms.Panel; $head.Dock = 'Top'; $head.Height = 200
-$head.BackColor = [System.Drawing.Color]::FromArgb(0, 120, 215); $head.Padding = '20,20,20,0'
+$head.BackColor = [System.Drawing.Color]::FromArgb(14, 88, 62); $head.Padding = '20,20,20,0'
 [void]$form.Controls.Add($head)
 
 $hLeft = New-Object System.Windows.Forms.Panel; $hLeft.Dock = 'Fill'; $hLeft.BackColor = 'Transparent'
@@ -4721,7 +4727,7 @@ $hRight.Padding = '0,40,0,0'
 
 # --- NOVO BOTAO LINKS NO HEADER ---
 $btnLinks = New-Object System.Windows.Forms.Button; $btnLinks.Text = "LINKS ÚTEIS ▼"; $btnLinks.Size = '140,40'
-$btnLinks.BackColor = 'White'; $btnLinks.ForeColor = [System.Drawing.Color]::FromArgb(0, 100, 200)
+$btnLinks.BackColor = 'White'; $btnLinks.ForeColor = [System.Drawing.Color]::FromArgb(12, 78, 55)
 $btnLinks.FlatStyle = 'Flat'; $btnLinks.FlatAppearance.BorderSize = 0; $btnLinks.Cursor = [System.Windows.Forms.Cursors]::Hand
 $btnLinks.Font = New-Object System.Drawing.Font("Segoe UI", 9.5, [System.Drawing.FontStyle]::Bold)
 $btnLinks.Margin = '0,0,0,0'
@@ -4761,12 +4767,12 @@ $tLog.ForeColor = 'White'; $tLog.BorderStyle = 'None'; $tLog.ReadOnly = $true; $
 [void]$gLog.Controls.Add($tLog); $Script:LogBox = $tLog
 
 $bCfg = New-Object System.Windows.Forms.Button; $bCfg.Text = "PREPARAR AMBIENTE WINDOWS"
-$bCfg.Dock = 'Fill'; $bCfg.BackColor = [System.Drawing.Color]::FromArgb(0, 120, 215); $bCfg.ForeColor = 'White'
+$bCfg.Dock = 'Fill'; $bCfg.BackColor = [System.Drawing.Color]::FromArgb(14, 88, 62); $bCfg.ForeColor = 'White'
 $bCfg.FlatStyle = 'Flat'; $bCfg.Font = New-Object System.Drawing.Font("Segoe UI", 12, [System.Drawing.FontStyle]::Bold)
 $bCfg.Margin = '0,10,0,10'; $bCfg.Cursor = 'Hand'
 $bCfg.FlatAppearance.BorderSize = 0
-$bCfg.FlatAppearance.MouseOverBackColor = [System.Drawing.Color]::FromArgb(0, 140, 240)
-$bCfg.FlatAppearance.MouseDownBackColor = [System.Drawing.Color]::FromArgb(0, 100, 190)
+$bCfg.FlatAppearance.MouseOverBackColor = [System.Drawing.Color]::FromArgb(20, 112, 80)
+$bCfg.FlatAppearance.MouseDownBackColor = [System.Drawing.Color]::FromArgb(10, 68, 48)
 
 if ($null -eq $Script:ToolTip) {
     $Script:ToolTip = New-Object System.Windows.Forms.ToolTip
@@ -4790,7 +4796,7 @@ $tbl.ColumnCount = 2; [void]$tbl.ColumnStyles.Add((New-Object System.Windows.For
 function Add-Title {
     param($T) 
     $l = New-Object System.Windows.Forms.Label; $l.Text = $T; $l.AutoSize = $true
-    $l.ForeColor = [System.Drawing.Color]::FromArgb(0, 150, 255); $l.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
+    $l.ForeColor = [System.Drawing.Color]::FromArgb(26, 188, 138); $l.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
     $l.Margin = '5,15,0,5'; [void]$tbl.Controls.Add($l, 0, -1); $tbl.SetColumnSpan($l, 2)
     $null = $l
 }
@@ -4805,7 +4811,7 @@ function Add-Btn {
     $b.Cursor = 'Hand'
     $b.FlatAppearance.BorderSize = 0
 
-    $baseColor = if ($Color) { $Color } else { [System.Drawing.Color]::FromArgb(30, 45, 75) }
+    $baseColor = if ($Color) { $Color } else { [System.Drawing.Color]::FromArgb(22, 52, 41) }
     $b.BackColor = $baseColor
     
     # Hover: mais claro
@@ -4839,17 +4845,17 @@ function Add-Btn {
     $null = $b
 }
 
-$colorBlue = [System.Drawing.Color]::FromArgb(30, 45, 75)
+$colorBlue = [System.Drawing.Color]::FromArgb(22, 52, 41)
 
 Add-Title "BANCO DE DADOS"
 Add-Btn "SQL Server 2008 (Instalador)" "" "https://www.netcontroll.com.br/util/instaladores/netpdv/SQL2008x64_DESCONTINUADO.exe" "SQL2008x64.exe" -Color $colorBlue -Help "Instalador clássico do SQL 2008 R2 (Padrão NetControll)"
 Add-Btn "SQL Server 2019 (Instalador)" "" "https://www.netcontroll.com.br/util/instaladores/netpdv/SQL2019.exe" "SQL2019.exe" -Color $colorBlue -Help "Instalador automático do SQL Server 2019 Express."
 
 $bSqlMan = New-Object System.Windows.Forms.Button; $bSqlMan.Height = 60; $bSqlMan.Dock = 'Top'
-$bSqlMan.BackColor = [System.Drawing.Color]::FromArgb(30, 45, 75); $bSqlMan.ForeColor = 'WhiteSmoke'
+$bSqlMan.BackColor = [System.Drawing.Color]::FromArgb(22, 52, 41); $bSqlMan.ForeColor = 'WhiteSmoke'
 $bSqlMan.FlatStyle = 'Flat'; $bSqlMan.FlatAppearance.BorderSize = 0; $bSqlMan.TextAlign = 'MiddleLeft'; $bSqlMan.Padding = '10,0,0,0'; $bSqlMan.Margin = '5'
-$bSqlMan.FlatAppearance.MouseOverBackColor = [System.Drawing.Color]::FromArgb(50, 65, 95)
-$bSqlMan.FlatAppearance.MouseDownBackColor = [System.Drawing.Color]::FromArgb(15, 30, 60)
+$bSqlMan.FlatAppearance.MouseOverBackColor = [System.Drawing.Color]::FromArgb(33, 72, 57)
+$bSqlMan.FlatAppearance.MouseDownBackColor = [System.Drawing.Color]::FromArgb(13, 36, 28)
 $bSqlMan.Text = "SQL 2019 + SSMS (Manual / Avançado)"; $bSqlMan.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
 $bSqlMan.Cursor = 'Hand'
 $Script:ToolTip.SetToolTip($bSqlMan, "ATENÇÃO: Instalação MANUAL e AVANÇADA. Baixa o SQL 2019 e o SSMS SEPARADAMENTE, para instalar passo a passo. Para a instalação normal/automática, use o botão azul 'SQL Server 2019 (Instalador)'.")
@@ -4873,8 +4879,8 @@ Add-Title "EXTERNOS"
 $bTecno = New-Object System.Windows.Forms.Button; $bTecno.Height = 50; $bTecno.Dock = 'Top'
 $bTecno.BackColor = $colorBlue; $bTecno.ForeColor = 'WhiteSmoke'
 $bTecno.FlatStyle = 'Flat'; $bTecno.FlatAppearance.BorderSize = 0; $bTecno.TextAlign = 'MiddleLeft'; $bTecno.Padding = '10,0,0,0'; $bTecno.Margin = '5'
-$bTecno.FlatAppearance.MouseOverBackColor = [System.Drawing.Color]::FromArgb(50, 65, 95)
-$bTecno.FlatAppearance.MouseDownBackColor = [System.Drawing.Color]::FromArgb(15, 30, 60)
+$bTecno.FlatAppearance.MouseOverBackColor = [System.Drawing.Color]::FromArgb(33, 72, 57)
+$bTecno.FlatAppearance.MouseDownBackColor = [System.Drawing.Color]::FromArgb(13, 36, 28)
 $bTecno.Text = "TecnoSpeed NFCe (11.1.7.27)"; $bTecno.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
 $bTecno.Cursor = 'Hand'
 $Script:ToolTip.SetToolTip($bTecno, "Fecha todo o sistema NetControll (NetPDV, LinkXMenu, XMenu, Concentrador, XBot, XTag) e instala o componente TecnoSpeed para NFC-e.")
@@ -4885,10 +4891,10 @@ $bTecno.Add_Click({
 [void]$tbl.Controls.Add($bTecno)
 
 $bVspe = New-Object System.Windows.Forms.Button; $bVspe.Height = 60; $bVspe.Dock = 'Top'
-$bVspe.BackColor = [System.Drawing.Color]::FromArgb(30, 45, 75); $bVspe.ForeColor = 'WhiteSmoke'
+$bVspe.BackColor = [System.Drawing.Color]::FromArgb(22, 52, 41); $bVspe.ForeColor = 'WhiteSmoke'
 $bVspe.FlatStyle = 'Flat'; $bVspe.FlatAppearance.BorderSize = 0; $bVspe.TextAlign = 'MiddleLeft'; $bVspe.Padding = '10,0,0,0'; $bVspe.Margin = '5'
-$bVspe.FlatAppearance.MouseOverBackColor = [System.Drawing.Color]::FromArgb(50, 65, 95)
-$bVspe.FlatAppearance.MouseDownBackColor = [System.Drawing.Color]::FromArgb(15, 30, 60)
+$bVspe.FlatAppearance.MouseOverBackColor = [System.Drawing.Color]::FromArgb(33, 72, 57)
+$bVspe.FlatAppearance.MouseDownBackColor = [System.Drawing.Color]::FromArgb(13, 36, 28)
 $bVspe.Text = "VSPE + Epson Virtual Port"; $bVspe.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
 $bVspe.Cursor = 'Hand'
 $Script:ToolTip.SetToolTip($bVspe, "Instala o emulador de porta serial VSPE e os drivers de porta virtual da Epson.")
@@ -4902,6 +4908,9 @@ Add-Btn "Revo Uninstaller" "" "https://download.revouninstaller.com/download/rev
 Add-Btn "TEF HUB Windows (x86 - sempre a versão atual)" "" "TEFHUB-X86" "" -Help "Consulta o GitHub oficial da Elgin no momento do clique e baixa a versão x86 mais recente do TEF HUB. Não precisa mais trocar o link na mão."
 Add-Btn "Advanced IP Scanner" "" "https://download.advanced-ip-scanner.com/download/files/Advanced_IP_Scanner_2.5.4594.1.exe" "Advanced_IP_Scanner.exe" -Help "Ferramenta de varredura de rede local Advanced IP Scanner."
 Add-Btn "Balança Teste" "" "https://github.com/VMazza10/Preparador-de-Ambiente-XMenu/releases/download/Chrome/BalancaTeste.exe" "BalancaTeste.exe" -Help "Aplicativo para testar o funcionamento e comunicação da balança."
+# Link do Drive no formato drive.usercontent: o "uc?export=download" devolve
+# a pagina de aviso de virus em HTML em vez do arquivo.
+Add-Btn "Driver Balança Serial PCI (ZIP)" "" "https://drive.usercontent.google.com/download?id=1P2CH59rEporytibv32tMRsdX6uXby2p3&export=download&confirm=t" "Driver_Multi_Serial_PCI.zip" -Help "Driver da placa multi serial PCI usada para ligar a balança na porta serial. Baixa do Google Drive (120 MB) e extrai a pasta automaticamente."
 
 $colorDiag = [System.Drawing.Color]::FromArgb(30, 80, 30)
 $colorFix = [System.Drawing.Color]::FromArgb(100, 30, 30)
