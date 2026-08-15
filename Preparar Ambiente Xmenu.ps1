@@ -2795,30 +2795,85 @@ function Show-PrinterManager {
                     [System.Windows.Forms.Application]::DoEvents()
                     Start-Sleep -Milliseconds 100
                 }
-                if ($proc.ExitCode -ne 0) { throw "Falha no DISM. Codigo: $($proc.ExitCode)" }
-                
-                Log-Message "INFO" "Configurando e iniciando o servico LPDSVC..."
+                # 3010 e 1641 NAO sao erro: o DISM instalou e esta avisando que
+                # precisa reiniciar. Tratar como falha abortava a configuracao
+                # inteira justamente na maquina onde o recurso ainda nao existia.
+                $reinicioPendente = $false
+                if ($proc.ExitCode -eq 3010 -or $proc.ExitCode -eq 1641) {
+                    $reinicioPendente = $true
+                    Log-Message "INFO" "Recurso instalado. O Windows pediu reinicio (codigo $($proc.ExitCode))."
+                }
+                elseif ($proc.ExitCode -ne 0) {
+                    throw "Falha no DISM. Codigo: $($proc.ExitCode)"
+                }
+
+                Log-Message "INFO" "Configurando o servico LPDSVC..."
                 sc.exe config LPDSVC start= auto | Out-Null
-                net start LPDSVC | Out-Null
-                
+
+                # Se o servico cair no meio do movimento, o Windows sobe sozinho
+                sc.exe failure LPDSVC reset= 86400 actions= restart/5000/restart/10000/restart/30000 | Out-Null
+
                 Log-Message "INFO" "Adicionando regra de Firewall..."
+                # Apaga antes de criar: senao cada clique empilha uma regra igual
+                netsh advfirewall firewall delete rule name="LPD Porta 515" 2>&1 | Out-Null
                 netsh advfirewall firewall add rule name="LPD Porta 515" dir=in action=allow protocol=TCP localport=515 | Out-Null
-                
+
+                # O spooler REINICIA ANTES do LPD de proposito: o LPDSVC e um
+                # servico dependente do Spooler, entao reiniciar o spooler
+                # derruba o LPD junto e nao o religa. Fazendo nesta ordem o LPD
+                # sobe por ultimo e fica de pe.
                 Log-Message "INFO" "Reiniciando spooler..."
                 Restart-Service -Name Spooler -Force
-                
+                Start-Sleep -Milliseconds 800
+
+                Log-Message "INFO" "Iniciando o servico LPDSVC..."
+                net start LPDSVC | Out-Null
+
                 $ips = Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object { $_.IPAddress -notlike "127.*" -and $_.IPAddress -notlike "169.*" } | Select-Object -ExpandProperty IPAddress -Unique
                 $txtIps = $ips -join " ou "
                 if (-not $txtIps) { $txtIps = "Não detectado" }
-                
-                Log-Message "SUCESSO" "LPD configurado com sucesso no PC local! Porta 515 ativa."
-                Log-Message "INFO" ">>> IP DESTE COMPUTADOR: $txtIps <<<"
-                Log-Message "INFO" "IMPORTANTE: Agora compartilhe a impressora na Aba 1 com nome simples."
-                
-                [System.Windows.Forms.MessageBox]::Show(
-                    $Script:PrinterManagerForm,
-                    "LPD Ativado com sucesso!`n`nIP da Máquina: $txtIps`n`nProximos Passos:`n1. Compartilhe a impressora USB na Aba 1 (ex: IMPRESSORA).`n2. Fixe o IP deste computador no roteador.`n3. Vá para o outro PC e configure como Cliente LPR.",
-                    "LPD Configurado", "OK", "Information") | Out-Null
+
+                # --- CONFERENCIA REAL ---
+                # O 'net start' acima nao avisa quando falha. Sem conferir aqui,
+                # a janela dizia "Ativado com sucesso" mesmo com o LPD morto -
+                # que e o caso classico de quando o recurso so sobe apos reiniciar.
+                $svc = Get-Service LPDSVC -ErrorAction SilentlyContinue
+                if ($svc -and $svc.Status -ne 'Running') {
+                    try { Start-Service LPDSVC -ErrorAction Stop; Start-Sleep -Milliseconds 900 } catch {}
+                    $svc = Get-Service LPDSVC -ErrorAction SilentlyContinue
+                }
+                $escutando = $false
+                try { $escutando = [bool](Get-NetTCPConnection -LocalPort 515 -State Listen -ErrorAction Stop) } catch {}
+
+                # Nome da fila que o outro PC vai usar na porta LPR
+                $filas = @()
+                try { $filas = @(Get-Printer -ErrorAction Stop | Where-Object { $_.Shared } | ForEach-Object { "   - $($_.ShareName)      (impressora: $($_.Name))" }) } catch {}
+                $txtFilas = if ($filas.Count -gt 0) { $filas -join "`n" } else { "   (nenhuma compartilhada ainda - faca isso na Aba 1)" }
+
+                if ($null -eq $svc) {
+                    Log-Message "ERRO" "LPDSVC nao existe: o recurso so aparece depois de reiniciar o Windows."
+                    [System.Windows.Forms.MessageBox]::Show(
+                        $Script:PrinterManagerForm,
+                        "O recurso LPD foi INSTALADO com sucesso, mas o servico ainda nao existe nesta maquina.`n`nIsso e normal quando o recurso acabou de ser adicionado: o Windows so cria o LPDSVC depois de REINICIAR.`n`n>>> Reinicie o computador e clique neste botao de novo. <<<`n`nNao precisa refazer mais nada - a porta 515 no firewall ja foi liberada.",
+                        "Precisa reiniciar", "OK", "Warning") | Out-Null
+                }
+                elseif ($svc.Status -ne 'Running' -or -not $escutando) {
+                    Log-Message "ERRO" "LPD nao ficou ativo. Servico: $($svc.Status) | Porta 515: $(if ($escutando) { 'escutando' } else { 'nao escuta' })"
+                    [System.Windows.Forms.MessageBox]::Show(
+                        $Script:PrinterManagerForm,
+                        "A configuracao rodou, mas o LPD NAO ficou ativo:`n`n   Servico LPDSVC : $($svc.Status)`n   Porta 515      : $(if ($escutando) { 'escutando' } else { 'NAO esta escutando' })`n`n$(if ($reinicioPendente) { 'O Windows avisou que o recurso pede REINICIO. Reinicie e clique neste botao de novo.' } else { 'Na maioria das vezes resolve REINICIAR o computador e clicar neste botao de novo.' })`n`nSe continuar assim, verifique se algum antivirus esta bloqueando o servico.",
+                        "LPD nao ativou", "OK", "Warning") | Out-Null
+                }
+                else {
+                    Log-Message "SUCESSO" "LPD ativo e confirmado (servico Running, porta 515 escutando)."
+                    Log-Message "INFO" ">>> IP DESTE COMPUTADOR: $txtIps <<<"
+                    Log-Message "INFO" "IMPORTANTE: Agora compartilhe a impressora na Aba 1 com nome simples."
+
+                    [System.Windows.Forms.MessageBox]::Show(
+                        $Script:PrinterManagerForm,
+                        "LPD Ativado e testado com sucesso!`n`n   Servico LPDSVC : Rodando (com reinicio automatico)`n   Porta 515      : Escutando`n   IP da Maquina  : $txtIps`n`nFilas disponiveis para o LPR:`n$txtFilas`n`nProximos Passos:`n1. Compartilhe a impressora USB na Aba 1 (ex: IMPRESSORA).`n2. Fixe o IP deste computador no roteador.`n3. Va para o outro PC e configure como Cliente LPR.",
+                        "LPD Configurado", "OK", "Information") | Out-Null
+                }
             }
             catch {
                 Log-Message "ERRO" "Falha ao configurar LPD: $_"
@@ -2898,8 +2953,18 @@ function Show-PrinterManager {
                     [System.Windows.Forms.Application]::DoEvents()
                     Start-Sleep -Milliseconds 100
                 }
-                if ($proc.ExitCode -ne 0) { throw "Falha no DISM. Codigo: $($proc.ExitCode)" }
-                
+                # 3010 e 1641 NAO sao erro: o DISM instalou e esta avisando que
+                # precisa reiniciar. Tratar como falha abortava a configuracao
+                # inteira justamente na maquina onde o recurso ainda nao existia.
+                $reinicioPendente = $false
+                if ($proc.ExitCode -eq 3010 -or $proc.ExitCode -eq 1641) {
+                    $reinicioPendente = $true
+                    Log-Message "INFO" "Recurso instalado. O Windows pediu reinicio (codigo $($proc.ExitCode))."
+                }
+                elseif ($proc.ExitCode -ne 0) {
+                    throw "Falha no DISM. Codigo: $($proc.ExitCode)"
+                }
+
                 Log-Message "INFO" "Reiniciando spooler..."
                 Restart-Service -Name Spooler -Force
                 
@@ -2920,7 +2985,7 @@ COLA RÁPIDA - INSTALAR VIA LPR
 
                 [System.Windows.Forms.MessageBox]::Show(
                     $Script:PrinterManagerForm,
-                    "Cliente LPR Ativado com sucesso!`n`nO passo a passo foi copiado para sua Área de Transferência!`n`nAgora clique no botao 'ABRIR ASSISTENTE' para adicionar a impressora no Windows.",
+                    "Cliente LPR Ativado com sucesso!`n`nO passo a passo foi copiado para sua Área de Transferência!$(if ($reinicioPendente) { "`n`nATENCAO: o Windows pediu REINICIO para o recurso valer.`nSe a opcao 'LPR Port' nao aparecer no assistente, reinicie o computador." })`n`nAgora clique no botao 'ABRIR ASSISTENTE' para adicionar a impressora no Windows.",
                     "LPR Configurado", "OK", "Information") | Out-Null
                 
                 Start-Process "rundll32.exe" -ArgumentList "printui.dll,PrintUIEntry /il"
