@@ -2307,11 +2307,52 @@ function Show-PrinterManager {
                         throw "Arquivo baixado esta corrompido ou invalido (link quebrado ou pagina de erro)."
                     }
                     Log-Message "SUCESSO" "Download concluido: $dlFile"
-                    $this.Text = "  Instalando $dlFile ..."
-                    # WorkingDirectory na pasta de downloads: instaladores auto-extraiveis (WinRAR SFX)
-                    # passam a sugerir essa pasta em vez de C:\WINDOWS\system32.
-                    Start-Process -FilePath $dest -WorkingDirectory $Script:DownloadFolder
-                    Log-Message "SUCESSO" "Instalador iniciado: $dlFile"
+                    Unblock-File -Path $dest -ErrorAction SilentlyContinue
+
+                    if ($dlFile.EndsWith(".zip")) {
+                        # ZIP nao e instalador: extrai e abre a pasta com o conteudo.
+                        Log-Message "ZIP" "Extraindo arquivo: $dlFile"
+                        $this.Text = "  Extraindo $dlFile ..."
+                        [System.Windows.Forms.Application]::DoEvents()
+
+                        Add-Type -AssemblyName System.IO.Compression.FileSystem
+                        $folderName = [System.IO.Path]::GetFileNameWithoutExtension($dlFile)
+                        $finalPath  = Join-Path $Script:DownloadFolder $folderName
+                        $tempPath   = Join-Path $Script:DownloadFolder "temp_$folderName"
+
+                        if (Test-Path $tempPath)  { Remove-Item $tempPath  -Recurse -Force | Out-Null }
+                        if (Test-Path $finalPath) { Remove-Item $finalPath -Recurse -Force | Out-Null }
+                        [System.Windows.Forms.Application]::DoEvents()
+
+                        [System.IO.Compression.ZipFile]::ExtractToDirectory($dest, $tempPath)
+                        [System.Windows.Forms.Application]::DoEvents()
+
+                        # Se o ZIP tem uma pasta raiz unica, sobe um nivel
+                        $items = Get-ChildItem -Path $tempPath
+                        if ($items.Count -eq 1 -and $items[0].PSIsContainer) {
+                            Move-Item -Path $items[0].FullName -Destination $finalPath
+                            Remove-Item $tempPath -Recurse -Force -ErrorAction SilentlyContinue | Out-Null
+                        }
+                        else {
+                            Rename-Item -Path $tempPath -NewName $folderName
+                        }
+
+                        Invoke-Item $finalPath
+                        Log-Message "SUCESSO" "Extraido com sucesso para: $folderName"
+                    }
+                    elseif ($dlFile.EndsWith(".rar")) {
+                        # RAR nao tem suporte nativo no Windows: abre com o programa associado.
+                        $this.Text = "  Abrindo $dlFile ..."
+                        Invoke-Item $dest
+                        Log-Message "SUCESSO" "Arquivo RAR aberto: $dlFile"
+                    }
+                    else {
+                        $this.Text = "  Instalando $dlFile ..."
+                        # WorkingDirectory na pasta de downloads: instaladores auto-extraiveis (WinRAR SFX)
+                        # passam a sugerir essa pasta em vez de C:\WINDOWS\system32.
+                        Start-Process -FilePath $dest -WorkingDirectory $Script:DownloadFolder
+                        Log-Message "SUCESSO" "Instalador iniciado: $dlFile"
+                    }
                     $this.Text = "✔ $origText"
                 } catch {
                     $errMsg = $_.Exception.Message
