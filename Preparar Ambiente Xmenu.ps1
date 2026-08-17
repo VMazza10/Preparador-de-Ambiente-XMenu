@@ -2492,6 +2492,7 @@ function Show-PrinterManager {
         Add-DriverButton $pnlDrivers ([ref]$drvY) "  [DRIVER] Zebra ZD220 / ZD230  (ZIP - contem instalador)" "https://www.zebra.com/content/dam/support-dam/en/driver/unrestricted/0002/zddriver-v1062628275-certified.zip" "Zebra_ZD220_ZD230_Driver.zip" $colorXtag
         Add-DriverButton $pnlDrivers ([ref]$drvY) "  [DRIVER] Argox  (Todos os modelos, v2022.1)" "$baseUrl/Argox/Argox_PrinterDrivers_v2022.1.exe" "Argox_PrinterDrivers_v2022.1.exe" $colorXtag
         Add-DriverButton $pnlDrivers ([ref]$drvY) "  [DRIVER] Gainscha  (Todos os modelos, v2020.1)" "$baseUrl/Gainscha/Gainscha_GPrinterDrivers_v2020.1.exe" "Gainscha_GPrinterDrivers_v2020.1.exe" $colorXtag
+        Add-DriverButton $pnlDrivers ([ref]$drvY) "  [DRIVER] Zetex Z60XT  (ZIP - Drive, ~225 MB)" "https://drive.usercontent.google.com/download?id=1wWLiTWrtHCBRP9L0P9GG2eRKGEgfo2HJ&export=download&confirm=t" "Zetex_Z60XT_Driver.zip" $colorXtag
         Add-DriverButton $pnlDrivers ([ref]$drvY) "  [UTILITÁRIO] Gerenciador Elgin L42 PRO FULL  (v1.5.1)" "$xtagBaseUrl/Elgin/L42PRO%20FULL/Utilit%C3%A1rios/GerenciadorL42PRO_Full_1.5.1.exe" "GerenciadorL42PRO_Full_1.5.1.exe" $colorXtagUtil
         Add-DriverButton $pnlDrivers ([ref]$drvY) "  [UTILITÁRIO] Gerenciador Elgin L42 DT  (v1.5.6)" "$xtagBaseUrl/Elgin/L42DT/Utilit%C3%A1rios/GerenciadorL42DT_Full_1.5.6.exe" "GerenciadorL42DT_Full_1.5.6.exe" $colorXtagUtil
 
