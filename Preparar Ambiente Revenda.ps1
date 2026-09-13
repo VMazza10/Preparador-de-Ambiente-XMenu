@@ -512,7 +512,8 @@ Resultado: $($pnlVeredito.Tag.Texto)
 # -----------------------------------------------------------------------------
 function Invoke-UsbPowerFix {
     # -Silencioso: usado pelo PREPARAR AMBIENTE, so registra no log
-    param([switch]$Silencioso)
+    # -Resultado: sem mensagem, devolve @{ Feitos; Falhas } (usado pelo CORRIGIR IMPRESSORA USB)
+    param([switch]$Silencioso, [switch]$Resultado)
     Log-Message "INFO" "Desligando economia de energia das portas USB..."
     $feitos = @()
     $falhas = @()
@@ -592,10 +593,399 @@ function Invoke-UsbPowerFix {
     }
     $texto += "`r`nIsso evita que a impressora termica USB pare de responder`r`ndepois de um tempo parada. Se ela ja estiver travada,`r`ndesconecte e reconecte o cabo uma vez."
 
+    if ($Resultado) { return @{ Feitos = $feitos; Falhas = $falhas } }
     if ($Silencioso) { return }
 
     [System.Windows.Forms.MessageBox]::Show($texto, "Energia das portas USB", "OK",
         $(if ($falhas.Count -gt 0) { "Warning" } else { "Information" })) | Out-Null
+}
+
+# -----------------------------------------------------------------------------
+# IMPRESSORA USB (MP-4200 TH e outras): diagnostico e correcao em um clique
+# Os tres defeitos que mais aparecem no suporte:
+#  - cabo em outra entrada USB: o Windows cria outra porta (USB002, USB003) e a
+#    impressora continua apontando para a antiga, que nao esta mais conectada;
+#  - para depois de um tempo parada: economia de energia do USB e do aparelho;
+#  - nao imprime ao ligar o PC: a inicializacao rapida nao desliga o USB de verdade.
+# -----------------------------------------------------------------------------
+
+function Get-NomeFabricanteUsb {
+    # Fabricante pelo VID do USB, so os que aparecem nos PDVs
+    param([string]$Vid)
+    $nomes = @{ '0B1B' = 'Bematech'; '04B8' = 'Epson'; '0519' = 'Star'; '1504' = 'Bixolon'; '0DD4' = 'Custom' }
+    $v = "$Vid".ToUpper()
+    if ($nomes.ContainsKey($v)) { return $nomes[$v] }
+    return ""
+}
+
+function Test-DriverDoFabricante {
+    # O driver da impressora do Windows e do mesmo fabricante do aparelho USB?
+    param([string]$Driver, [string]$Fabricante)
+    $apelidos = @{
+        'Bematech' = 'Bematech|MP-?4200|MP-?2500|MP-?4000|MP-?2800|MP-?100'
+        'Epson' = 'Epson|TM-'; 'Star' = 'Star|TSP'; 'Bixolon' = 'Bixolon|SRP'; 'Custom' = 'Custom'
+    }
+    if ("$Fabricante" -eq "" -or -not $apelidos.ContainsKey($Fabricante)) { return $false }
+    return ("$Driver" -match $apelidos[$Fabricante])
+}
+
+function Get-PortasUsbImpressora {
+    # Portas USB00x que o Windows ja criou para impressoras (interface usbprint),
+    # com o aparelho de cada uma e se ele esta conectado agora (Control\Linked = 1).
+    # -Raiz: o CurrentControlSet (o teste usa uma copia falsa no HKCU)
+    param([string]$Raiz = "HKLM:\SYSTEM\CurrentControlSet")
+    $lista = @()
+    $classe = Join-Path $Raiz "Control\DeviceClasses\{28d78fad-5a12-11d1-ae5b-0000f803a8c2}"
+    if (-not (Test-Path -LiteralPath $classe)) { return , $lista }
+    foreach ($k in @(Get-ChildItem -LiteralPath $classe -ErrorAction SilentlyContinue)) {
+        $parametros = Get-ItemProperty -LiteralPath (Join-Path $k.PSPath "#\Device Parameters") -ErrorAction SilentlyContinue
+        if ($null -eq $parametros -or $null -eq $parametros.'Port Number') { continue }
+        $base = "$($parametros.'Base Name')"
+        if ($base -eq "") { $base = "USB" }
+        $porta = $base + ([int]$parametros.'Port Number').ToString("000")
+        $instancia = "$((Get-ItemProperty -LiteralPath $k.PSPath -Name DeviceInstance -ErrorAction SilentlyContinue).DeviceInstance)"
+        $controle = Get-ItemProperty -LiteralPath (Join-Path $k.PSPath "#\Control") -ErrorAction SilentlyContinue
+        $conectada = ($null -ne $controle -and $controle.Linked -eq 1)
+        $vid = ""
+        $produto = ""
+        if (("$($k.PSChildName) $instancia") -match 'VID_([0-9A-Fa-f]{4})&PID_([0-9A-Fa-f]{4})') { $vid = $matches[1].ToUpper(); $produto = $matches[2].ToUpper() }
+        $descricao = ""
+        if ($instancia -ne "") {
+            $enum = Get-ItemProperty -LiteralPath (Join-Path $Raiz "Enum\$instancia") -ErrorAction SilentlyContinue
+            if ($null -ne $enum) {
+                $descricao = "$($enum.FriendlyName)"
+                if ($descricao -eq "") { $descricao = "$($enum.DeviceDesc)" }
+            }
+        }
+        # "@usbprint.inf,%usbprint.devicedesc%;Suporte para impressao USB" -> so o texto
+        $descricao = $descricao -replace '^@[^;]*;', ''
+        $lista += @{
+            Porta = $porta; Instancia = $instancia; Conectada = $conectada; Vid = $vid; Produto = $produto
+            Descricao = $descricao; Fabricante = (Get-NomeFabricanteUsb $vid)
+        }
+    }
+    return , @($lista | Sort-Object { $_.Porta })
+}
+
+function Get-ImpressorasUsb {
+    # Impressoras do Windows ligadas numa porta USB00x
+    $lista = @()
+    try {
+        foreach ($p in @(Get-WmiObject Win32_Printer -ErrorAction Stop)) {
+            if ("$($p.PortName)" -match '^USB\d+$') {
+                $lista += @{ Nome = "$($p.Name)"; Porta = "$($p.PortName)".ToUpper(); Driver = "$($p.DriverName)"; Offline = [bool]$p.WorkOffline }
+            }
+        }
+    }
+    catch {}
+    return , $lista
+}
+
+function Get-PlanoPortasUsb {
+    # Decide o que fazer com cada impressora USB. Devolve hashtable:
+    #   Certas ..... impressoras ja numa porta conectada
+    #   Mover ...... @{ Nome; De; Para } que da para acertar sozinho
+    #   Escolher ... impressoras em porta desconectada quando ha mais de uma opcao
+    #   Livres ..... portas conectadas sem impressora (sobram depois do Mover)
+    #   SemConexao . nenhuma impressora USB conectada agora
+    param($Impressoras, $Portas)
+    $conectadas = @($Portas | Where-Object { $_.Conectada })
+    $porNome = @{}
+    foreach ($c in $conectadas) { $porNome[$c.Porta] = $c }
+    $certas = @($Impressoras | Where-Object { $porNome.ContainsKey($_.Porta) })
+    $orfas = @($Impressoras | Where-Object { -not $porNome.ContainsKey($_.Porta) })
+    $usadas = @{}
+    foreach ($i in $certas) { $usadas[$i.Porta] = $true }
+    $livres = @($conectadas | Where-Object { -not $usadas.ContainsKey($_.Porta) })
+
+    $mover = @()
+    $escolher = @()
+    if ($orfas.Count -gt 0 -and $livres.Count -gt 0) {
+        if ($orfas.Count -eq 1 -and $livres.Count -eq 1) {
+            $mover += @{ Nome = $orfas[0].Nome; De = $orfas[0].Porta; Para = $livres[0].Porta }
+        }
+        else {
+            # Mais de uma opcao: so casa sozinho quando o fabricante deixa um par unico
+            # (driver MP-4200 com o unico aparelho Bematech livre, e vice-versa)
+            $candidatas = @{}
+            foreach ($o in $orfas) { $candidatas[$o.Nome] = @($livres | Where-Object { Test-DriverDoFabricante -Driver $o.Driver -Fabricante $_.Fabricante }) }
+            foreach ($o in $orfas) {
+                $opcoes = @($candidatas[$o.Nome])
+                if ($opcoes.Count -eq 1) {
+                    $portaUnica = $opcoes[0].Porta
+                    $disputa = @($orfas | Where-Object { @($candidatas[$_.Nome] | Where-Object { $_.Porta -eq $portaUnica }).Count -gt 0 })
+                    if ($disputa.Count -eq 1) {
+                        $mover += @{ Nome = $o.Nome; De = $o.Porta; Para = $portaUnica }
+                        continue
+                    }
+                }
+                $escolher += $o
+            }
+        }
+    }
+    $destinos = @{}
+    foreach ($m in $mover) { $destinos[$m.Para] = $true }
+    $livresRestantes = @($livres | Where-Object { -not $destinos.ContainsKey($_.Porta) })
+    return @{
+        Certas = $certas; Mover = $mover; Escolher = $escolher; Livres = $livresRestantes
+        Orfas = $orfas; SemConexao = ($conectadas.Count -eq 0)
+    }
+}
+
+function Set-PortaImpressora {
+    # Troca a porta da impressora; Set-Printer e, se nao der, pelo WMI
+    param([string]$Nome, [string]$Porta)
+    try { Set-Printer -Name $Nome -PortName $Porta -ErrorAction Stop; return }
+    catch {
+        $filtro = "Name='" + $Nome.Replace("\", "\\").Replace("'", "\'") + "'"
+        $wmi = Get-WmiObject Win32_Printer -Filter $filtro -ErrorAction Stop
+        if ($null -eq $wmi) { throw "impressora $Nome não encontrada" }
+        $wmi.PortName = $Porta
+        [void]$wmi.Put()
+    }
+}
+
+function Set-ImpressoraOnline {
+    # Desmarca "Usar impressora offline", que o Windows marca quando a porta some
+    param([string]$Nome)
+    $filtro = "Name='" + $Nome.Replace("\", "\\").Replace("'", "\'") + "'"
+    $wmi = Get-WmiObject Win32_Printer -Filter $filtro -ErrorAction Stop
+    if ($null -ne $wmi -and $wmi.WorkOffline) {
+        $wmi.WorkOffline = $false
+        [void]$wmi.Put()
+    }
+}
+
+function Set-EnergiaAparelhoUsb {
+    # Desliga a economia de energia do proprio aparelho USB, que a caixinha do
+    # Gerenciador de Dispositivos nao alcanca. Vale na proxima vez que o cabo for
+    # conectado ou o PC reiniciar. Aplica em todas as entradas USB que a impressora
+    # ja usou, para continuar valendo se trocarem o cabo de lugar.
+    # Devolve @{ Ajustados; Falhas }
+    param($Instancias, [string]$Raiz = "HKLM:\SYSTEM\CurrentControlSet")
+    $alvos = New-Object System.Collections.Generic.List[string]
+    foreach ($inst in @($Instancias | Where-Object { "$_" -ne "" } | Select-Object -Unique)) {
+        $alvos.Add($inst)
+        # Aparelho composto (&MI_xx): a energia fica no aparelho pai, VID&PID sem o MI
+        if ($inst -match '^(USB\\VID_[0-9A-Fa-f]{4}&PID_[0-9A-Fa-f]{4})&MI_') {
+            $pai = $matches[1]
+            foreach ($filho in @(Get-ChildItem -LiteralPath (Join-Path $Raiz "Enum\$pai") -ErrorAction SilentlyContinue)) { $alvos.Add($pai + "\" + $filho.PSChildName) }
+        }
+    }
+    $ajustados = 0
+    $falhas = 0
+    foreach ($alvo in @($alvos | Select-Object -Unique)) {
+        $aparelho = Join-Path $Raiz "Enum\$alvo"
+        if (-not (Test-Path -LiteralPath $aparelho)) { continue }
+        $chave = Join-Path $aparelho "Device Parameters"
+        try {
+            if (-not (Test-Path -LiteralPath $chave)) { [void](New-Item -Path $chave -Force -ErrorAction Stop) }
+            foreach ($nomeValor in @('EnhancedPowerManagementEnabled', 'AllowIdleIrpInD3', 'DeviceSelectiveSuspended')) {
+                New-ItemProperty -LiteralPath $chave -Name $nomeValor -Value 0 -PropertyType DWord -Force -ErrorAction Stop | Out-Null
+            }
+            # SelectiveSuspendEnabled: alguns drivers gravam como binario; so zera o que
+            # ja existe, mantendo o tipo que o driver usa
+            $atual = (Get-Item -LiteralPath $chave -ErrorAction Stop)
+            if ($atual.GetValueNames() -contains 'SelectiveSuspendEnabled') {
+                if ($atual.GetValueKind('SelectiveSuspendEnabled') -eq [Microsoft.Win32.RegistryValueKind]::Binary) {
+                    New-ItemProperty -LiteralPath $chave -Name 'SelectiveSuspendEnabled' -Value ([byte[]](0)) -PropertyType Binary -Force -ErrorAction Stop | Out-Null
+                }
+                else { New-ItemProperty -LiteralPath $chave -Name 'SelectiveSuspendEnabled' -Value 0 -PropertyType DWord -Force -ErrorAction Stop | Out-Null }
+            }
+            $ajustados++
+        }
+        catch { $falhas++ }
+    }
+    return @{ Ajustados = $ajustados; Falhas = $falhas }
+}
+
+function Disable-InicializacaoRapida {
+    # Com a inicializacao rapida o PC nao desliga de verdade e a impressora USB
+    # muitas vezes nao e reconhecida ao ligar. Devolve o que aconteceu.
+    param([string]$Raiz = "HKLM:\SYSTEM\CurrentControlSet")
+    $chave = Join-Path $Raiz "Control\Session Manager\Power"
+    $antes = (Get-ItemProperty -LiteralPath $chave -Name HiberbootEnabled -ErrorAction SilentlyContinue).HiberbootEnabled
+    if ($null -ne $antes -and [int]$antes -eq 0) { return "já estava desligada" }
+    if (-not (Test-Path -LiteralPath $chave)) { [void](New-Item -Path $chave -Force -ErrorAction Stop) }
+    New-ItemProperty -LiteralPath $chave -Name HiberbootEnabled -Value 0 -PropertyType DWord -Force -ErrorAction Stop | Out-Null
+    return "desligada"
+}
+
+function Set-RecuperacaoSpooler {
+    # Spooler que cai volta sozinho em 5 s (tres tentativas, zera a contagem por dia)
+    $p = Start-Process "sc.exe" -ArgumentList "failure Spooler reset= 86400 actions= restart/5000/restart/5000/restart/5000" -Wait -PassThru -WindowStyle Hidden
+    return ($p.ExitCode -eq 0)
+}
+
+function Show-EscolhaPortaUsb {
+    # Mais de uma impressora ou mais de uma porta: o tecnico escolhe qual vai onde.
+    # Devolve @{ Nome; De; Para } so das que ganharam porta.
+    param($Orfas, $Livres)
+    $escolhas = @()
+    $fe = New-ToolForm "Qual impressora está em qual porta USB?" 720 (190 + 40 * @($Orfas).Count)
+    New-ToolLabel $fe "Estas impressoras apontam para uma porta USB que não está conectada. Escolha a porta USB conectada de cada uma (a lista mostra o fabricante do aparelho)." 16 12 9 -W 680 | Out-Null
+    $combos = @()
+    $y = 60
+    foreach ($o in @($Orfas)) {
+        New-ToolLabel $fe "$($o.Nome)  (hoje em $($o.Porta), desconectada)" 16 ($y + 4) 9 -W 380 | Out-Null
+        $cb = New-Object System.Windows.Forms.ComboBox
+        $cb.DropDownStyle = 'DropDownList'
+        $cb.Location = New-Object System.Drawing.Point(410, $y)
+        $cb.Width = 280
+        [void]$cb.Items.Add("(deixar como está)")
+        foreach ($l in @($Livres)) {
+            $fab = $l.Fabricante
+            if ($fab -eq "") { $fab = "VID $($l.Vid)" }
+            [void]$cb.Items.Add("$($l.Porta) - $fab - conectada")
+        }
+        $cb.SelectedIndex = 0
+        [void]$fe.Controls.Add($cb)
+        $combos += , @($o, $cb)
+        $y += 40
+    }
+    $btnOk = New-ToolButton $fe "APLICAR" 400 ($y + 20) 140 32 $Script:UiVerde $null "Troca a porta das impressoras escolhidas"
+    $btnCancelar = New-ToolButton $fe "CANCELAR" 550 ($y + 20) 140 32 $Script:UiCinza $null "Não troca nenhuma porta"
+    $btnOk.Add_Click({ $fe.DialogResult = 'OK'; $fe.Close() })
+    $btnCancelar.Add_Click({ $fe.DialogResult = 'Cancel'; $fe.Close() })
+    $resposta = $fe.ShowDialog($Script:MainForm)
+    if ($resposta -eq 'OK') {
+        foreach ($par in $combos) {
+            $idx = $par[1].SelectedIndex
+            if ($idx -gt 0) { $escolhas += @{ Nome = $par[0].Nome; De = $par[0].Porta; Para = @($Livres)[$idx - 1].Porta } }
+        }
+    }
+    $fe.Dispose()
+    return , $escolhas
+}
+
+function Invoke-CorrigirImpressoraUsb {
+    # Botao CORRIGIR IMPRESSORA USB: acha a porta USB certa, tira a economia de
+    # energia (USB, aparelho e PC), desliga a inicializacao rapida e mostra o relatorio
+    Log-Message "INFO" "Impressora USB: conferindo portas, energia e inicialização..."
+    $rel = New-Object System.Collections.Generic.List[string]
+    $houveFalha = $false
+    $prontas = New-Object System.Collections.Generic.List[string]
+
+    # 1) PORTA USB
+    $rel.Add("PORTA USB")
+    $portas = @()
+    $impressoras = @()
+    try {
+        $portas = Get-PortasUsbImpressora
+        $impressoras = Get-ImpressorasUsb
+    }
+    catch { Log-Message "ERRO" "   > Falha ao ler as portas USB: $($_.Exception.Message)" }
+    $plano = Get-PlanoPortasUsb -Impressoras $impressoras -Portas $portas
+    $descPorta = @{}
+    foreach ($p in $portas) {
+        $fab = $p.Fabricante
+        if ($fab -eq "" -and $p.Vid -ne "") { $fab = "VID $($p.Vid)" }
+        $descPorta[$p.Porta] = $fab
+    }
+
+    $mover = @($plano.Mover)
+    if (@($plano.Escolher).Count -gt 0 -and @($plano.Livres).Count -gt 0) {
+        # Sem @(): a janela ja devolve a lista inteira como um objeto so
+        $escolhidas = Show-EscolhaPortaUsb -Orfas $plano.Escolher -Livres $plano.Livres
+        foreach ($esc in @($escolhidas)) { if ($null -ne $esc) { $mover += $esc } }
+    }
+    $movidas = @{}
+    foreach ($m in $mover) {
+        try {
+            Set-PortaImpressora -Nome $m.Nome -Porta $m.Para
+            $movidas[$m.Nome] = $true
+            $fabTxt = ""
+            if ("$($descPorta[$m.Para])" -ne "") { $fabTxt = ", $($descPorta[$m.Para])" }
+            $rel.Add("  $($m.Nome): $($m.De) (desconectada) -> $($m.Para) (conectada$fabTxt)")
+            Log-Message "SUCESSO" "   > $($m.Nome): porta $($m.De) -> $($m.Para)"
+            $prontas.Add($m.Nome)
+        }
+        catch {
+            $houveFalha = $true
+            $rel.Add("  $($m.Nome): não deu para trocar $($m.De) -> $($m.Para) ($($_.Exception.Message))")
+            Log-Message "ERRO" "   > Falha ao trocar a porta de $($m.Nome): $($_.Exception.Message)"
+        }
+    }
+    foreach ($c in @($plano.Certas)) {
+        $rel.Add("  $($c.Nome): já está na porta certa ($($c.Porta), conectada)")
+        $prontas.Add($c.Nome)
+    }
+    foreach ($o in @($plano.Orfas)) {
+        if ($movidas.ContainsKey($o.Nome)) { continue }
+        $houveFalha = $true
+        if ($plano.SemConexao) { $rel.Add("  $($o.Nome): aponta para $($o.Porta), mas nenhuma impressora USB está conectada agora. Confira cabo, energia e se ela está ligada.") }
+        else { $rel.Add("  $($o.Nome): continua em $($o.Porta), que não está conectada (porta não escolhida).") }
+    }
+    foreach ($l in @($plano.Livres)) {
+        $usada = @($mover | Where-Object { $_.Para -eq $l.Porta -and $movidas.ContainsKey($_.Nome) }).Count -gt 0
+        if (-not $usada) { $rel.Add("  $($l.Porta) ($($descPorta[$l.Porta])) está conectada, mas nenhuma impressora do Windows usa essa porta: instale o driver ou aponte a impressora para ela.") }
+    }
+    if (@($impressoras).Count -eq 0) { $rel.Add("  Nenhuma impressora do Windows usa porta USB neste PC.") }
+
+    # "Usar impressora offline" marcado pelo Windows quando a porta sumiu
+    foreach ($nome in @($prontas)) {
+        $imp = @($impressoras | Where-Object { $_.Nome -eq $nome })
+        if ($imp.Count -gt 0 -and $imp[0].Offline) {
+            try { Set-ImpressoraOnline -Nome $nome; $rel.Add("  $($nome): tirada do modo offline") }
+            catch { $houveFalha = $true; $rel.Add("  $($nome): continua marcada como offline ($($_.Exception.Message))") }
+        }
+    }
+
+    # 2) ENERGIA
+    $rel.Add("")
+    $rel.Add("ENERGIA")
+    try {
+        $energia = Invoke-UsbPowerFix -Resultado
+        foreach ($x in @($energia.Feitos)) { $rel.Add("  $x") }
+        foreach ($x in @($energia.Falhas)) { $houveFalha = $true; $rel.Add("  Não aplicado: $x") }
+    }
+    catch { $houveFalha = $true; $rel.Add("  Falha no ajuste de energia do USB: $($_.Exception.Message)") }
+    $instancias = @($portas | ForEach-Object { $_.Instancia } | Where-Object { $_ -ne "" })
+    if ($instancias.Count -gt 0) {
+        $aparelho = Set-EnergiaAparelhoUsb -Instancias $instancias
+        if ($aparelho.Ajustados -gt 0) { $rel.Add("  Economia de energia da própria impressora desligada ($($aparelho.Ajustados) entrada(s) USB; vale ao reconectar o cabo ou reiniciar)") }
+        if ($aparelho.Falhas -gt 0) { $houveFalha = $true; $rel.Add("  $($aparelho.Falhas) entrada(s) USB recusaram o ajuste de energia do aparelho") }
+    }
+    try {
+        if (Set-RecuperacaoSpooler) { $rel.Add("  Serviço de impressão volta sozinho se travar") }
+        else { $rel.Add("  Não deu para configurar o serviço de impressão para voltar sozinho") }
+    }
+    catch { $rel.Add("  Não deu para configurar o serviço de impressão para voltar sozinho") }
+
+    # 3) INICIALIZACAO
+    $rel.Add("")
+    $rel.Add("AO LIGAR O PC")
+    try {
+        $rapida = Disable-InicializacaoRapida
+        $rel.Add("  Inicialização rápida do Windows: $rapida")
+    }
+    catch { $houveFalha = $true; $rel.Add("  Não deu para desligar a inicialização rápida: $($_.Exception.Message)") }
+
+    $rel.Add("")
+    $rel.Add("Se a impressora ainda não responder, tire e ponha o cabo USB uma vez (de preferência numa porta atrás do gabinete, direto na placa).")
+    foreach ($linhaRel in $rel) { if ($linhaRel -ne "") { Log-Message "INFO" "   $linhaRel" } }
+
+    $icone = "Information"
+    if ($houveFalha) { $icone = "Warning" }
+    $texto = ($rel -join "`r`n")
+    $unica = @($prontas | Select-Object -Unique)
+    if ($unica.Count -eq 1) {
+        $texto = $texto + "`r`n`r`nImprimir uma folha de teste em ""$($unica[0])"" agora?"
+        $resp = [System.Windows.Forms.MessageBox]::Show($texto, "Corrigir impressora USB", "YesNo", $icone)
+        if ($resp -eq [System.Windows.Forms.DialogResult]::Yes) {
+            try {
+                Send-TesteImpressao -Impressora $unica[0] -Detalhe "Teste depois do CORRIGIR IMPRESSORA USB"
+                Log-Message "SUCESSO" "Impressora USB: teste enviado para $($unica[0])"
+            }
+            catch {
+                Log-Message "ERRO" "Impressora USB: falha ao enviar o teste - $($_.Exception.Message)"
+                [System.Windows.Forms.MessageBox]::Show("Não deu para enviar o teste para $($unica[0]): $($_.Exception.Message)", "Corrigir impressora USB", "OK", "Warning") | Out-Null
+            }
+        }
+    }
+    else {
+        [System.Windows.Forms.MessageBox]::Show($texto, "Corrigir impressora USB", "OK", $icone) | Out-Null
+    }
 }
 
 # -----------------------------------------------------------------------------
@@ -1180,16 +1570,19 @@ function ConvertTo-XmlArquivo {
 }
 
 function Get-XmlChave {
-    # Tira os 44 digitos da chave de acesso de qualquer um dos formatos
+    # Tira a chave de acesso (44 posicoes) de qualquer um dos formatos. Desde o
+    # CNPJ alfanumerico (julho de 2026) as 12 primeiras posicoes do CNPJ dentro da
+    # chave podem ter letras: 6 digitos + 12 letras/digitos + 26 digitos.
     param($Doc)
+    $padrao = '(\d{6}[0-9A-Z]{12}\d{26})'
     try {
         $no = $Doc.DocumentElement.SelectSingleNode("//*[local-name()='infNFe']")
         if ($null -ne $no) {
-            $id = "$($no.GetAttribute('Id'))"
-            if ($id -match '(\d{44})') { return $matches[1] }
+            $id = "$($no.GetAttribute('Id'))".ToUpper()
+            if ($id -match $padrao) { return $matches[1] }
         }
         $no = $Doc.DocumentElement.SelectSingleNode("//*[local-name()='chNFe']")
-        if ($null -ne $no -and "$($no.InnerText)" -match '(\d{44})') { return $matches[1] }
+        if ($null -ne $no -and "$($no.InnerText)".ToUpper() -match $padrao) { return $matches[1] }
     }
     catch {}
     return ""
@@ -1221,7 +1614,7 @@ function Get-XmlNomeLote {
     #   Periodo .  XML NFC-e - Agosto de 2026 | ... - Julho a Agosto de 2026
     #              XML NFC-e - 01-08-2026 a 12-09-2026 | ... - 12-09-2026
     #   Chave ...  XML NFC-e - 3 chaves de acesso
-    #   Pedido ..  XML NFC-e - Pedido 73432 | ... - Pedidos 73400 a 73432
+    #   Pedido ..  XML NFC-e - Pedido 73432 | ... - Pedidos 73400 a 73432 | ... - Pedido 577 - 12-09-2026
     #   -Series: series das notas gravadas, usadas quando nao ha serie escolhida
     #            ("Séries 7 e 8"; acima de 3 vira "4 séries")
     #   -Notas: no modo Pedido, os numeros dos pedidos
@@ -1261,6 +1654,8 @@ function Get-XmlNomeLote {
             if ($faixa.Length -gt 40) { $partes += "$($ord.Count) $($palavra.ToLower())s de $($ord[0]) a $($ord[-1])" }
             else { $partes += "$($palavra)s $faixa" }
         }
+        # Pedido que zera por dia: o dia buscado entra no nome para separar os lotes
+        if ($Modo -eq 'Pedido' -and $PSBoundParameters.ContainsKey('De')) { $partes += $De.ToString("dd-MM-yyyy") }
     }
     elseif ($Modo -eq 'Periodo') {
         # Mes por extenso fixo em portugues: nao depende do idioma do Windows
@@ -2307,6 +2702,7 @@ function Show-XmlDownloader {
         $cmbParceiro = & $novaCombo $cardConn 498 33 110
         $dicaTestar = "Conecta no banco $bancoPadrao, mostra a versao do SQL e carrega parceiros e series"
         $btnTestar = New-ToolButton $cardConn "TESTAR CONEXÃO" 624 32 150 27 $Script:UiAzul $null $dicaTestar
+        $btnPendentes = New-ToolButton $cardConn "NOTAS PENDENTES" 786 32 160 27 $Script:UiAmarelo $null "Lista as NFC-e que não subiram: sem autorização da SEFAZ e sem inutilização, com a situação e o motivo (sem resposta, rejeitada, contingência não enviada, ignorada)."
         $lblConn = New-ToolLabel $cardConn "Informe o servidor e clique em TESTAR CONEXÃO." 14 60 9 -Cor $Script:UiSuave -W 930
 
         # ---------------------------------------------------------------------
@@ -2331,14 +2727,25 @@ function Show-XmlDownloader {
         New-ToolLabel $cardBusca "Série (opcional):" 342 103 9 -Cor $Script:UiSuave | Out-Null
         $cmbSerie2 = & $novaCombo $cardBusca 450 100 90 -Editavel
 
-        $rbChave = & $novoRadio $cardBusca "Por chave de acesso (44 dígitos)" 12 128 300
+        $rbChave = & $novoRadio $cardBusca "Por chave de acesso (44 posições)" 12 128 300
         $txtChaves = & $novoCampo $cardBusca 32 150 430 "" 26 -Multi
 
         # Pedido do PDV (o numero que sai no cupom, "Pedido: 73432"): o banco liga
         # Pedidos.IDNSUFiscal a NSUFiscal, que guarda a serie e o numero da NFC-e
-        $rbPedido = & $novoRadio $cardBusca "Por número do pedido" 490 128 300
-        $txtPedidos = & $novoCampo $cardBusca 510 150 250 ""
-        New-ToolLabel $cardBusca "ex.:  73432   |   73400-73432" 772 154 8.5 -Cor $Script:UiSuave -W 175 | Out-Null
+        $rbPedido = & $novoRadio $cardBusca "Por número do pedido   (ex.: 73432  ou  73400-73432)" 490 128 460
+        $txtPedidos = & $novoCampo $cardBusca 510 150 150 ""
+        # O numero do pedido zera por dia em muitos clientes: o dia (do caixa) separa
+        # o pedido 577 de ontem do 577 de hoje
+        $chkDiaPedido = New-Object System.Windows.Forms.CheckBox
+        $chkDiaPedido.Text = "No dia:"
+        $chkDiaPedido.Location = New-Object System.Drawing.Point(674, 152)
+        $chkDiaPedido.Size = New-Object System.Drawing.Size(70, 20)
+        $chkDiaPedido.ForeColor = $Script:UiTexto
+        $chkDiaPedido.BackColor = [System.Drawing.Color]::Transparent
+        $chkDiaPedido.Cursor = 'Hand'
+        [void]$cardBusca.Controls.Add($chkDiaPedido)
+        $dtPedido = & $novaData $cardBusca 746 150 110
+        New-ToolLabel $cardBusca "(opcional)" 864 154 8.5 -Cor $Script:UiSuave -W 80 | Out-Null
 
 
         # ---------------------------------------------------------------------
@@ -2383,11 +2790,14 @@ function Show-XmlDownloader {
         [void]$lv.Columns.Add("Série", 50)
         [void]$lv.Columns.Add("Data", 115)
         [void]$lv.Columns.Add("Situação", 115)
-        [void]$lv.Columns.Add("Chave de acesso", 275)
+        [void]$lv.Columns.Add("Chave de acesso", 260)
         [void]$lv.Columns.Add("Tamanho", 75)
-        [void]$lv.Columns.Add("Arquivo gerado", 185)
+        [void]$lv.Columns.Add("Arquivo gerado", 130)
         # Por ultimo para nao mudar a posicao das outras colunas (SubItems 3, 5 e 6)
         [void]$lv.Columns.Add("Pedido", 60)
+        # Total da nota: com o pedido repetido (zera por dia) o valor mostra qual e a certa
+        $colValor = $lv.Columns.Add("Valor R$", 75)
+        $colValor.TextAlign = 'Right'
         [void]$f.Controls.Add($lv)
 
         # Aviso sobreposto a lista: no rodape ficava discreto demais para uma
@@ -2422,9 +2832,10 @@ function Show-XmlDownloader {
             $Script:ToolTip.SetToolTip($txtNotas, "Aceita intervalo, lista ou os dois juntos:  1-15  |  1,5,9  |  1-10,15,20-25. Pode digitar com espaços. Enter já faz a busca.")
             $Script:ToolTip.SetToolTip($rbPeriodo, "Quando o cliente pede tudo de um dia ou de um mês, em vez de números específicos.")
             $Script:ToolTip.SetToolTip($rbChave, "Quando o cliente mandou a chave de acesso da nota em vez do número.")
-            $Script:ToolTip.SetToolTip($txtChaves, "Cole as chaves de 44 dígitos separadas por vírgula ou uma por linha. Pontos e espaços são ignorados.")
+            $Script:ToolTip.SetToolTip($txtChaves, "Cole as chaves de 44 posições separadas por vírgula ou uma por linha. Pontos, espaços e o NFe da frente são ignorados. Aceita a chave de CNPJ alfanumérico (com letras).")
             $Script:ToolTip.SetToolTip($rbPedido, "Quando o cliente só tem o número do pedido, o que sai no cupom como ""Pedido: 73432"".")
-            $Script:ToolTip.SetToolTip($txtPedidos, "Um pedido, uma lista ou intervalo:  73432  |  73430,73432  |  73400-73432. Pedido sem NFC-e (venda não fiscal) aparece no aviso depois da busca. Número que se repete (zera por dia) traz uma nota por dia, a mais recente primeiro. Enter já faz a busca.")
+            $Script:ToolTip.SetToolTip($txtPedidos, "Um pedido, uma lista ou intervalo:  73432  |  73430,73432  |  73400-73432. Pedido sem NFC-e (venda não fiscal) aparece no aviso depois da busca. Número que se repete (zera por dia) traz uma nota por dia, a mais recente primeiro; marque No dia para trazer só a do dia certo. Enter já faz a busca.")
+            $Script:ToolTip.SetToolTip($chkDiaPedido, "Busca o pedido só nesse dia de caixa. Venda depois da meia-noite conta no dia em que o caixa foi aberto.")
             $Script:ToolTip.SetToolTip($cmbTipo, "Serve como filtro da lista também: depois de buscar, troque a opção e a tela mostra só o que interessa, sem consultar o banco de novo. Em 'Todas', cada número traz a nota autorizada e, se aquele número tiver sido inutilizado, traz a inutilizada no lugar — nunca as duas para o mesmo número.")
             $Script:ToolTip.SetToolTip($lv, "A coluna Situação diz o que é cada nota. Verde = autorizada, vale. Vermelho = cancelada, não vale. Amarelo = inutilizada ou sem protocolo. Cinza = não existe no banco. Passe o mouse na linha para o detalhe, clique no cabeçalho para ordenar e use o botão direito para marcar ou desmarcar tudo.")
         }
@@ -2482,6 +2893,8 @@ function Show-XmlDownloader {
             $dtIni.Enabled = $m2; $dtFim.Enabled = $m2; $cmbSerie2.Enabled = $m2
             $txtChaves.Enabled = $m3
             $txtPedidos.Enabled = $m4
+            $chkDiaPedido.Enabled = $m4
+            $dtPedido.Enabled = ($m4 -and $chkDiaPedido.Checked)
             # Destaca o modo ativo: o escolhido em verde, os outros apagados
             if ($m1) { $rbSerie.ForeColor = $Script:UiVerde } else { $rbSerie.ForeColor = $Script:UiSuave }
             if ($m2) { $rbPeriodo.ForeColor = $Script:UiVerde } else { $rbPeriodo.ForeColor = $Script:UiSuave }
@@ -2733,7 +3146,7 @@ function Show-XmlDownloader {
                 Conteudo = ""; Arquivo = ""; Tamanho = 0; Aviso = ""; Inutilizada = $false
                 Codigo = Get-XmlDbValor $rd "CodigoRetorno"; Cancelamento = ""; ChaveCanc = ""
                 Cancelada = $false; DataCancelamento = $null; Linha = $null
-                Pedido = Get-XmlDbValor $rd "Pedido"
+                Pedido = Get-XmlDbValor $rd "Pedido"; Valor = $null
             }
 
             $xEnvio = Get-XmlDbValor $rd "xmlEnvio"
@@ -2786,6 +3199,14 @@ function Show-XmlDownloader {
             if ($null -eq $item.Pedido -and -not $item.Inutilizada -and $item.Conteudo -ne "") {
                 $achouPedido = [regex]::Match($item.Conteudo, '<infCpl>[^<]*?\bPedido\s*:\s*(\d+)')
                 if ($achouPedido.Success) { $item.Pedido = [long]$achouPedido.Groups[1].Value }
+            }
+            # Valor total da nota (vNF), para separar pedidos repetidos pelo valor
+            if (-not $item.Inutilizada -and $item.Conteudo -ne "") {
+                $achouValor = [regex]::Match($item.Conteudo, '<vNF>([0-9.]+)</vNF>')
+                $valorNota = [decimal]0
+                if ($achouValor.Success -and [decimal]::TryParse($achouValor.Groups[1].Value, [System.Globalization.NumberStyles]::Number, [System.Globalization.CultureInfo]::InvariantCulture, [ref]$valorNota)) {
+                    $item.Valor = $valorNota
+                }
             }
 
             # Numero inutilizado nunca foi autorizado, entao nao tem o que cancelar
@@ -2856,6 +3277,9 @@ function Show-XmlDownloader {
             [void]$lvi.SubItems.Add($tam)
             [void]$lvi.SubItems.Add($Item.Arquivo)
             [void]$lvi.SubItems.Add("$($Item.Pedido)")
+            $valorTxt = ""
+            if ($null -ne $Item.Valor) { $valorTxt = ([decimal]$Item.Valor).ToString("#,##0.00", [System.Globalization.CultureInfo]::GetCultureInfo("pt-BR")) }
+            [void]$lvi.SubItems.Add($valorTxt)
 
             # verde = valida | amarelo = atencao | vermelho = nao vale | cinza = nao existe
             if ($sit -eq "CANCELADA") { $lvi.ForeColor = $Script:UiVermelho }
@@ -2963,11 +3387,21 @@ function Show-XmlDownloader {
             return $vis.Count
         }
 
-        # Chaves digitadas: 44 digitos, sem repetir, ignorando pontos e espacos
+        # Chaves digitadas: 44 posicoes, sem repetir, ignorando pontos, espacos e o
+        # "NFe" da frente. Com o CNPJ alfanumerico a chave pode ter letras nas 12
+        # primeiras posicoes do CNPJ, entao so numeros deixaria essas notas de fora.
         $lerChaves = {
             return @(("$($txtChaves.Text)" -replace '[;\r\n]', ',') -split ',' |
-                ForEach-Object { ($_ -replace '\D', '') } |
-                Where-Object { $_.Length -eq 44 } | Select-Object -Unique)
+                ForEach-Object { (($_ -replace '[^0-9A-Za-z]', '').ToUpper() -replace '^NFE(?=.{44}$)', '') } |
+                Where-Object { $_ -match '^\d{6}[0-9A-Z]{12}\d{26}$' } | Select-Object -Unique)
+        }
+
+        # O que define a busca por pedido: os numeros e, se marcado, o dia. Serve
+        # para o ESPELHO FISCAL saber se a lista ja e dessa busca.
+        $textoPedido = {
+            $txtP = "$($txtPedidos.Text)".Trim()
+            if ($chkDiaPedido.Checked) { $txtP = $txtP + "|" + $dtPedido.Value.ToString("yyyy-MM-dd") }
+            return $txtP
         }
 
         $buscar = {
@@ -3119,12 +3553,16 @@ function Show-XmlDownloader {
                     $fxP = ConvertFrom-FaixaNotas -Texto $txtPedidos.Text -Confirmar
                     if (-not $fxP.Ok) { & $setStatus ("Pedidos: " + $fxP.Erro) $Script:UiVermelho; return $false }
                     $Script:XmlPedidosBuscados = @($fxP.Notas)
+                    $Script:XmlPedidoDia = $null
+                    if ($chkDiaPedido.Checked) { $Script:XmlPedidoDia = $dtPedido.Value.Date }
 
                     # Pedido -> NSUFiscal (tipoDoc 2 = NFC-e, com serie e numero) -> nota.
                     # Pedido de venda nao fiscal nao tem NSU de NFC-e e fica de fora.
                     # O numero do pedido zera por dia em muitos clientes (a chave da
                     # tabela Pedidos inclui o GUID): o mesmo numero traz uma nota por
-                    # dia, da mais recente para a mais antiga.
+                    # dia, da mais recente para a mais antiga. Com "No dia" vale o dia
+                    # do caixa (DataCaixa), que segura a venda depois da meia-noite no
+                    # dia em que o caixa abriu.
                     for ($ini = 0; $ini -lt $fxP.Notas.Count; $ini += 500) {
                         $fim = [Math]::Min($ini + 499, $fxP.Notas.Count - 1)
                         $bloco = @($fxP.Notas[$ini..$fim])
@@ -3134,7 +3572,8 @@ function Show-XmlDownloader {
 
                         $sql = ";WITH peds AS (SELECT DISTINCT p.IDParceiro, p.ID AS Pedido, n.Serie AS PSerie, n.NumeroNota AS PNota " +
                         "FROM Pedidos p JOIN NSUFiscal n ON n.IDParceiro = p.IDParceiro AND n.ID = p.IDNSUFiscal AND n.tipoDoc = 2 " +
-                        "WHERE p.IDParceiro = @parceiro AND p.ID IN ($inSql)), logs AS (" + $cteLogs + " WHERE g.IDParceiro = @parceiro " +
+                        "WHERE p.IDParceiro = @parceiro AND p.ID IN ($inSql) AND (@dia IS NULL OR p.DataCaixa = @dia " +
+                        "OR (p.DataCaixa IS NULL AND p.Data >= @dia AND p.Data < DATEADD(day, 1, @dia)))), logs AS (" + $cteLogs + " WHERE g.IDParceiro = @parceiro " +
                         "AND EXISTS (SELECT 1 FROM peds pd WHERE pd.PSerie = g.SerieTokenID AND pd.PNota = g.IDTokenID)) " +
                         "SELECT " + $colunas + ", pd.Pedido " + $juncao + " JOIN peds pd ON pd.IDParceiro = t.IDParceiro " +
                         "AND pd.PSerie = t.Serie AND pd.PNota = t.ID ORDER BY pd.Pedido, COALESCE(t.DataEmissao, t.data) DESC"
@@ -3143,6 +3582,8 @@ function Show-XmlDownloader {
                         $cmd.CommandTimeout = 120
                         $cmd.CommandText = $sql
                         $par = $cmd.Parameters.Add("@parceiro", [System.Data.SqlDbType]::BigInt); $par.Value = $parceiro
+                        $par = $cmd.Parameters.Add("@dia", [System.Data.SqlDbType]::DateTime)
+                        if ($null -eq $Script:XmlPedidoDia) { $par.Value = [System.DBNull]::Value } else { $par.Value = $Script:XmlPedidoDia }
                         for ($i = 0; $i -lt $bloco.Count; $i++) {
                             $par = $cmd.Parameters.Add("@n$i", [System.Data.SqlDbType]::BigInt)
                             $par.Value = [long]$bloco[$i]
@@ -3154,7 +3595,7 @@ function Show-XmlDownloader {
                 else {
                     $chaves = @(& $lerChaves)
                     if ($chaves.Count -eq 0) {
-                        & $setStatus "Informe ao menos uma chave de 44 dígitos." $Script:UiVermelho
+                        & $setStatus "Informe ao menos uma chave de acesso válida (44 posições)." $Script:UiVermelho
                         return $false
                     }
 
@@ -3196,7 +3637,7 @@ function Show-XmlDownloader {
                 # seja mexida antes de baixar
                 if ($rbSerie.Checked) { $Script:XmlFiltro = @{ Modo = 'Serie'; Serie = "$($cmbSerie.Text)".Trim(); Notas = @($Script:XmlPedidas) } }
                 elseif ($rbPeriodo.Checked) { $Script:XmlFiltro = @{ Modo = 'Periodo'; Serie = "$($cmbSerie2.Text)".Trim(); De = $dtIni.Value; Ate = $dtFim.Value } }
-                elseif ($rbPedido.Checked) { $Script:XmlFiltro = @{ Modo = 'Pedido'; Serie = ''; Pedidos = @($Script:XmlPedidosBuscados); Texto = "$($txtPedidos.Text)".Trim() } }
+                elseif ($rbPedido.Checked) { $Script:XmlFiltro = @{ Modo = 'Pedido'; Serie = ''; Pedidos = @($Script:XmlPedidosBuscados); Dia = $Script:XmlPedidoDia; Texto = (& $textoPedido) } }
                 else { $Script:XmlFiltro = @{ Modo = 'Chave'; Serie = ''; Texto = ((@(& $lerChaves) | Sort-Object) -join ',') } }
 
                 # @() sobre uma List[object] quebra no PowerShell 5.1 ("Os tipos de
@@ -3228,13 +3669,17 @@ function Show-XmlDownloader {
                     Log-Message "INFO" "XMLs: busca não encontrou nenhuma nota"
                     $avisoNada = "Nada encontrado para esse filtro.`r`n`r`nConfira a série, os números e o período informados."
                     if ($rbPedido.Checked) {
-                        $avisoNada = "Nenhum desses pedidos tem NFC-e no banco: " + (ConvertTo-FaixaTexto $Script:XmlPedidosBuscados) +
-                        "`r`n`r`nPode ser venda não fiscal, pedido de outra loja (confira o Parceiro) ou número digitado errado."
+                        $noDia = ""
+                        if ($null -ne $Script:XmlPedidoDia) { $noDia = " no dia " + $Script:XmlPedidoDia.ToString("dd/MM/yyyy") }
+                        $avisoNada = "Nenhum desses pedidos tem NFC-e no banco$($noDia): " + (ConvertTo-FaixaTexto $Script:XmlPedidosBuscados) +
+                        "`r`n`r`nPode ser venda não fiscal, pedido de outra loja (confira o Parceiro), outro dia ou número digitado errado."
                     }
                     [System.Windows.Forms.MessageBox]::Show($avisoNada, "Baixar XMLs NFC-e", "OK", "Information") | Out-Null
                 }
                 elseif ($pedidosSemNfce.Count -gt 0) {
-                    & $setStatus ("$($achados.Count) nota(s) encontrada(s). Pedidos sem NFC-e (venda não fiscal ou número errado): " + (ConvertTo-FaixaTexto $pedidosSemNfce)) $Script:UiAmarelo
+                    $noDia = ""
+                    if ($null -ne $Script:XmlPedidoDia) { $noDia = " no dia " + $Script:XmlPedidoDia.ToString("dd/MM/yyyy") }
+                    & $setStatus ("$($achados.Count) nota(s) encontrada(s). Pedidos sem NFC-e$($noDia) (venda não fiscal ou número errado): " + (ConvertTo-FaixaTexto $pedidosSemNfce)) $Script:UiAmarelo
                 }
                 elseif ($visiveis -eq 0) {
                     & $setStatus "$($achados.Count) nota(s) encontrada(s), mas nenhuma se encaixa em ""$($cmbTipo.Text)""." $Script:UiAmarelo
@@ -3292,6 +3737,9 @@ function Show-XmlDownloader {
                 # Os pedidos que vao no lote, e nao todos os digitados: pedido sem NFC-e nao entra
                 $pedidosLote = @($ItensLote | Where-Object { $null -ne $_.Pedido } | ForEach-Object { [int]$_.Pedido })
                 if ($pedidosLote.Count -eq 0) { $pedidosLote = @($filtro.Pedidos) }
+                if ($null -ne $filtro.Dia) {
+                    return (Get-XmlNomeLote -Modo Pedido -Series $seriesLote -Notas $pedidosLote -Titulo $Titulo -De $filtro.Dia)
+                }
                 return (Get-XmlNomeLote -Modo Pedido -Series $seriesLote -Notas $pedidosLote -Titulo $Titulo)
             }
             return (Get-XmlNomeLote -Modo Chave -Series $seriesLote -Quantidade @($ItensLote).Count -Titulo $Titulo)
@@ -3476,7 +3924,7 @@ function Show-XmlDownloader {
                 $jaBuscou = $false
                 if ($null -ne $filtro -and $lv.Items.Count -gt 0) {
                     if ($rbChave.Checked) { $jaBuscou = ($filtro.Modo -eq 'Chave' -and "$($filtro.Texto)" -eq ((@(& $lerChaves) | Sort-Object) -join ',')) }
-                    else { $jaBuscou = ($filtro.Modo -eq 'Pedido' -and "$($filtro.Texto)" -eq "$($txtPedidos.Text)".Trim()) }
+                    else { $jaBuscou = ($filtro.Modo -eq 'Pedido' -and "$($filtro.Texto)" -eq (& $textoPedido)) }
                 }
                 if (-not $jaBuscou) {
                     if (-not (& $buscar)) { return }
@@ -3748,14 +4196,228 @@ function Show-XmlDownloader {
         }
 
         # ---------------------------------------------------------------------
+        # NOTAS PENDENTES
+        # NFC-e sem autorizacao da SEFAZ e sem inutilizacao: a nota que "nao subiu".
+        # A situacao sai das marcacoes do PDV na NFCeTokenID (ignorada, offline,
+        # erro) e do ultimo envio gravado na log (sem resposta ou rejeitada).
+        # ---------------------------------------------------------------------
+        $consultarPendentes = {
+            # -Dias 0 = todo o banco. Devolve as notas, da mais recente para a mais antiga.
+            param([int]$Dias)
+            $parceiroP = [long]("$($cmbParceiro.Text)".Trim())
+            $cnP = & $abrirConexao
+            try {
+                $cmd = $cnP.CreateCommand()
+                $cmd.CommandTimeout = 300
+                $cmd.CommandText = ";WITH ult AS (SELECT l.IDParceiro, l.SerieTokenID, l.IDTokenID, l.CodigoRetorno, l.MotivoErro, l.Chave, l.DataEmissao, " +
+                "ROW_NUMBER() OVER (PARTITION BY l.IDParceiro, l.SerieTokenID, l.IDTokenID ORDER BY l.ID DESC) AS rn, " +
+                "MAX(CASE WHEN l.CodigoRetorno IN (100, 150) THEN 1 ELSE 0 END) OVER (PARTITION BY l.IDParceiro, l.SerieTokenID, l.IDTokenID) AS aut " +
+                "FROM NFCeTokenIDLog l WHERE l.IDParceiro = @p), " +
+                "pend AS (SELECT t.IDParceiro, t.Serie, t.ID, COALESCE(t.DataEmissao, t.data, u.DataEmissao) AS Emissao, t.OFFLine, t.OFFLineOK, t.Erro, t.ErroResolvido, " +
+                "t.MotivoErro AS MotivoToken, t.Ignorada, t.MotivoIgnorada, t.MotivoGerouOutra, t.IDDestinoTransferencia, " +
+                "u.CodigoRetorno, u.MotivoErro AS MotivoLog, u.Chave, SUBSTRING(t.xmlEnvioOff, 1, 1000) AS InicioXmlOff " +
+                "FROM NFCeTokenID t LEFT JOIN ult u ON u.IDParceiro = t.IDParceiro AND u.SerieTokenID = t.Serie AND u.IDTokenID = t.ID AND u.rn = 1 " +
+                "WHERE t.IDParceiro = @p AND ISNULL(t.Inutilizada, 0) = 0 AND ISNULL(u.aut, 0) = 0 " +
+                "AND (t.Usada = 1 OR t.OFFLine = 1 OR u.IDTokenID IS NOT NULL) " +
+                "AND (@desde IS NULL OR COALESCE(t.DataEmissao, t.data, u.DataEmissao) >= @desde)), " +
+                # Envio que falhou nao grava a chave na log: ela sai do comeco do XML enviado,
+                # lido so das notas pendentes e so os primeiros 1000 caracteres
+                "env AS (SELECT x.SerieTokenID, x.IDTokenID, SUBSTRING(x.xmlEnvio, 1, 1000) AS InicioXml, " +
+                "ROW_NUMBER() OVER (PARTITION BY x.SerieTokenID, x.IDTokenID ORDER BY x.ID DESC) AS rn " +
+                "FROM NFCeTokenIDLog x JOIN pend p ON p.IDParceiro = x.IDParceiro AND p.Serie = x.SerieTokenID AND p.ID = x.IDTokenID " +
+                "WHERE x.xmlEnvio IS NOT NULL) " +
+                "SELECT p.*, e.InicioXml FROM pend p LEFT JOIN env e ON e.SerieTokenID = p.Serie AND e.IDTokenID = p.ID AND e.rn = 1 " +
+                "ORDER BY p.Emissao DESC, p.Serie, p.ID"
+                $par = $cmd.Parameters.Add("@p", [System.Data.SqlDbType]::BigInt); $par.Value = $parceiroP
+                $par = $cmd.Parameters.Add("@desde", [System.Data.SqlDbType]::DateTime)
+                if ($Dias -gt 0) { $par.Value = (Get-Date).Date.AddDays(-$Dias) } else { $par.Value = [System.DBNull]::Value }
+
+                $lista = New-Object 'System.Collections.Generic.List[object]'
+                $rd = & $executarLeitor $cmd
+                $texto = { param($Coluna) $v = Get-XmlDbValor $rd $Coluna; if ($null -eq $v) { return "" }; return "$v".Trim() }
+                $marcado = { param($Coluna) $v = Get-XmlDbValor $rd $Coluna; return ($null -ne $v -and [bool]$v) }
+                try {
+                    while ($rd.Read()) {
+                        # Mensagem do envio sem o endereco do webservice, que so atrapalha a leitura
+                        $motivoLog = (& $texto "MotivoLog") -replace '\s*-\s*URL:\S*.*$', ''
+                        $codigo = Get-XmlDbValor $rd "CodigoRetorno"
+
+                        if (& $marcado "Ignorada") {
+                            $situacao = "IGNORADA"
+                            $motivo = & $texto "MotivoIgnorada"
+                            if ($motivo -eq "") { $motivo = "o PDV não registrou o motivo" }
+                            $outra = & $texto "MotivoGerouOutra"
+                            $destino = Get-XmlDbValor $rd "IDDestinoTransferencia"
+                            if ($outra -ne "") { $motivo = $motivo + " | gerou outra nota: " + $outra }
+                            elseif ($null -ne $destino -and [long]$destino -gt 0) { $motivo = $motivo + " | passou para a nota " + $destino }
+                            $motivo = $motivo + " (número não inutilizado)"
+                        }
+                        elseif ((& $marcado "OFFLine") -and -not (& $marcado "OFFLineOK")) {
+                            $situacao = "CONTINGÊNCIA NÃO ENVIADA"
+                            $motivo = "emitida offline e ainda não transmitida para a SEFAZ"
+                            if ($motivoLog -ne "") { $motivo = $motivo + " | último envio: " + $motivoLog }
+                        }
+                        elseif ((& $marcado "Erro") -and -not (& $marcado "ErroResolvido")) {
+                            $situacao = "COM ERRO"
+                            $motivo = & $texto "MotivoToken"
+                            if ($motivo -eq "") { $motivo = $motivoLog }
+                        }
+                        elseif ($null -eq $codigo) {
+                            $situacao = "SEM ENVIO"
+                            $motivo = "número usado no PDV sem registro de envio para a SEFAZ"
+                        }
+                        elseif ([int]$codigo -le 0) {
+                            $situacao = "SEM RESPOSTA DA SEFAZ"
+                            $motivo = $motivoLog
+                            if ($motivo -eq "") { $motivo = "a SEFAZ não respondeu ao envio" }
+                        }
+                        else {
+                            $situacao = "REJEITADA (cStat $codigo)"
+                            $motivo = $motivoLog
+                        }
+
+                        $chaveP = (& $texto "Chave") -replace '^.*(.{44})$', '$1'
+                        if ($chaveP.Length -ne 44) {
+                            $chaveP = ""
+                            foreach ($inicio in @((& $texto "InicioXml"), (& $texto "InicioXmlOff"))) {
+                                $achouChave = [regex]::Match($inicio, 'Id\s*=\s*"NFe(\d{6}[0-9A-Za-z]{12}\d{26})"')
+                                if ($achouChave.Success) { $chaveP = $achouChave.Groups[1].Value.ToUpper(); break }
+                            }
+                        }
+                        $lista.Add(@{
+                                Serie = [int](Get-XmlDbValor $rd "Serie"); Nota = [long](Get-XmlDbValor $rd "ID")
+                                Emissao = Get-XmlDbValor $rd "Emissao"; Situacao = $situacao; Motivo = $motivo; Chave = $chaveP
+                            })
+                    }
+                }
+                finally { $rd.Close() }
+                return , $lista.ToArray()
+            }
+            finally { try { $cnP.Close() } catch {} }
+        }
+
+        $mostrarPendentes = {
+            if ($Script:XmlOcupado) { return }
+            if ($cmbParceiro.Items.Count -eq 0 -or "$($cmbParceiro.Text)".Trim() -eq "") {
+                & $setStatus "Clique em TESTAR CONEXÃO antes de ver as notas pendentes." $Script:UiVermelho
+                return
+            }
+            $fp = New-ToolForm "Notas pendentes - NFC-e" 980 560
+            $fp.MinimumSize = New-Object System.Drawing.Size(980, 560)
+            New-ToolLabel $fp "NFC-e sem autorização da SEFAZ e que não foram inutilizadas (a nota que ""não subiu"")" 16 14 10 -Negrito -W 940 | Out-Null
+            New-ToolLabel $fp "Período:" 16 47 9 -Cor $Script:UiSuave | Out-Null
+            $cmbDias = & $novaCombo $fp 76 44 150
+            foreach ($opcao in @("Últimos 7 dias", "Últimos 30 dias", "Últimos 90 dias", "Últimos 12 meses", "Tudo")) { [void]$cmbDias.Items.Add($opcao) }
+            $cmbDias.SelectedIndex = 2
+            $btnAtualizarP = New-ToolButton $fp "ATUALIZAR" 240 42 120 27 $Script:UiAzul $null "Consulta o banco de novo"
+            $lblResumoP = New-ToolLabel $fp "" 376 47 9 -Cor $Script:UiSuave -W 580
+            $lblResumoP.Anchor = 'Top,Left,Right'
+
+            $lvP = New-Object System.Windows.Forms.ListView
+            $lvP.Location = New-Object System.Drawing.Point(16, 80)
+            $lvP.Size = New-Object System.Drawing.Size(940, 388)
+            $lvP.Anchor = 'Top,Left,Right,Bottom'
+            $lvP.ShowItemToolTips = $true
+            Format-ToolListView $lvP
+            [void]$lvP.Columns.Add("Série", 50)
+            [void]$lvP.Columns.Add("Nota", 70)
+            [void]$lvP.Columns.Add("Emissão", 120)
+            [void]$lvP.Columns.Add("Situação", 190)
+            [void]$lvP.Columns.Add("Motivo", 420)
+            [void]$lvP.Columns.Add("Chave de acesso", 280)
+            [void]$fp.Controls.Add($lvP)
+
+            $btnCopiarP = New-ToolButton $fp "COPIAR LISTA" 16 480 184 30 $Script:UiCinza $null "Copia a lista pronta para colar no WhatsApp ou no e-mail do suporte"
+            $btnFecharP = New-ToolButton $fp "FECHAR" 772 480 184 30 $Script:UiCinza $null "Fecha esta janela"
+            $btnCopiarP.Anchor = 'Bottom,Left'
+            $btnFecharP.Anchor = 'Bottom,Right'
+            $Script:PendentesLista = @()
+
+            $carregarP = {
+                if (-not $btnAtualizarP.Enabled) { return }
+                $btnAtualizarP.Enabled = $false
+                $lblResumoP.ForeColor = $Script:UiAmarelo
+                $lblResumoP.Text = "Consultando o banco..."
+                [System.Windows.Forms.Application]::DoEvents()
+                try {
+                    $dias = @(7, 30, 90, 365, 0)[$cmbDias.SelectedIndex]
+                    # Sem @(): a rotina ja devolve o array inteiro como um objeto so
+                    $lista = & $consultarPendentes $dias
+                    if ($null -eq $lista) { $lista = @() }
+                    $Script:PendentesLista = $lista
+                    $lvP.BeginUpdate()
+                    try {
+                        $lvP.Items.Clear()
+                        foreach ($p in $lista) {
+                            $lvi = New-Object System.Windows.Forms.ListViewItem("$($p.Serie)")
+                            [void]$lvi.SubItems.Add("$($p.Nota)")
+                            $dtP = ""
+                            if ($null -ne $p.Emissao) { try { $dtP = ([datetime]$p.Emissao).ToString("dd/MM/yyyy HH:mm") } catch { $dtP = "$($p.Emissao)" } }
+                            [void]$lvi.SubItems.Add($dtP)
+                            [void]$lvi.SubItems.Add($p.Situacao)
+                            [void]$lvi.SubItems.Add($p.Motivo)
+                            [void]$lvi.SubItems.Add($p.Chave)
+                            if ($p.Situacao -like "REJEITADA*" -or $p.Situacao -eq "COM ERRO") { $lvi.ForeColor = $Script:UiVermelho }
+                            else { $lvi.ForeColor = $Script:UiAmarelo }
+                            $lvi.ToolTipText = "$($p.Situacao) - $($p.Motivo)"
+                            $lvi.Tag = $p
+                            [void]$lvP.Items.Add($lvi)
+                        }
+                    }
+                    finally { $lvP.EndUpdate() }
+
+                    if ($lista.Count -eq 0) {
+                        $lblResumoP.ForeColor = $Script:UiVerde
+                        $lblResumoP.Text = "Nenhuma nota pendente em ""$($cmbDias.Text)"": tudo autorizado ou inutilizado."
+                    }
+                    else {
+                        $grupos = @($lista | Group-Object { ($_.Situacao -replace ' \(cStat \d+\)$', '') } | Sort-Object Count -Descending | ForEach-Object { "$($_.Count) $($_.Name.ToLower())" })
+                        $lblResumoP.ForeColor = $Script:UiAmarelo
+                        $lblResumoP.Text = "$($lista.Count) pendente(s): " + ($grupos -join ", ")
+                    }
+                    Log-Message "INFO" "XMLs: $($lista.Count) nota(s) pendente(s) em $($cmbDias.Text)"
+                }
+                catch {
+                    $lblResumoP.ForeColor = $Script:UiVermelho
+                    $lblResumoP.Text = "Erro na consulta: " + (& $explicaFalha $_.Exception)
+                    Log-Message "ERRO" "XMLs: falha ao listar notas pendentes - $($_.Exception.Message)"
+                }
+                finally { $btnAtualizarP.Enabled = $true }
+            }
+
+            $btnAtualizarP.Add_Click({ & $carregarP })
+            $cmbDias.Add_SelectedIndexChanged({ & $carregarP })
+            $btnCopiarP.Add_Click({
+                    if (@($Script:PendentesLista).Count -eq 0) { $lblResumoP.Text = "Nada para copiar."; return }
+                    $linhasP = @("Notas pendentes NFC-e - parceiro $("$($cmbParceiro.Text)".Trim()) - $($cmbDias.Text)")
+                    foreach ($p in $Script:PendentesLista) {
+                        $dtP = ""
+                        if ($null -ne $p.Emissao) { try { $dtP = ([datetime]$p.Emissao).ToString("dd/MM/yyyy HH:mm") } catch {} }
+                        $linhasP += "Série $($p.Serie) nota $($p.Nota) - $dtP - $($p.Situacao) - $($p.Motivo)"
+                    }
+                    $txtP = $linhasP -join "`r`n"
+                    try { Set-Clipboard -Value $txtP -ErrorAction Stop }
+                    catch { [System.Windows.Forms.Clipboard]::SetText($txtP) }
+                    $lblResumoP.ForeColor = $Script:UiVerde
+                    $lblResumoP.Text = "Lista copiada: $(@($Script:PendentesLista).Count) nota(s)."
+                })
+            $btnFecharP.Add_Click({ $fp.Close() })
+            $fp.Add_Shown({ & $carregarP })
+            [void]$fp.ShowDialog($f)
+            $fp.Dispose()
+        }
+
+        # ---------------------------------------------------------------------
         # LIGACAO DOS EVENTOS
         # ---------------------------------------------------------------------
         $rbSerie.Add_CheckedChanged($atualizaModo)
         $rbPeriodo.Add_CheckedChanged($atualizaModo)
         $rbChave.Add_CheckedChanged($atualizaModo)
         $rbPedido.Add_CheckedChanged($atualizaModo)
+        $chkDiaPedido.Add_CheckedChanged($atualizaModo)
         $txtNotas.Add_TextChanged($contaNotas)
         $btnTestar.Add_Click({ & $testar })
+        $btnPendentes.Add_Click({ & $mostrarPendentes })
 
         # Texto da ajuda montado como array para nao depender de here-string indentada
         $ajudaTexto = @(
@@ -3778,7 +4440,8 @@ function Show-XmlDownloader {
             "       Data inicial e final, com serie opcional. Traz todas as notas do",
             "       periodo; acima de 10 mil ele pergunta antes de buscar.",
             "   - Por chave de acesso",
-            "       Chaves de 44 digitos, por virgula ou uma por linha.",
+            "       Chaves de 44 posicoes, por virgula ou uma por linha. Aceita a",
+            "       chave de CNPJ alfanumerico (com letras) e ignora o NFe da frente.",
             "   - Por numero do pedido",
             "       O numero que sai no cupom (""Pedido: 73432""). Aceita lista e",
             "       intervalo como as notas: 73432 | 73430,73432 | 73400-73432.",
@@ -3859,6 +4522,12 @@ function Show-XmlDownloader {
             "                       formatados, para colar num e-mail ou WhatsApp",
             "                       para o cliente.",
             "   ABRIR PASTA / ZIP   reabrem o ultimo lote baixado.",
+            "   NOTAS PENDENTES     (ao lado de TESTAR CONEXAO) lista as NFC-e que",
+            "                       nao subiram: sem autorizacao da SEFAZ e sem",
+            "                       inutilizacao. Mostra a situacao (sem resposta,",
+            "                       rejeitada, contingencia nao enviada, ignorada)",
+            "                       e o motivo; COPIAR LISTA leva tudo para o",
+            "                       WhatsApp ou e-mail do suporte.",
             "",
             "ATALHOS",
             "   Enter no campo Notas ou Pedido ja faz a busca.",
@@ -4021,6 +4690,7 @@ function Show-XmlDownloader {
                     5 { $expr = { [long]$_.Tamanho } }
                     6 { $expr = { "$($_.Arquivo)" } }
                     7 { $expr = { if ($null -ne $_.Pedido) { [long]$_.Pedido } else { [long]-1 } } }
+                    8 { $expr = { if ($null -ne $_.Valor) { [decimal]$_.Valor } else { [decimal]-1 } } }
                 }
                 if ($Script:XmlOrdemAsc) { $ord = @($Script:XmlResultados | Sort-Object $expr) }
                 else { $ord = @($Script:XmlResultados | Sort-Object $expr -Descending) }
@@ -6573,20 +7243,33 @@ function Get-DadosOrigemLpr {
     $ips = @()
     $macs = @()
     try {
-        $placas = @(Get-NetIPConfiguration -ErrorAction Stop | Where-Object { $_.IPv4Address -and $_.NetAdapter.Status -eq 'Up' })
+        # Placas pela API do .NET: o Get-NetIPConfiguration dava o mesmo resultado,
+        # mas levava uns 4 s na primeira chamada e travava a abertura da janela
+        $placas = @()
+        foreach ($ni in [System.Net.NetworkInformation.NetworkInterface]::GetAllNetworkInterfaces()) {
+            if ($ni.OperationalStatus -ne [System.Net.NetworkInformation.OperationalStatus]::Up) { continue }
+            if ($ni.NetworkInterfaceType -eq [System.Net.NetworkInformation.NetworkInterfaceType]::Loopback) { continue }
+            $props = $ni.GetIPProperties()
+            $ipv4 = @($props.UnicastAddresses | Where-Object { $_.Address.AddressFamily -eq [System.Net.Sockets.AddressFamily]::InterNetwork } | ForEach-Object { $_.Address.ToString() })
+            if ($ipv4.Count -eq 0) { continue }
+            $temGateway = @($props.GatewayAddresses | Where-Object { $_.Address.AddressFamily -eq [System.Net.Sockets.AddressFamily]::InterNetwork -and $_.Address.ToString() -ne '0.0.0.0' }).Count -gt 0
+            $placas += @{ Ips = $ipv4; Mac = $ni.GetPhysicalAddress().ToString(); Gateway = $temGateway }
+        }
         # Placa com gateway primeiro: e a da rede da loja (evita adaptador virtual)
-        $comGateway = @($placas | Where-Object { $_.IPv4DefaultGateway })
+        $comGateway = @($placas | Where-Object { $_.Gateway })
         if ($comGateway.Count -gt 0) { $placas = $comGateway }
-        foreach ($cfg in $placas) {
-            foreach ($end in @($cfg.IPv4Address)) {
-                if ($end.IPAddress -notlike '127.*' -and $end.IPAddress -notlike '169.254.*') { $ips += $end.IPAddress }
+        foreach ($placa in $placas) {
+            foreach ($ip in $placa.Ips) {
+                if ($ip -notlike '127.*' -and $ip -notlike '169.254.*') { $ips += $ip }
             }
-            if ("$($cfg.NetAdapter.MacAddress)" -ne "") { $macs += $cfg.NetAdapter.MacAddress.Replace('-', ':').ToUpper() }
+            if ($placa.Mac.Length -eq 12) { $macs += ((($placa.Mac -split '(.{2})') | Where-Object { $_ -ne '' }) -join ':').ToUpper() }
         }
     }
     catch {}
     $filas = @()
-    try { $filas = @(Get-Printer -ErrorAction Stop | Where-Object { $_.Shared -and "$($_.ShareName)" -ne "" } | ForEach-Object { $_.ShareName }) } catch {}
+    # Win32_Printer e nao Get-Printer: o Get-Printer carrega o modulo de impressao do
+    # Windows (mais 1,4 s na primeira vez) so para listar as filas compartilhadas
+    try { $filas = @(Get-WmiObject Win32_Printer -Filter "Shared=True" -ErrorAction Stop | Where-Object { "$($_.ShareName)" -ne "" } | ForEach-Object { $_.ShareName }) } catch {}
     $ips = @($ips | Select-Object -Unique)
     $macs = @($macs | Select-Object -Unique)
     $textoFilas = "nenhuma impressora compartilhada"
@@ -7221,6 +7904,10 @@ function Show-PrinterManager {
         $pnlDrivers.AutoScroll = $true
         $pnlDrivers.Visible = $false
         [void]$Script:PrinterManagerForm.Controls.Add($pnlDrivers)
+        # Sem refazer o layout a cada um dos ~70 botoes: volta a desenhar no fim da montagem
+        $pnlDrivers.SuspendLayout()
+        # IP, MAC e fila deste PC (aba LPR) so carregam quando a aba abre
+        $Script:LprDadosCarregados = $false
 
         # Botões de Tabulação (Header da Janela) - 3 abas
         $tabActiveColor = [System.Drawing.Color]::FromArgb(14, 88, 62)
@@ -7252,6 +7939,17 @@ function Show-PrinterManager {
         })
 
         $btnTabLpr.Add_Click({
+            # IP, MAC e fila deste PC so na primeira vez que a aba abre: consultar a
+            # rede antes de mostrar a janela deixava a abertura lenta
+            if (-not $Script:LprDadosCarregados) {
+                $Script:LprDadosCarregados = $true
+                $Script:PrinterManagerForm.UseWaitCursor = $true
+                try {
+                    & $preencheIpSrv
+                    [void](& $mostraDadosOrigem)
+                }
+                finally { $Script:PrinterManagerForm.UseWaitCursor = $false }
+            }
             $pnlLocal.Visible = $false; $pnlLpr.Visible = $true; $pnlDrivers.Visible = $false; $pnlDrvBusca.Visible = $false
             $btnTabLocal.BackColor = $tabInactiveColor; $btnTabLocal.ForeColor = 'LightGray'
             $btnTabLpr.BackColor = $tabActiveColor; $btnTabLpr.ForeColor = 'White'
@@ -7591,6 +8289,7 @@ function Show-PrinterManager {
             })
         $btnDrvLimpar.Add_Click({ $txtDrvBusca.Text = ""; $txtDrvBusca.Focus() | Out-Null })
         & $aplicaFiltroDrv
+        $pnlDrivers.ResumeLayout()
 
         # -------------------------------------------------------------
         # CONTEÚDO DO PAINEL LOCAL (ABA 1)
@@ -8006,10 +8705,13 @@ function Show-PrinterManager {
         $txtIpSrv.Location = '15,340'; $txtIpSrv.Width = 315; $txtIpSrv.ReadOnly = $true
         $txtIpSrv.BackColor = [System.Drawing.Color]::FromArgb(45, 45, 50); $txtIpSrv.ForeColor = 'LimeGreen'; $txtIpSrv.BorderStyle = 'FixedSingle'
         $txtIpSrv.Font = New-Object System.Drawing.Font("Consolas", 10.5, [System.Drawing.FontStyle]::Bold)
-        try {
-            $activeIps = Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object { $_.IPAddress -notlike "127.*" -and $_.IPAddress -notlike "169.*" } | Select-Object -ExpandProperty IPAddress -Unique
-            $txtIpSrv.Text = $activeIps -join ", "
-        } catch { $txtIpSrv.Text = "IP não encontrado" }
+        # Preenchido quando a aba LPR abre (ver o clique da aba)
+        $preencheIpSrv = {
+            try {
+                $activeIps = Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object { $_.IPAddress -notlike "127.*" -and $_.IPAddress -notlike "169.*" } | Select-Object -ExpandProperty IPAddress -Unique
+                $txtIpSrv.Text = $activeIps -join ", "
+            } catch { $txtIpSrv.Text = "IP não encontrado" }
+        }
         [void]$pnlServerCard.Controls.Add($txtIpSrv)
 
         # MAC e fila junto do IP: e o que se digita no PC de destino, e o MAC
@@ -8025,7 +8727,6 @@ function Show-PrinterManager {
             $lblDadosOrigem.Text = "MAC : " + ($dadosPc.Macs -join ", ") + "`nFila: " + $filasTxt
             return $dadosPc
         }
-        [void](& $mostraDadosOrigem)
 
         $btnCopiarOrigem = New-Object System.Windows.Forms.Button
         $btnCopiarOrigem.Text = "COPIAR IP, MAC E FILA"; $btnCopiarOrigem.Location = '15,412'; $btnCopiarOrigem.Size = '315,30'
@@ -10308,11 +11009,11 @@ $Script:ToolTip.SetToolTip($bSpool, "Comando 'Stop-Service Spooler', deleta cont
 $bSpool.Add_Click({ Invoke-SpoolerReset })
 [void]$tbl.Controls.Add($bSpool)
 $bUsb = New-Object System.Windows.Forms.Button; $bUsb.Height = 50; $bUsb.Dock = 'Top'
-$bUsb.Text = "Corrigir Impressora USB que Desconecta"; $bUsb.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
+$bUsb.Text = "Corrigir Impressora USB (MP-4200 e outras)"; $bUsb.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
 $bUsb.Cursor = 'Hand'
 Format-SupportBtn $bUsb $colorGray
-$Script:ToolTip.SetToolTip($bUsb, "Desliga a suspensao seletiva de USB no plano de energia e a economia de energia das portas USB. Resolve a impressora termica USB que para de responder depois de um tempo parada.")
-$bUsb.Add_Click({ Invoke-UsbPowerFix })
+$Script:ToolTip.SetToolTip($bUsb, "Para impressora térmica USB que fica offline depois de mexer no cabo, para depois de um tempo parada ou não imprime ao ligar o PC. Acha a porta USB conectada e aponta a impressora para ela, desliga a economia de energia (USB, impressora e PC), desliga a inicialização rápida e mostra o que foi feito.")
+$bUsb.Add_Click({ Invoke-CorrigirImpressoraUsb })
 [void]$tbl.Controls.Add($bUsb)
 
 $bNetR = New-Object System.Windows.Forms.Button; $bNetR.Height = 50; $bNetR.Dock = 'Top'
