@@ -7207,6 +7207,83 @@ function Test-PortaVarios {
     return $abertos
 }
 
+function ConvertFrom-RespostaNbstat {
+    # Resposta do NBSTAT (RFC 1002): devolve o nome do PC (sufixo 00 que nao e grupo)
+    param([byte[]]$Resp)
+    try {
+        if ($null -eq $Resp -or $Resp.Length -lt 57) { return "" }
+        $pos = 12
+        if (($Resp[$pos] -band 0xC0) -eq 0xC0) { $pos += 2 }
+        else { while ($pos -lt $Resp.Length -and $Resp[$pos] -ne 0) { $pos += $Resp[$pos] + 1 }; $pos++ }
+        $pos += 10
+        if ($pos -ge $Resp.Length) { return "" }
+        $qtd = $Resp[$pos]; $pos++
+        for ($n = 0; $n -lt $qtd -and ($pos + 18) -le $Resp.Length; $n++) {
+            $nome = [System.Text.Encoding]::ASCII.GetString($Resp, $pos, 15).Trim()
+            $sufixo = $Resp[$pos + 15]
+            $ehGrupo = (($Resp[$pos + 16] -band 0x80) -ne 0)
+            $pos += 18
+            if ($sufixo -eq 0x00 -and -not $ehGrupo -and $nome -ne "") { return $nome }
+        }
+    }
+    catch {}
+    return ""
+}
+
+function Get-NomesPcs {
+    # Nome de varios PCs ao mesmo tempo, com a janela respondendo. Pergunta direto
+    # ao PC pelo NetBIOS (o mesmo do "nbtstat -A"): o DNS reverso do roteador quase
+    # nunca conhece os PCs da loja. O DNS fica de reserva. Devolve hashtable IP -> nome.
+    param([string[]]$Ips, [int]$TimeoutMs = 2500, [int]$PortaNb = 137)
+    $nomes = @{}
+    $lista = @($Ips | Where-Object { "$_".Trim() -ne "" } | Select-Object -Unique)
+    if ($lista.Count -eq 0) { return $nomes }
+
+    $dns = @{}
+    foreach ($ip in $lista) { try { $dns[$ip] = [System.Net.Dns]::GetHostEntryAsync($ip) } catch {} }
+
+    # Consulta NBSTAT pelo nome "*"
+    $pacote = [byte[]](0x58, 0x4D, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x20, 0x43, 0x4B) +
+    [byte[]](@(0x41) * 30) + [byte[]](0x00, 0x00, 0x21, 0x00, 0x01)
+    $udp = $null
+    try {
+        $udp = New-Object System.Net.Sockets.UdpClient(0)
+        # Sem isso o "porta inalcancavel" de um PC derruba a leitura dos outros
+        try { [void]$udp.Client.IOControl(-1744830452, [byte[]](0, 0, 0, 0), $null) } catch {}
+        foreach ($ip in $lista) { try { [void]$udp.Send($pacote, $pacote.Length, $ip, $PortaNb) } catch {} }
+    }
+    catch { $udp = $null }
+
+    $relogio = [System.Diagnostics.Stopwatch]::StartNew()
+    while ($relogio.ElapsedMilliseconds -lt $TimeoutMs) {
+        while ($null -ne $udp -and $udp.Available -gt 0) {
+            try {
+                $origem = New-Object System.Net.IPEndPoint([System.Net.IPAddress]::Any, 0)
+                $resp = $udp.Receive([ref]$origem)
+                $nomeNb = ConvertFrom-RespostaNbstat $resp
+                if ($nomeNb -ne "") { $nomes[$origem.Address.ToString()] = $nomeNb }
+            }
+            catch {}
+        }
+        # DNS que falhou nao encerra a espera: o NetBIOS ainda pode responder
+        $faltam = @($lista | Where-Object { -not $nomes.ContainsKey($_) -and -not ($dns.ContainsKey($_) -and $dns[$_].IsCompleted -and -not $dns[$_].IsFaulted) })
+        if ($faltam.Count -eq 0) { break }
+        [System.Windows.Forms.Application]::DoEvents()
+        Start-Sleep -Milliseconds 30
+    }
+    if ($null -ne $udp) { try { $udp.Close() } catch {} }
+
+    foreach ($ip in $lista) {
+        if ($nomes.ContainsKey($ip) -or -not $dns.ContainsKey($ip)) { continue }
+        try {
+            $t = $dns[$ip]
+            if ($t.IsCompleted -and -not $t.IsFaulted -and "$($t.Result.HostName)" -ne "" -and $t.Result.HostName -ne $ip) { $nomes[$ip] = $t.Result.HostName }
+        }
+        catch {}
+    }
+    return $nomes
+}
+
 function Get-SubredesLocais {
     # Prefixo /24 de cada placa de rede ligada ("192.168.3"): e o que a varredura cobre
     $subs = @()
@@ -7624,13 +7701,15 @@ function Show-PortasLpr {
                     $todos = @(foreach ($s in $subs) { for ($i = 1; $i -le 254; $i++) { "$s.$i" } })
                     $todos = @($todos | Where-Object { $meusIps -notcontains $_ })
                     & $statusLpr "Procurando PCs com o LPD ativo (porta 515)..." $Script:UiAmarelo
-                    foreach ($ipAberto in @(Test-PortaVarios -Ips $todos -Porta $portaLpd -TimeoutMs 1500)) {
+                    $ipsAbertos = @(Test-PortaVarios -Ips $todos -Porta $portaLpd -TimeoutMs 1500)
+                    $nomesPcs = @{}
+                    if ($ipsAbertos.Count -gt 0) {
+                        & $statusLpr "Buscando o nome de $($ipsAbertos.Count) PC(s)..." $Script:UiAmarelo
+                        $nomesPcs = Get-NomesPcs -Ips $ipsAbertos
+                    }
+                    foreach ($ipAberto in $ipsAbertos) {
                         $nomePc = ""
-                        try {
-                            $tarefaNome = [System.Net.Dns]::GetHostEntryAsync($ipAberto)
-                            if ($tarefaNome.Wait(800)) { $nomePc = $tarefaNome.Result.HostName }
-                        }
-                        catch {}
+                        if ($nomesPcs.ContainsKey($ipAberto)) { $nomePc = $nomesPcs[$ipAberto] }
                         $macPc = @($tabela | Where-Object { $_.IP -eq $ipAberto } | ForEach-Object { $_.Mac }) | Select-Object -First 1
                         $achados += [PSCustomObject]@{ IP = $ipAberto; Nome = $nomePc; Mac = "$macPc" }
                     }
@@ -7651,7 +7730,8 @@ function Show-PortasLpr {
                 if ($achados.Count -eq 0) { return }
                 $pc = & $escolherPcLpr $achados
                 if ($null -eq $pc) { return }
-                if ($lvLpr.SelectedItems.Count -eq 0) { & $statusLpr "Selecione na lista a porta que vai receber o IP $($pc.IP)." $Script:UiAmarelo; return }
+                # Sem porta para corrigir (PC ainda sem impressora LPR): cria a impressora com o PC escolhido
+                if ($lvLpr.SelectedItems.Count -eq 0) { & $criarNovaLpr $pc.IP; return }
                 $selLpr = $lvLpr.SelectedItems[0].Tag
                 if ($pc.IP -eq $selLpr.Servidor) { & $statusLpr "A porta $($selLpr.Porta) já aponta para $($pc.IP)." $Script:UiAmarelo; return }
                 $r = [System.Windows.Forms.MessageBox]::Show($f,
@@ -7662,6 +7742,7 @@ function Show-PortasLpr {
 
         # Formulario da nova impressora LPR. Devolve Ip / Fila / Nome / Driver ou $null.
         $pedirNovaLpr = {
+            param([string]$IpInicial = "")
             $dlg = New-ToolForm "Nova impressora LPR" 540 430
             $dlg.FormBorderStyle = 'FixedDialog'
             $dlg.MaximizeBox = $false
@@ -7680,7 +7761,7 @@ function Show-PortasLpr {
                 return $t
             }
             New-ToolLabel $dlg "IP do PC que tem a impressora USB:" 20 18 9.5 | Out-Null
-            $txtNovaIp = & $campoNova 42 320 ""
+            $txtNovaIp = & $campoNova 42 320 $IpInicial
             $btnNovaAchar = New-ToolButton $dlg "PROCURAR NA REDE" 350 40 150 30 $Script:UiCinza $null "Lista os PCs com o LPD ativo para escolher"
             New-ToolLabel $dlg "Nome do compartilhamento no PC da impressora (fila):" 20 82 9.5 | Out-Null
             $txtNovaFila = & $campoNova 106 320 "IMPRESSORA"
@@ -7737,16 +7818,22 @@ function Show-PortasLpr {
                 })
             $btnNovaCanc.Add_Click({ $dlg.DialogResult = 'Cancel'; $dlg.Close() })
             $dlg.CancelButton = $btnNovaCanc
-            $dlg.Add_Shown({ $txtNovaIp.Focus() | Out-Null })
+            $dlg.Add_Shown({
+                    if ($txtNovaIp.Text -ne "") { $txtNovaFila.Focus() | Out-Null; $txtNovaFila.SelectAll() }
+                    else { $txtNovaIp.Focus() | Out-Null }
+                })
             $dadosNova = $null
             if ($dlg.ShowDialog($f) -eq [System.Windows.Forms.DialogResult]::OK) { $dadosNova = $dlg.Tag }
             $dlg.Dispose()
             return $dadosNova
         }
 
-        $btnLprNova.Add_Click({
+        # Cria porta + impressora; usada pelo NOVA IMPRESSORA LPR e pelo PROCURAR NA REDE
+        # quando nao ha porta para corrigir.
+        $criarNovaLpr = {
+                param([string]$IpInicial = "")
                 if ($Script:LprOcupado) { return }
-                $nova = & $pedirNovaLpr
+                $nova = & $pedirNovaLpr $IpInicial
                 if ($null -eq $nova) { return }
                 $responde = $false
                 & $travarLpr $true
@@ -7790,7 +7877,9 @@ function Show-PortasLpr {
                     }
                     catch { & $statusLpr "Não foi possível enviar o teste: $($_.Exception.Message)" $Script:UiVermelho }
                 }
-            })
+            }
+
+        $btnLprNova.Add_Click({ & $criarNovaLpr })
 
         $btnLprTeste.Add_Click({
                 if ($Script:LprOcupado -or $lvLpr.SelectedItems.Count -eq 0) { return }
