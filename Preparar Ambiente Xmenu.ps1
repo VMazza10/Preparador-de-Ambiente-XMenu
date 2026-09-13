@@ -1222,18 +1222,22 @@ function Get-XmlNomeLote {
     #   Periodo .  XML NFC-e - Agosto de 2026 | ... - Julho a Agosto de 2026
     #              XML NFC-e - 01-08-2026 a 12-09-2026 | ... - 12-09-2026
     #   Chave ...  XML NFC-e - 3 chaves de acesso
+    #   Pedido ..  XML NFC-e - Pedido 73432 | ... - Pedidos 73400 a 73432
     #   -Series: series das notas gravadas, usadas quando nao ha serie escolhida
     #            ("Séries 7 e 8"; acima de 3 vira "4 séries")
+    #   -Notas: no modo Pedido, os numeros dos pedidos
+    #   -Titulo: "Espelho NFC-e" no lote de PDFs
     param(
-        [ValidateSet('Serie', 'Periodo', 'Chave')][string]$Modo,
+        [ValidateSet('Serie', 'Periodo', 'Chave', 'Pedido')][string]$Modo,
         [string]$Serie = "",
         [int[]]$Series = @(),
         [int[]]$Notas = @(),
         [datetime]$De,
         [datetime]$Ate,
-        [int]$Quantidade = 0
+        [int]$Quantidade = 0,
+        [string]$Titulo = "XML NFC-e"
     )
-    $partes = @("XML NFC-e")
+    $partes = @($Titulo)
     if ("$Serie".Trim() -ne "") { $partes += "Série " + "$Serie".Trim() }
     else {
         $listaSeries = @($Series | Sort-Object -Unique)
@@ -1244,17 +1248,19 @@ function Get-XmlNomeLote {
         elseif ($listaSeries.Count -gt 3) { $partes += "$($listaSeries.Count) séries" }
     }
 
-    if ($Modo -eq 'Serie') {
+    if ($Modo -eq 'Serie' -or $Modo -eq 'Pedido') {
+        $palavra = "Nota"
+        if ($Modo -eq 'Pedido') { $palavra = "Pedido" }
         $ord = @($Notas | Sort-Object -Unique)
-        if ($ord.Count -eq 1) { $partes += "Nota $($ord[0])" }
+        if ($ord.Count -eq 1) { $partes += "$palavra $($ord[0])" }
         elseif ($ord.Count -gt 1) {
             # "1-10, 15, 20-25" vira "1 a 10, 15 e 20 a 25"
             $trechos = @((ConvertTo-FaixaTexto $ord) -split ',\s*' | ForEach-Object { $_ -replace '-', ' a ' })
             $faixa = $trechos[-1]
             if ($trechos.Count -gt 1) { $faixa = ($trechos[0..($trechos.Count - 2)] -join ", ") + " e " + $faixa }
             # Lista picada demais nao cabe no nome: resume em quantidade + menor e maior
-            if ($faixa.Length -gt 40) { $partes += "$($ord.Count) notas de $($ord[0]) a $($ord[-1])" }
-            else { $partes += "Notas $faixa" }
+            if ($faixa.Length -gt 40) { $partes += "$($ord.Count) $($palavra.ToLower())s de $($ord[0]) a $($ord[-1])" }
+            else { $partes += "$($palavra)s $faixa" }
         }
     }
     elseif ($Modo -eq 'Periodo') {
@@ -1286,9 +1292,10 @@ function Get-XmlNomeLote {
 function New-XmlLotePasta {
     # Cria a pasta do lote em "Arquivos Xmenu\XMLs" sem nunca sobrescrever outra.
     # Confere o zip tambem: quem manda o zip e apaga a pasta nao pode perder o
-    # zip antigo quando baixar o mesmo filtro de novo.
-    param([string]$Nome)
-    $raiz = Join-Path $Script:DownloadFolder "XMLs"
+    # zip antigo quando baixar o mesmo filtro de novo. -Subpasta troca a pasta
+    # de cima (os PDFs vao para "Espelhos NFC-e").
+    param([string]$Nome, [string]$Subpasta = "XMLs")
+    $raiz = Join-Path $Script:DownloadFolder $Subpasta
     if (-not (Test-Path $raiz)) { New-Item -Path $raiz -ItemType Directory -Force | Out-Null }
     $limpo = (($Nome -replace '[\\/:*?"<>|]', '-') -replace '\s+', ' ').Trim()
     if ($limpo.Length -gt 90) { $limpo = $limpo.Substring(0, 90) }
@@ -1303,6 +1310,887 @@ function New-XmlLotePasta {
     }
     New-Item -Path $destino -ItemType Directory -Force | Out-Null
     return $destino
+}
+
+# -----------------------------------------------------------------------------
+# DANFE NFC-e EM PDF
+# Espelho da nota no formato do cupom que o PDV imprime (bobina de 80 mm, letra
+# de largura fixa), feito a partir do XML autorizado que ja vem do banco. O PDF
+# e escrito pelo proprio script com as fontes Courier que todo leitor de PDF ja
+# tem: nao depende de navegador, de impressora virtual nem de internet.
+# -----------------------------------------------------------------------------
+
+function Initialize-QrCodigo {
+    # Gerador de QR Code (modo byte, correcao nivel M) em C#, compilado so na
+    # primeira vez que precisa: em PowerShell puro cada QR levava segundos.
+    if ('XMenuTools.QrCodigo' -as [type]) { return }
+    $codigoQr = @'
+using System;
+using System.Collections.Generic;
+using System.Text;
+
+namespace XMenuTools
+{
+    public static class QrCodigo
+    {
+        static readonly int[] EccPorBloco = { -1, 10, 16, 26, 18, 24, 16, 18, 22, 22, 26, 30, 22, 22, 24, 24, 28, 28, 26, 26, 26, 26, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28 };
+        static readonly int[] NumBlocos = { -1, 1, 1, 1, 2, 2, 4, 4, 4, 5, 5, 5, 8, 9, 9, 10, 10, 11, 13, 14, 16, 17, 17, 18, 20, 21, 23, 25, 26, 28, 29, 31, 33, 35, 37, 38, 40, 43, 45, 47, 49 };
+
+        // Matriz [linha, coluna]; true = modulo escuro
+        public static bool[,] Gerar(string texto)
+        {
+            byte[] dados = Encoding.UTF8.GetBytes(texto ?? "");
+            int versao = 0;
+            int capBits = 0;
+            for (int v = 1; v <= 40; v++)
+            {
+                capBits = NumDataCodewords(v) * 8;
+                int usados = 4 + (v <= 9 ? 8 : 16) + dados.Length * 8;
+                if (usados <= capBits) { versao = v; break; }
+            }
+            if (versao == 0) throw new ArgumentException("Texto grande demais para um QR Code.");
+
+            List<int> bits = new List<int>();
+            AddBits(bits, 4, 4);
+            AddBits(bits, dados.Length, versao <= 9 ? 8 : 16);
+            foreach (byte b in dados) AddBits(bits, b, 8);
+            AddBits(bits, 0, Math.Min(4, capBits - bits.Count));
+            AddBits(bits, 0, (8 - bits.Count % 8) % 8);
+            for (int pad = 0xEC; bits.Count < capBits; pad ^= 0xEC ^ 0x11) AddBits(bits, pad, 8);
+
+            byte[] cw = new byte[bits.Count / 8];
+            for (int i = 0; i < bits.Count; i++) cw[i >> 3] |= (byte)(bits[i] << (7 - (i & 7)));
+
+            Matriz m = new Matriz(versao);
+            m.DesenharFuncoes();
+            m.DesenharCodewords(AdicionarEcc(cw, versao));
+            // Mascara: primeiro a que menos forma "falsos quadrados de posicao" nos
+            // dados (com eles o leitor do celular se perde e nao le o QR), depois a
+            // pontuacao da norma
+            int melhor = 0;
+            int menor = int.MaxValue;
+            for (int k = 0; k < 8; k++)
+            {
+                m.AplicarMascara(k);
+                m.DesenharFormato(k);
+                int p = m.FalsosLocalizadores() * 100000 + m.Penalidade();
+                if (p < menor) { menor = p; melhor = k; }
+                m.AplicarMascara(k);
+            }
+            m.AplicarMascara(melhor);
+            m.DesenharFormato(melhor);
+            return m.Modulos;
+        }
+
+        static void AddBits(List<int> lista, int valor, int qtd)
+        {
+            for (int i = qtd - 1; i >= 0; i--) lista.Add((valor >> i) & 1);
+        }
+
+        static bool Bit(int x, int i) { return ((x >> i) & 1) != 0; }
+
+        static int NumRawModules(int v)
+        {
+            int r = (16 * v + 128) * v + 64;
+            if (v >= 2)
+            {
+                int na = v / 7 + 2;
+                r -= (25 * na - 10) * na - 55;
+                if (v >= 7) r -= 36;
+            }
+            return r;
+        }
+
+        static int NumDataCodewords(int v)
+        {
+            return NumRawModules(v) / 8 - EccPorBloco[v] * NumBlocos[v];
+        }
+
+        static byte[] AdicionarEcc(byte[] dados, int v)
+        {
+            int numBlocos = NumBlocos[v];
+            int eccLen = EccPorBloco[v];
+            int raw = NumRawModules(v) / 8;
+            int curtos = numBlocos - raw % numBlocos;
+            int curtoLen = raw / numBlocos;
+            byte[] divisor = Divisor(eccLen);
+            byte[][] blocos = new byte[numBlocos][];
+            int k = 0;
+            for (int i = 0; i < numBlocos; i++)
+            {
+                int datLen = curtoLen - eccLen + (i < curtos ? 0 : 1);
+                byte[] dat = new byte[datLen];
+                Array.Copy(dados, k, dat, 0, datLen);
+                k += datLen;
+                byte[] bloco = new byte[curtoLen + 1];
+                Array.Copy(dat, bloco, datLen);
+                byte[] ecc = Resto(dat, divisor);
+                Array.Copy(ecc, 0, bloco, bloco.Length - eccLen, eccLen);
+                blocos[i] = bloco;
+            }
+            byte[] res = new byte[raw];
+            k = 0;
+            for (int i = 0; i < blocos[0].Length; i++)
+                for (int j = 0; j < numBlocos; j++)
+                    if (i != curtoLen - eccLen || j >= curtos) { res[k] = blocos[j][i]; k++; }
+            return res;
+        }
+
+        static int Mul(int x, int y)
+        {
+            int z = 0;
+            for (int i = 7; i >= 0; i--)
+            {
+                z = (z << 1) ^ ((z >> 7) * 0x11D);
+                z ^= ((y >> i) & 1) * x;
+            }
+            return z;
+        }
+
+        static byte[] Divisor(int grau)
+        {
+            byte[] r = new byte[grau];
+            r[grau - 1] = 1;
+            int raiz = 1;
+            for (int i = 0; i < grau; i++)
+            {
+                for (int j = 0; j < grau; j++)
+                {
+                    r[j] = (byte)Mul(r[j], raiz);
+                    if (j + 1 < grau) r[j] ^= r[j + 1];
+                }
+                raiz = Mul(raiz, 2);
+            }
+            return r;
+        }
+
+        static byte[] Resto(byte[] dados, byte[] divisor)
+        {
+            byte[] r = new byte[divisor.Length];
+            foreach (byte b in dados)
+            {
+                int fator = b ^ r[0];
+                Array.Copy(r, 1, r, 0, r.Length - 1);
+                r[r.Length - 1] = 0;
+                for (int i = 0; i < r.Length; i++) r[i] ^= (byte)Mul(divisor[i], fator);
+            }
+            return r;
+        }
+
+        class Matriz
+        {
+            public readonly int Versao;
+            public readonly int Tam;
+            public readonly bool[,] Modulos;
+            readonly bool[,] Funcao;
+
+            public Matriz(int versao)
+            {
+                Versao = versao;
+                Tam = versao * 4 + 17;
+                Modulos = new bool[Tam, Tam];
+                Funcao = new bool[Tam, Tam];
+            }
+
+            void Set(int x, int y, bool escuro) { Modulos[y, x] = escuro; Funcao[y, x] = true; }
+
+            public void DesenharFuncoes()
+            {
+                for (int i = 0; i < Tam; i++) { Set(6, i, i % 2 == 0); Set(i, 6, i % 2 == 0); }
+                Localizador(3, 3);
+                Localizador(Tam - 4, 3);
+                Localizador(3, Tam - 4);
+                int[] pos = PosicoesAlinhamento();
+                int n = pos.Length;
+                for (int i = 0; i < n; i++)
+                    for (int j = 0; j < n; j++)
+                        if (!(i == 0 && j == 0 || i == 0 && j == n - 1 || i == n - 1 && j == 0))
+                            Alinhamento(pos[i], pos[j]);
+                DesenharFormato(0);
+                DesenharVersao();
+            }
+
+            int[] PosicoesAlinhamento()
+            {
+                if (Versao == 1) return new int[0];
+                int n = Versao / 7 + 2;
+                int passo = (Versao == 32) ? 26 : (Versao * 4 + n * 2 + 1) / (n * 2 - 2) * 2;
+                int[] r = new int[n];
+                r[0] = 6;
+                for (int i = n - 1, p = Tam - 7; i >= 1; i--, p -= passo) r[i] = p;
+                return r;
+            }
+
+            void Localizador(int x, int y)
+            {
+                for (int dy = -4; dy <= 4; dy++)
+                    for (int dx = -4; dx <= 4; dx++)
+                    {
+                        int d = Math.Max(Math.Abs(dx), Math.Abs(dy));
+                        int xx = x + dx, yy = y + dy;
+                        if (xx >= 0 && xx < Tam && yy >= 0 && yy < Tam) Set(xx, yy, d != 2 && d != 4);
+                    }
+            }
+
+            void Alinhamento(int x, int y)
+            {
+                for (int dy = -2; dy <= 2; dy++)
+                    for (int dx = -2; dx <= 2; dx++)
+                        Set(x + dx, y + dy, Math.Max(Math.Abs(dx), Math.Abs(dy)) != 1);
+            }
+
+            public void DesenharFormato(int mascara)
+            {
+                // Nivel M = bits 00
+                int dados = mascara;
+                int resto = dados;
+                for (int i = 0; i < 10; i++) resto = (resto << 1) ^ ((resto >> 9) * 0x537);
+                int bits = (dados << 10 | resto) ^ 0x5412;
+                for (int i = 0; i <= 5; i++) Set(8, i, Bit(bits, i));
+                Set(8, 7, Bit(bits, 6));
+                Set(8, 8, Bit(bits, 7));
+                Set(7, 8, Bit(bits, 8));
+                for (int i = 9; i < 15; i++) Set(14 - i, 8, Bit(bits, i));
+                for (int i = 0; i < 8; i++) Set(Tam - 1 - i, 8, Bit(bits, i));
+                for (int i = 8; i < 15; i++) Set(8, Tam - 15 + i, Bit(bits, i));
+                Set(8, Tam - 8, true);
+            }
+
+            void DesenharVersao()
+            {
+                if (Versao < 7) return;
+                int resto = Versao;
+                for (int i = 0; i < 12; i++) resto = (resto << 1) ^ ((resto >> 11) * 0x1F25);
+                int bits = Versao << 12 | resto;
+                for (int i = 0; i < 18; i++)
+                {
+                    bool b = Bit(bits, i);
+                    int a = Tam - 11 + i % 3;
+                    int c = i / 3;
+                    Set(a, c, b);
+                    Set(c, a, b);
+                }
+            }
+
+            public void DesenharCodewords(byte[] dados)
+            {
+                int i = 0;
+                for (int direita = Tam - 1; direita >= 1; direita -= 2)
+                {
+                    if (direita == 6) direita = 5;
+                    for (int vert = 0; vert < Tam; vert++)
+                        for (int j = 0; j < 2; j++)
+                        {
+                            int x = direita - j;
+                            bool subindo = ((direita + 1) & 2) == 0;
+                            int y = subindo ? Tam - 1 - vert : vert;
+                            if (!Funcao[y, x] && i < dados.Length * 8)
+                            {
+                                Modulos[y, x] = Bit(dados[i >> 3], 7 - (i & 7));
+                                i++;
+                            }
+                        }
+                }
+            }
+
+            public void AplicarMascara(int k)
+            {
+                for (int y = 0; y < Tam; y++)
+                    for (int x = 0; x < Tam; x++)
+                    {
+                        bool inv;
+                        switch (k)
+                        {
+                            case 0: inv = (x + y) % 2 == 0; break;
+                            case 1: inv = y % 2 == 0; break;
+                            case 2: inv = x % 3 == 0; break;
+                            case 3: inv = (x + y) % 3 == 0; break;
+                            case 4: inv = (x / 3 + y / 2) % 2 == 0; break;
+                            case 5: inv = x * y % 2 + x * y % 3 == 0; break;
+                            case 6: inv = (x * y % 2 + x * y % 3) % 2 == 0; break;
+                            default: inv = ((x + y) % 2 + x * y % 3) % 2 == 0; break;
+                        }
+                        if (inv && !Funcao[y, x]) Modulos[y, x] = !Modulos[y, x];
+                    }
+            }
+
+            // Pontos escuros onde os dados desenham o 1:1:3:1:1 do quadrado de
+            // posicao na horizontal e na vertical ao mesmo tempo (centro de 2 a 4,
+            // que e a folga que os leitores aceitam)
+            public int FalsosLocalizadores()
+            {
+                int total = 0;
+                for (int y = 0; y < Tam; y++)
+                    for (int x = 0; x < Tam; x++)
+                    {
+                        if (!Modulos[y, x]) continue;
+                        if ((x < 8 && y < 8) || (x >= Tam - 8 && y < 8) || (x < 8 && y >= Tam - 8)) continue;
+                        if (PadraoEm(x, y, 1, 0) && PadraoEm(x, y, 0, 1)) total++;
+                    }
+                return total;
+            }
+
+            int Corrida(ref int x, ref int y, int dx, int dy, bool cor, int limite)
+            {
+                int n = 0;
+                while (n <= limite)
+                {
+                    bool dentro = x >= 0 && x < Tam && y >= 0 && y < Tam;
+                    bool atual = dentro && Modulos[y, x];
+                    if (atual != cor) break;
+                    if (!dentro) { n = limite + 1; break; }
+                    n++; x += dx; y += dy;
+                }
+                return n;
+            }
+
+            bool PadraoEm(int x0, int y0, int dx, int dy)
+            {
+                int x = x0, y = y0;
+                int centroTras = Corrida(ref x, ref y, -dx, -dy, true, 6);
+                int claroTras = Corrida(ref x, ref y, -dx, -dy, false, 3);
+                int escuroTras = Corrida(ref x, ref y, -dx, -dy, true, 3);
+                x = x0 + dx; y = y0 + dy;
+                int centroFrente = Corrida(ref x, ref y, dx, dy, true, 6);
+                int claroFrente = Corrida(ref x, ref y, dx, dy, false, 3);
+                int escuroFrente = Corrida(ref x, ref y, dx, dy, true, 3);
+                int centro = centroTras + centroFrente;
+                return centro >= 2 && centro <= 4 && claroTras == 1 && escuroTras == 1 && claroFrente == 1 && escuroFrente == 1;
+            }
+
+            public int Penalidade()
+            {
+                int r = 0;
+                for (int passada = 0; passada < 2; passada++)
+                {
+                    for (int a = 0; a < Tam; a++)
+                    {
+                        bool cor = false;
+                        int run = 0;
+                        int[] hist = new int[7];
+                        for (int b = 0; b < Tam; b++)
+                        {
+                            bool atual = passada == 0 ? Modulos[a, b] : Modulos[b, a];
+                            if (atual == cor)
+                            {
+                                run++;
+                                if (run == 5) r += 3; else if (run > 5) r++;
+                            }
+                            else
+                            {
+                                AddHist(run, hist);
+                                if (!cor) r += ContaPadroes(hist) * 40;
+                                cor = atual;
+                                run = 1;
+                            }
+                        }
+                        r += FechaEConta(cor, run, hist) * 40;
+                    }
+                }
+                for (int y = 0; y < Tam - 1; y++)
+                    for (int x = 0; x < Tam - 1; x++)
+                    {
+                        bool c = Modulos[y, x];
+                        if (c == Modulos[y, x + 1] && c == Modulos[y + 1, x] && c == Modulos[y + 1, x + 1]) r += 3;
+                    }
+                int escuros = 0;
+                foreach (bool m in Modulos) if (m) escuros++;
+                int total = Tam * Tam;
+                int k = (Math.Abs(escuros * 20 - total * 10) + total - 1) / total - 1;
+                return r + k * 10;
+            }
+
+            int ContaPadroes(int[] h)
+            {
+                int n = h[1];
+                bool nucleo = n > 0 && h[2] == n && h[3] == n * 3 && h[4] == n && h[5] == n;
+                return (nucleo && h[0] >= n * 4 && h[6] >= n ? 1 : 0) + (nucleo && h[6] >= n * 4 && h[0] >= n ? 1 : 0);
+            }
+
+            int FechaEConta(bool cor, int run, int[] h)
+            {
+                if (cor) { AddHist(run, h); run = 0; }
+                run += Tam;
+                AddHist(run, h);
+                return ContaPadroes(h);
+            }
+
+            void AddHist(int run, int[] h)
+            {
+                if (h[0] == 0) run += Tam;
+                Array.Copy(h, 0, h, 1, h.Length - 1);
+                h[0] = run;
+            }
+        }
+    }
+}
+'@
+    Add-Type -TypeDefinition $codigoQr -Language CSharp
+}
+
+function Get-XmlNoTexto {
+    # Texto do primeiro no no caminho de nomes locais ("pag/vTroco"), sem depender
+    # do namespace do XML. Devolve "" quando o no nao existe.
+    param($Pai, [string]$Caminho)
+    if ($null -eq $Pai) { return "" }
+    $xp = ".//" + ((($Caminho -split '/') | ForEach-Object { "*[local-name()='$_']" }) -join '/')
+    $no = $Pai.SelectSingleNode($xp)
+    if ($null -eq $no) { return "" }
+    return "$($no.InnerText)".Trim()
+}
+
+function Format-DanfeValor {
+    # "114.8" do XML vira "114,80". -Unitario mantem ate 4 casas quando o preco
+    # tem (combustivel, granel) para nao arredondar; -Quantidade usa 3 casas.
+    param([string]$Valor, [switch]$Unitario, [switch]$Quantidade)
+    $inv = [System.Globalization.CultureInfo]::InvariantCulture
+    $br = [System.Globalization.CultureInfo]::GetCultureInfo("pt-BR")
+    $d = [decimal]0
+    if (-not [decimal]::TryParse("$Valor".Trim(), [System.Globalization.NumberStyles]::Number, $inv, [ref]$d)) { return "$Valor".Trim() }
+    if ($Quantidade) { return $d.ToString("#,##0.000", $br) }
+    if ($Unitario) { return $d.ToString("#,##0.00##", $br) }
+    return $d.ToString("#,##0.00", $br)
+}
+
+function Format-DanfeDocumento {
+    # CNPJ (tambem o alfanumerico) e CPF com pontuacao
+    param([string]$Numero)
+    $s = ("$Numero" -replace '[^0-9A-Za-z]', '').ToUpper()
+    if ($s.Length -eq 14) { return $s.Substring(0, 2) + "." + $s.Substring(2, 3) + "." + $s.Substring(5, 3) + "/" + $s.Substring(8, 4) + "-" + $s.Substring(12, 2) }
+    if ($s.Length -eq 11) { return $s.Substring(0, 3) + "." + $s.Substring(3, 3) + "." + $s.Substring(6, 3) + "-" + $s.Substring(9, 2) }
+    return "$Numero".Trim()
+}
+
+function Format-DanfeData {
+    # "2026-09-13T00:32:11-03:00" vira "13/09/2026 00:32:11", no horario escrito
+    # na nota (sem converter fuso)
+    param([string]$Iso)
+    if ("$Iso" -match '^(\d{4})-(\d{2})-(\d{2})(?:T(\d{2}):(\d{2}):(\d{2}))?') {
+        $data = $matches[3] + "/" + $matches[2] + "/" + $matches[1]
+        if ($matches[4]) { $data = $data + " " + $matches[4] + ":" + $matches[5] + ":" + $matches[6] }
+        return $data
+    }
+    return "$Iso".Trim()
+}
+
+function Get-DanfeFormaPagamento {
+    # Nome curto do meio de pagamento (tPag), para caber na linha dos totais
+    param([string]$Codigo, [string]$Descricao = "")
+    $nomes = @{
+        '01' = 'Dinheiro'; '02' = 'Cheque'; '03' = 'Cartão de Crédito'; '04' = 'Cartão de Débito'
+        '05' = 'Crédito Loja'; '10' = 'Vale Alimentação'; '11' = 'Vale Refeição'; '12' = 'Vale Presente'
+        '13' = 'Vale Combustível'; '15' = 'Boleto Bancário'; '16' = 'Depósito Bancário'; '17' = 'PIX'
+        '18' = 'Transferência'; '19' = 'Cashback'; '20' = 'PIX Estático'; '90' = 'Sem Pagamento'
+    }
+    $cod = "$Codigo".Trim()
+    if ("$Descricao".Trim() -ne "" -and ($cod -eq '99' -or -not $nomes.ContainsKey($cod))) { return "$Descricao".Trim() }
+    if ($nomes.ContainsKey($cod)) { return $nomes[$cod] }
+    return "Outros"
+}
+
+function Split-DanfeTexto {
+    # Quebra o texto em linhas de no maximo $Largura letras, pelas palavras.
+    # Palavra maior que a linha (URL, codigo) e cortada no meio.
+    param([string]$Texto, [int]$Largura)
+    $linhas = New-Object System.Collections.Generic.List[string]
+    foreach ($paragrafo in ("$Texto" -split "`r?`n")) {
+        $atual = ""
+        foreach ($palavra in ($paragrafo -split ' ')) {
+            if ($palavra -eq "") { continue }
+            while ($palavra.Length -gt $Largura) {
+                if ($atual -ne "") { $linhas.Add($atual); $atual = "" }
+                $linhas.Add($palavra.Substring(0, $Largura))
+                $palavra = $palavra.Substring($Largura)
+            }
+            if ($palavra -eq "") { continue }
+            if ($atual -eq "") { $atual = $palavra }
+            elseif ($atual.Length + 1 + $palavra.Length -le $Largura) { $atual = $atual + " " + $palavra }
+            else { $linhas.Add($atual); $atual = $palavra }
+        }
+        if ($atual -ne "") { $linhas.Add($atual) }
+    }
+    return , $linhas.ToArray()
+}
+
+function Get-DanfeNfceDados {
+    # Tira do XML da NFC-e (nfeProc, ou NFe solta) tudo que o DANFE mostra
+    param([string]$Xml)
+    $doc = New-Object System.Xml.XmlDocument
+    try { $doc.LoadXml($Xml) }
+    catch { throw "o XML da nota não abriu como documento válido" }
+    $raiz = $doc.DocumentElement
+    $inf = $doc.SelectSingleNode("//*[local-name()='infNFe']")
+    if ($null -eq $inf) { throw "o XML não tem os dados da nota (infNFe)" }
+    $ide = $inf.SelectSingleNode("*[local-name()='ide']")
+    $emit = $inf.SelectSingleNode("*[local-name()='emit']")
+    $dest = $inf.SelectSingleNode("*[local-name()='dest']")
+    $tot = $inf.SelectSingleNode("*[local-name()='total']/*[local-name()='ICMSTot']")
+
+    $modelo = Get-XmlNoTexto $ide "mod"
+    if ($modelo -ne "" -and $modelo -ne "65") { throw "a nota é modelo $modelo, e o espelho aqui é só de NFC-e (modelo 65)" }
+
+    $d = @{}
+    $d.Emitente = Get-XmlNoTexto $emit "xNome"
+    $cnpj = Get-XmlNoTexto $emit "CNPJ"
+    if ($cnpj -ne "") { $d.EmitenteDoc = "CNPJ " + (Format-DanfeDocumento $cnpj) }
+    else { $d.EmitenteDoc = "CPF " + (Format-DanfeDocumento (Get-XmlNoTexto $emit "CPF")) }
+
+    $end = $null
+    if ($null -ne $emit) { $end = $emit.SelectSingleNode("*[local-name()='enderEmit']") }
+    $rua = @((Get-XmlNoTexto $end "xLgr"), (Get-XmlNoTexto $end "nro"), (Get-XmlNoTexto $end "xCpl")) | Where-Object { $_ -ne "" }
+    $cidade = @((Get-XmlNoTexto $end "xMun"), (Get-XmlNoTexto $end "UF")) | Where-Object { $_ -ne "" }
+    $d.Endereco = (@(($rua -join ", "), (Get-XmlNoTexto $end "xBairro"), ($cidade -join "-")) | Where-Object { $_ -ne "" }) -join ", "
+
+    $d.Numero = (Get-XmlNoTexto $ide "nNF").PadLeft(9, '0')
+    $d.Serie = (Get-XmlNoTexto $ide "serie").PadLeft(3, '0')
+    $emissao = Get-XmlNoTexto $ide "dhEmi"
+    if ($emissao -eq "") { $emissao = Get-XmlNoTexto $ide "dEmi" }
+    $d.Emissao = Format-DanfeData $emissao
+    $d.Ambiente = Get-XmlNoTexto $ide "tpAmb"
+    $d.TipoEmissao = Get-XmlNoTexto $ide "tpEmis"
+    $d.Chave = ("$($inf.GetAttribute('Id'))" -replace '^NFe', '')
+
+    $itens = @()
+    foreach ($det in $inf.SelectNodes("*[local-name()='det']")) {
+        $prod = $det.SelectSingleNode("*[local-name()='prod']")
+        $itens += @{
+            Codigo = Get-XmlNoTexto $prod "cProd"; Descricao = Get-XmlNoTexto $prod "xProd"
+            Qtd = Get-XmlNoTexto $prod "qCom"; Un = Get-XmlNoTexto $prod "uCom"
+            Unit = Get-XmlNoTexto $prod "vUnCom"; Total = Get-XmlNoTexto $prod "vProd"
+        }
+    }
+    $d.Itens = $itens
+
+    $d.ValorTotal = Get-XmlNoTexto $tot "vProd"
+    $d.Desconto = Get-XmlNoTexto $tot "vDesc"
+    $d.ValorPagar = Get-XmlNoTexto $tot "vNF"
+    $d.Tributos = Get-XmlNoTexto $tot "vTotTrib"
+    $inv = [System.Globalization.CultureInfo]::InvariantCulture
+    $acrescimo = [decimal]0
+    foreach ($campo in @("vOutro", "vFrete", "vSeg")) {
+        $v = [decimal]0
+        if ([decimal]::TryParse((Get-XmlNoTexto $tot $campo), [System.Globalization.NumberStyles]::Number, $inv, [ref]$v)) { $acrescimo += $v }
+    }
+    $d.Acrescimo = $acrescimo.ToString($inv)
+
+    # Leiaute 4.00 tem pag/detPag; o 3.10 repetia o proprio pag
+    $pags = @($inf.SelectNodes(".//*[local-name()='detPag']"))
+    if ($pags.Count -eq 0) { $pags = @($inf.SelectNodes("*[local-name()='pag']")) }
+    $pagamentos = @()
+    foreach ($p in $pags) {
+        $pagamentos += @{ Forma = (Get-DanfeFormaPagamento (Get-XmlNoTexto $p "tPag") (Get-XmlNoTexto $p "xPag")); Valor = Get-XmlNoTexto $p "vPag" }
+    }
+    $d.Pagamentos = $pagamentos
+    $d.Troco = Get-XmlNoTexto $inf "pag/vTroco"
+
+    $d.ConsumidorDoc = ""
+    $d.ConsumidorNome = ""
+    $d.ConsumidorEndereco = ""
+    if ($null -ne $dest) {
+        $docDest = Get-XmlNoTexto $dest "CNPJ"
+        if ($docDest -ne "") { $d.ConsumidorDoc = "CNPJ " + (Format-DanfeDocumento $docDest) }
+        elseif ((Get-XmlNoTexto $dest "CPF") -ne "") { $d.ConsumidorDoc = "CPF " + (Format-DanfeDocumento (Get-XmlNoTexto $dest "CPF")) }
+        elseif ((Get-XmlNoTexto $dest "idEstrangeiro") -ne "") { $d.ConsumidorDoc = "ID " + (Get-XmlNoTexto $dest "idEstrangeiro") }
+        $d.ConsumidorNome = Get-XmlNoTexto $dest "xNome"
+        $endD = $dest.SelectSingleNode("*[local-name()='enderDest']")
+        if ($null -ne $endD) {
+            $ruaD = @((Get-XmlNoTexto $endD "xLgr"), (Get-XmlNoTexto $endD "nro"), (Get-XmlNoTexto $endD "xBairro")) | Where-Object { $_ -ne "" }
+            $cidD = @((Get-XmlNoTexto $endD "xMun"), (Get-XmlNoTexto $endD "UF")) | Where-Object { $_ -ne "" }
+            $d.ConsumidorEndereco = (@(($ruaD -join ", "), ($cidD -join "-")) | Where-Object { $_ -ne "" }) -join ", "
+        }
+    }
+
+    $d.QrCode = Get-XmlNoTexto $raiz "infNFeSupl/qrCode"
+    $d.UrlChave = Get-XmlNoTexto $raiz "infNFeSupl/urlChave"
+    $d.Protocolo = Get-XmlNoTexto $raiz "protNFe/infProt/nProt"
+    $d.Autorizacao = Format-DanfeData (Get-XmlNoTexto $raiz "protNFe/infProt/dhRecbto")
+    $d.InfCpl = Get-XmlNoTexto $inf "infAdic/infCpl"
+    return $d
+}
+
+function New-DanfeNfceBlocos {
+    # Monta o cupom na ordem que o PDV imprime. O numero de colunas define o
+    # tamanho da letra: 54 no texto miudo, 30 nos totais e 42 no consumidor.
+    param($Dados, [switch]$Cancelada, $DataCancelamento = $null)
+    $b = New-Object System.Collections.Generic.List[object]
+    $txt = { param([string]$T, [int]$Col = 54, [string]$Al = 'C', [switch]$Neg) $b.Add(@{ K = 'txt'; Txt = $T; Col = $Col; Al = $Al; Neg = [bool]$Neg }) }
+    $lin = { param([string]$T, [int]$Col = 54, [switch]$Neg) $b.Add(@{ K = 'lin'; Txt = $T; Col = $Col; Neg = [bool]$Neg }) }
+    $par = { param([string]$E, [string]$D, [int]$Col = 30, [switch]$Neg) $b.Add(@{ K = 'par'; Esq = $E; Dir = $D; Col = $Col; Neg = [bool]$Neg }) }
+    $sep = { $b.Add(@{ K = 'sep' }) }
+    $faixa = { param([string[]]$Linhas, [int]$Col = 17) $b.Add(@{ K = 'faixa'; Linhas = $Linhas; Col = $Col }) }
+    $inv = [System.Globalization.CultureInfo]::InvariantCulture
+    $maiorQueZero = {
+        param([string]$V)
+        $n = [decimal]0
+        return ([decimal]::TryParse("$V", [System.Globalization.NumberStyles]::Number, $inv, [ref]$n) -and $n -gt 0)
+    }
+
+    & $sep
+    & $txt ($Dados.EmitenteDoc + " " + $Dados.Emitente)
+    if ($Dados.Endereco -ne "") { & $txt $Dados.Endereco }
+    & $txt "Documento Auxiliar da Nota Fiscal de Consumidor Eletrônica" 58
+
+    if ($Cancelada) {
+        & $faixa @("NOTA CANCELADA") 18
+        $quando = ""
+        if ($null -ne $DataCancelamento) { try { $quando = " em " + ([datetime]$DataCancelamento).ToString("dd/MM/yyyy HH:mm") } catch {} }
+        & $txt ("Esta NFC-e foi cancelada" + $quando + " e não tem valor fiscal.") -Neg
+    }
+    & $sep
+
+    # Itens em colunas, como no cupom. Codigo comprido (EAN) aperta a descricao:
+    # abaixo de 16 letras cada item vai em duas linhas.
+    $itens = @($Dados.Itens | ForEach-Object {
+            @{
+                C = "$($_.Codigo)"; D = "$($_.Descricao)"; Q = (Format-DanfeValor $_.Qtd -Quantidade)
+                U = "$($_.Un)"; VU = (Format-DanfeValor $_.Unit -Unitario); VT = (Format-DanfeValor $_.Total)
+            }
+        })
+    $maior = { param($Campo, [int]$Minimo) $m = $Minimo; foreach ($i in $itens) { if ($i[$Campo].Length -gt $m) { $m = $i[$Campo].Length } }; return $m }
+    $wc = [Math]::Min((& $maior 'C' 6), 14)
+    $wq = & $maior 'Q' 4
+    $wu = [Math]::Min((& $maior 'U' 2), 6)
+    $wvu = & $maior 'VU' 7
+    $wt = & $maior 'VT' 8
+    $wd = 49 - ($wc + $wq + $wu + $wvu + $wt)
+    if ($wd -ge 16) {
+        & $lin ("Código".PadRight($wc) + " " + "Descrição".PadRight($wd) + " " + "Qtde".PadLeft($wq) + " " + "UN".PadRight($wu) + " " + "Vl Unit".PadLeft($wvu) + " " + "Vl Total".PadLeft($wt)) -Neg
+        foreach ($i in $itens) {
+            $cod = $i.C; if ($cod.Length -gt $wc) { $cod = $cod.Substring(0, $wc) }
+            $un = $i.U; if ($un.Length -gt $wu) { $un = $un.Substring(0, $wu) }
+            $partes = Split-DanfeTexto $i.D $wd
+            if ($partes.Count -eq 0) { $partes = @("") }
+            & $lin ($cod.PadRight($wc) + " " + $partes[0].PadRight($wd) + " " + $i.Q.PadLeft($wq) + " " + $un.PadRight($wu) + " " + $i.VU.PadLeft($wvu) + " " + $i.VT.PadLeft($wt))
+            for ($k = 1; $k -lt $partes.Count; $k++) { & $lin ((" " * ($wc + 1)) + $partes[$k]) }
+        }
+    }
+    else {
+        & $lin "Código Descrição" -Neg
+        & $par "" "Qtde UN x Vl Unit = Vl Total" 54 -Neg
+        foreach ($i in $itens) {
+            & $txt ($i.C + " " + $i.D) 54 'E'
+            & $par "" ($i.Q + " " + $i.U + " x " + $i.VU + " = " + $i.VT) 54
+        }
+    }
+    & $sep
+
+    & $par "QTD TOTAL DE ITENS" "$($itens.Count)"
+    & $par "VALOR TOTAL R$" (Format-DanfeValor $Dados.ValorTotal)
+    if (& $maiorQueZero $Dados.Desconto) { & $par "DESCONTO R$" (Format-DanfeValor $Dados.Desconto) }
+    if (& $maiorQueZero $Dados.Acrescimo) { & $par "ACRÉSCIMO R$" (Format-DanfeValor $Dados.Acrescimo) }
+    & $par "VALOR A PAGAR R$" (Format-DanfeValor $Dados.ValorPagar) -Neg
+    & $par "FORMA PAGAMENTO" "VALOR PAGO R$"
+    foreach ($p in @($Dados.Pagamentos)) { & $par $p.Forma (Format-DanfeValor $p.Valor) }
+    $troco = "0.00"
+    if ("$($Dados.Troco)" -ne "") { $troco = $Dados.Troco }
+    & $par "TROCO" (Format-DanfeValor $troco)
+    & $sep
+
+    & $txt "Consulte pela Chave de Acesso em" -Neg
+    # Endereco de consulta numa linha so: quebrado no meio ninguem consegue digitar
+    if ($Dados.UrlChave -ne "") { & $txt $Dados.UrlChave ([Math]::Min([Math]::Max(54, $Dados.UrlChave.Length), 72)) }
+    & $txt ((($Dados.Chave -split '(.{4})') | Where-Object { $_ -ne '' }) -join ' ')
+    & $sep
+
+    if ($Dados.ConsumidorDoc -ne "") {
+        & $txt ("CONSUMIDOR " + $Dados.ConsumidorDoc) 42 -Neg
+        if ($Dados.ConsumidorNome -ne "") { & $txt $Dados.ConsumidorNome }
+        if ($Dados.ConsumidorEndereco -ne "") { & $txt $Dados.ConsumidorEndereco }
+    }
+    else { & $txt "CONSUMIDOR NÃO IDENTIFICADO" 42 -Neg }
+    & $txt ("NFC-e nº " + $Dados.Numero + " Série " + $Dados.Serie + " " + $Dados.Emissao)
+    if ($Dados.TipoEmissao -eq "9") { & $txt "EMITIDA EM CONTINGÊNCIA" 42 -Neg }
+    if ($Dados.Ambiente -eq "2") { & $txt "EMITIDA EM AMBIENTE DE HOMOLOGAÇÃO - SEM VALOR FISCAL" -Neg }
+    if ($Dados.Protocolo -ne "") {
+        & $txt ("Protocolo de Autorização " + $Dados.Protocolo)
+        & $txt ("Data de Autorização " + $Dados.Autorizacao)
+    }
+    & $sep
+
+    if ($Dados.QrCode -ne "") {
+        try {
+            Initialize-QrCodigo
+            # Matriz guardada por atribuicao: dentro de @{} o PowerShell desenrolaria
+            # o bool[,] numa lista solta de true/false
+            $matriz = [XMenuTools.QrCodigo]::Gerar($Dados.QrCode)
+            $blocoQr = @{ K = 'qr'; Mm = 32 }
+            $blocoQr.Mat = $matriz
+            $b.Add($blocoQr)
+        }
+        catch { & $txt "O QR Code não pôde ser desenhado neste PC. Consulte pela chave de acesso acima." }
+    }
+    else { & $txt "Esta nota não tem QR Code no XML. Consulte pela chave de acesso acima." }
+    & $sep
+
+    # Pedido e codigo XMenu, quando o PDV grava nas informacoes complementares,
+    # saem na tarja preta como no cupom; o resto do texto vem logo abaixo.
+    # O NetPDV grava a quebra de linha como o texto "\n", nao como quebra de verdade.
+    $cpl = "$($Dados.InfCpl)" -replace '\\r\\n|\\n', "`n"
+    $linhasFaixa = @()
+    foreach ($rotulo in @('Pedido', 'XMenu')) {
+        $achou = [regex]::Match($cpl, '(?i)\b' + $rotulo + '\s*:\s*(\d+)')
+        if ($achou.Success) {
+            $linhasFaixa += "$($rotulo): $($achou.Groups[1].Value)"
+            $cpl = $cpl.Remove($achou.Index, $achou.Length)
+        }
+    }
+    if ($linhasFaixa.Count -gt 0) { & $faixa $linhasFaixa 17 }
+    if ((& $maiorQueZero $Dados.Tributos) -and $cpl -notmatch '(?i)tribut') {
+        & $txt ("Tributos Totais Incidentes (Lei Federal 12.741/2012): R$ " + (Format-DanfeValor $Dados.Tributos)) 54 'E'
+    }
+    $cpl = ($cpl -replace '\|', "`n").Trim()
+    if ($cpl -ne "") { & $txt $cpl 54 'E' }
+
+    if ($Cancelada) {
+        & $sep
+        & $faixa @("NOTA CANCELADA") 18
+    }
+    & $sep
+    return $b.ToArray()
+}
+
+function Save-PdfCupom {
+    # PDF de uma pagina com a largura da bobina (80 mm) e a altura do conteudo.
+    # Blocos: txt (texto quebrado por palavras), lin (linha pronta, alinhada por
+    # espacos), par (esquerda e direita na mesma linha), sep (tracejado), qr e
+    # faixa (tarja preta com letra branca). Na Courier toda letra tem 0,6 da
+    # altura de largura, entao o tamanho sai exato do numero de colunas.
+    param($Blocos, [string]$Caminho, [string]$Titulo = "")
+    $inv = [System.Globalization.CultureInfo]::InvariantCulture
+    $larg = 80 / 25.4 * 72
+    $marg = 3 / 25.4 * 72
+    $util = $larg - 2 * $marg
+    $tamDe = { param([int]$Col) return ($util / ($Col * 0.6)) }
+
+    # 1) Mede: cada bloco vira operacoes de desenho com a altura que ocupam
+    $ops = New-Object System.Collections.Generic.List[object]
+    foreach ($bl in @($Blocos)) {
+        if ($bl.K -eq 'txt') {
+            $tam = & $tamDe $bl.Col
+            foreach ($l in (Split-DanfeTexto $bl.Txt $bl.Col)) {
+                $ops.Add(@{ K = 't'; Txt = $l; Tam = $tam; Al = $bl.Al; Neg = $bl.Neg; Alt = $tam * 1.2 })
+            }
+        }
+        elseif ($bl.K -eq 'lin' -or $bl.K -eq 'par') {
+            $tam = & $tamDe $bl.Col
+            $l = "$($bl.Txt)"
+            if ($bl.K -eq 'par') {
+                $dir = "$($bl.Dir)"
+                $esq = "$($bl.Esq)"
+                $cabe = [Math]::Max(0, $bl.Col - $dir.Length - 1)
+                if ($esq.Length -gt $cabe) { $esq = $esq.Substring(0, $cabe) }
+                $l = $esq.PadRight([Math]::Max(0, $bl.Col - $dir.Length)) + $dir
+            }
+            if ($l.Length -gt $bl.Col) { $l = $l.Substring(0, $bl.Col) }
+            $ops.Add(@{ K = 't'; Txt = $l; Tam = $tam; Al = 'E'; Neg = $bl.Neg; Alt = $tam * 1.2 })
+        }
+        elseif ($bl.K -eq 'sep') { $ops.Add(@{ K = 's'; Alt = 6.0 }) }
+        elseif ($bl.K -eq 'qr') {
+            $lado = $bl.Mm / 25.4 * 72
+            $opQr = @{ K = 'q'; Lado = $lado; Alt = $lado + 8 }
+            $opQr.Mat = $bl.Mat
+            $ops.Add($opQr)
+        }
+        elseif ($bl.K -eq 'faixa') {
+            $col = $bl.Col
+            foreach ($l in @($bl.Linhas)) { if ($l.Length -gt $col) { $col = $l.Length } }
+            $tam = & $tamDe $col
+            $ops.Add(@{ K = 'f'; Linhas = @($bl.Linhas); Tam = $tam; Alt = @($bl.Linhas).Count * $tam * 1.15 + 8 })
+        }
+    }
+    $altura = 20.0
+    foreach ($op in $ops) { $altura += $op.Alt }
+
+    # 2) Desenha de cima para baixo (no PDF o zero do eixo Y fica embaixo)
+    $n = "0.###"
+    $esc = { param([string]$s) return $s.Replace('\', '\\').Replace('(', '\(').Replace(')', '\)') }
+    $sb = New-Object System.Text.StringBuilder
+    $y = $altura - 8
+    foreach ($op in $ops) {
+        if ($op.K -eq 't') {
+            $largTxt = $op.Txt.Length * 0.6 * $op.Tam
+            $x = $marg
+            if ($op.Al -eq 'C') { $x = ($larg - $largTxt) / 2 }
+            elseif ($op.Al -eq 'D') { $x = $larg - $marg - $largTxt }
+            $fonte = "F1"
+            if ($op.Neg) { $fonte = "F2" }
+            $base = $y - $op.Tam * 0.82
+            [void]$sb.Append("BT /" + $fonte + " " + ([double]$op.Tam).ToString($n, $inv) + " Tf " + ([double]$x).ToString($n, $inv) + " " + ([double]$base).ToString($n, $inv) + " Td (" + (& $esc $op.Txt) + ") Tj ET`n")
+        }
+        elseif ($op.K -eq 's') {
+            $yy = ([double]($y - $op.Alt / 2)).ToString($n, $inv)
+            [void]$sb.Append("0.5 w [1.5 1.5] 0 d " + ([double]$marg).ToString($n, $inv) + " " + $yy + " m " + ([double]($larg - $marg)).ToString($n, $inv) + " " + $yy + " l S [] 0 d`n")
+        }
+        elseif ($op.K -eq 'q') {
+            $mat = $op.Mat
+            $qtd = $mat.GetLength(0)
+            $mod = $op.Lado / $qtd
+            $x0 = ($larg - $op.Lado) / 2
+            $topo = $y - 4
+            $altMod = ([double]($mod + 0.05)).ToString($n, $inv)
+            for ($r = 0; $r -lt $qtd; $r++) {
+                $yMod = ([double]($topo - ($r + 1) * $mod)).ToString($n, $inv)
+                $c = 0
+                while ($c -lt $qtd) {
+                    if ($mat[$r, $c]) {
+                        $ini = $c
+                        while ($c -lt $qtd -and $mat[$r, $c]) { $c++ }
+                        [void]$sb.Append(([double]($x0 + $ini * $mod)).ToString($n, $inv) + " " + $yMod + " " + ([double](($c - $ini) * $mod)).ToString($n, $inv) + " " + $altMod + " re`n")
+                    }
+                    else { $c++ }
+                }
+            }
+            [void]$sb.Append("f`n")
+        }
+        elseif ($op.K -eq 'f') {
+            [void]$sb.Append("0 g " + ([double]$marg).ToString($n, $inv) + " " + ([double]($y - $op.Alt + 2)).ToString($n, $inv) + " " + ([double]$util).ToString($n, $inv) + " " + ([double]($op.Alt - 4)).ToString($n, $inv) + " re f 1 g`n")
+            $topoTxt = $y - 4
+            foreach ($l in $op.Linhas) {
+                $largTxt = $l.Length * 0.6 * $op.Tam
+                $x = ($larg - $largTxt) / 2
+                $base = $topoTxt - $op.Tam * 0.85
+                [void]$sb.Append("BT /F2 " + ([double]$op.Tam).ToString($n, $inv) + " Tf " + ([double]$x).ToString($n, $inv) + " " + ([double]$base).ToString($n, $inv) + " Td (" + (& $esc $l) + ") Tj ET`n")
+                $topoTxt -= $op.Tam * 1.15
+            }
+            [void]$sb.Append("0 g`n")
+        }
+        $y -= $op.Alt
+    }
+
+    # 3) Arquivo: letras em Windows-1252, que e o que a WinAnsiEncoding das
+    # fontes padrao do PDF entende (acentos do portugues inclusos)
+    $enc = [System.Text.Encoding]::GetEncoding(1252)
+    $conteudo = $enc.GetBytes($sb.ToString())
+    $ms = New-Object System.IO.MemoryStream
+    $posicoes = New-Object 'System.Collections.Generic.List[long]'
+    $escreve = { param([string]$s) $bytes = $enc.GetBytes($s); $ms.Write($bytes, 0, $bytes.Length) }
+    $objeto = { param([string]$s) $posicoes.Add($ms.Position); & $escreve $s }
+
+    & $escreve "%PDF-1.4`n"
+    $ms.Write([byte[]](0x25, 0xE2, 0xE3, 0xCF, 0xD3, 0x0A), 0, 6)
+    & $objeto "1 0 obj`n<< /Type /Catalog /Pages 2 0 R >>`nendobj`n"
+    & $objeto "2 0 obj`n<< /Type /Pages /Kids [3 0 R] /Count 1 >>`nendobj`n"
+    & $objeto ("3 0 obj`n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 " + ([double]$larg).ToString($n, $inv) + " " + ([double]$altura).ToString($n, $inv) + "] /Resources << /Font << /F1 5 0 R /F2 6 0 R >> >> /Contents 4 0 R >>`nendobj`n")
+    & $objeto ("4 0 obj`n<< /Length " + $conteudo.Length + " >>`nstream`n")
+    $ms.Write($conteudo, 0, $conteudo.Length)
+    & $escreve "`nendstream`nendobj`n"
+    & $objeto "5 0 obj`n<< /Type /Font /Subtype /Type1 /BaseFont /Courier /Encoding /WinAnsiEncoding >>`nendobj`n"
+    & $objeto "6 0 obj`n<< /Type /Font /Subtype /Type1 /BaseFont /Courier-Bold /Encoding /WinAnsiEncoding >>`nendobj`n"
+    & $objeto ("7 0 obj`n<< /Title (" + (& $esc $Titulo) + ") /Producer (Preparador de Ambiente XMenu) /CreationDate (D:" + (Get-Date -Format "yyyyMMddHHmmss") + ") >>`nendobj`n")
+    $inicioXref = $ms.Position
+    & $escreve "xref`n0 8`n0000000000 65535 f`r`n"
+    foreach ($pos in $posicoes) { & $escreve ($pos.ToString("0000000000") + " 00000 n`r`n") }
+    & $escreve ("trailer`n<< /Size 8 /Root 1 0 R /Info 7 0 R >>`nstartxref`n" + $inicioXref + "`n%%EOF`n")
+    [System.IO.File]::WriteAllBytes($Caminho, $ms.ToArray())
+    $ms.Dispose()
+}
+
+function Export-DanfeNfcePdf {
+    # XML da NFC-e -> PDF do DANFE. Lanca excecao com o motivo quando nao da.
+    param([string]$Xml, [string]$Caminho, [switch]$Cancelada, $DataCancelamento = $null)
+    $dados = Get-DanfeNfceDados -Xml $Xml
+    $blocos = New-DanfeNfceBlocos -Dados $dados -Cancelada:$Cancelada -DataCancelamento $DataCancelamento
+    Save-PdfCupom -Blocos $blocos -Caminho $Caminho -Titulo ("Espelho NFC-e " + $dados.Numero + " Serie " + $dados.Serie)
 }
 
 function Show-XmlDownloader {
@@ -1423,7 +2311,7 @@ function Show-XmlDownloader {
         $lblConn = New-ToolLabel $cardConn "Informe o servidor e clique em TESTAR CONEXÃO." 14 60 9 -Cor $Script:UiSuave -W 930
 
         # ---------------------------------------------------------------------
-        # CARTAO 2: os tres modos de busca
+        # CARTAO 2: os quatro modos de busca
         # ---------------------------------------------------------------------
         $cardBusca = & $novoCartao 12 98 960 184
         New-ToolLabel $cardBusca "O QUE BAIXAR" 14 4 10 -Negrito | Out-Null
@@ -1444,9 +2332,14 @@ function Show-XmlDownloader {
         New-ToolLabel $cardBusca "Série (opcional):" 342 103 9 -Cor $Script:UiSuave | Out-Null
         $cmbSerie2 = & $novaCombo $cardBusca 450 100 90 -Editavel
 
-        $rbChave = & $novoRadio $cardBusca "Por chave de acesso" 12 128 230
-        $txtChaves = & $novoCampo $cardBusca 32 150 640 "" 26 -Multi
-        New-ToolLabel $cardBusca "44 dígitos, por vírgula ou um por linha" 682 154 8.5 -Cor $Script:UiSuave -W 265 | Out-Null
+        $rbChave = & $novoRadio $cardBusca "Por chave de acesso (44 dígitos)" 12 128 300
+        $txtChaves = & $novoCampo $cardBusca 32 150 430 "" 26 -Multi
+
+        # Pedido do PDV (o numero que sai no cupom, "Pedido: 73432"): o banco liga
+        # Pedidos.IDNSUFiscal a NSUFiscal, que guarda a serie e o numero da NFC-e
+        $rbPedido = & $novoRadio $cardBusca "Por número do pedido" 490 128 300
+        $txtPedidos = & $novoCampo $cardBusca 510 150 250 ""
+        New-ToolLabel $cardBusca "ex.:  73432   |   73400-73432" 772 154 8.5 -Cor $Script:UiSuave -W 175 | Out-Null
 
 
         # ---------------------------------------------------------------------
@@ -1493,7 +2386,9 @@ function Show-XmlDownloader {
         [void]$lv.Columns.Add("Situação", 115)
         [void]$lv.Columns.Add("Chave de acesso", 275)
         [void]$lv.Columns.Add("Tamanho", 75)
-        [void]$lv.Columns.Add("Arquivo gerado", 240)
+        [void]$lv.Columns.Add("Arquivo gerado", 185)
+        # Por ultimo para nao mudar a posicao das outras colunas (SubItems 3, 5 e 6)
+        [void]$lv.Columns.Add("Pedido", 60)
         [void]$f.Controls.Add($lv)
 
         # Aviso sobreposto a lista: no rodape ficava discreto demais para uma
@@ -1529,6 +2424,8 @@ function Show-XmlDownloader {
             $Script:ToolTip.SetToolTip($rbPeriodo, "Quando o cliente pede tudo de um dia ou de um mês, em vez de números específicos.")
             $Script:ToolTip.SetToolTip($rbChave, "Quando o cliente mandou a chave de acesso da nota em vez do número.")
             $Script:ToolTip.SetToolTip($txtChaves, "Cole as chaves de 44 dígitos separadas por vírgula ou uma por linha. Pontos e espaços são ignorados.")
+            $Script:ToolTip.SetToolTip($rbPedido, "Quando o cliente só tem o número do pedido, o que sai no cupom como ""Pedido: 73432"".")
+            $Script:ToolTip.SetToolTip($txtPedidos, "Um pedido, uma lista ou intervalo:  73432  |  73430,73432  |  73400-73432. Pedido sem NFC-e (venda não fiscal) aparece no aviso depois da busca. Número que se repete (zera por dia) traz uma nota por dia, a mais recente primeiro. Enter já faz a busca.")
             $Script:ToolTip.SetToolTip($cmbTipo, "Serve como filtro da lista também: depois de buscar, troque a opção e a tela mostra só o que interessa, sem consultar o banco de novo. Em 'Todas', cada número traz a nota autorizada e, se aquele número tiver sido inutilizado, traz a inutilizada no lugar — nunca as duas para o mesmo número.")
             $Script:ToolTip.SetToolTip($lv, "A coluna Situação diz o que é cada nota. Verde = autorizada, vale. Vermelho = cancelada, não vale. Amarelo = inutilizada ou sem protocolo. Cinza = não existe no banco. Passe o mouse na linha para o detalhe, clique no cabeçalho para ordenar e use o botão direito para marcar ou desmarcar tudo.")
         }
@@ -1560,8 +2457,9 @@ function Show-XmlDownloader {
         $btnCopiar = New-ToolButton $f "COPIAR FALTANTES" 12 620 184 30 $Script:UiCinza $null "Copia os números que faltaram na última busca ou conferência, já formatados, para colar num e-mail ou WhatsApp para o cliente"
         $btnPasta = New-ToolButton $f "ABRIR PASTA" 206 620 184 30 $Script:UiCinza $null "Abre a pasta do ultimo lote baixado"
         $btnZip = New-ToolButton $f "ABRIR ZIP" 400 620 184 30 $Script:UiCinza $null "Abre a pasta compactada do ultimo lote"
+        $btnPdf = New-ToolButton $f "ESPELHO FISCAL (PDF)" 594 620 184 30 $Script:UiVerde $null "Gera o espelho fiscal da nota em PDF, igual ao cupom (80 mm, com QR Code), das notas marcadas. Por chave ou por pedido, busca e gera direto."
         $btnFechar = New-ToolButton $f "FECHAR" 788 620 184 30 $Script:UiCinza $null "Fecha esta janela"
-        foreach ($b in @($btnBuscar, $btnBaixarSel, $btnBaixarTudo, $btnConferir, $btnAjuda, $btnCopiar, $btnPasta, $btnZip, $btnFechar)) {
+        foreach ($b in @($btnBuscar, $btnBaixarSel, $btnBaixarTudo, $btnConferir, $btnAjuda, $btnCopiar, $btnPasta, $btnZip, $btnPdf, $btnFechar)) {
             $b.Anchor = 'Bottom,Left'
         }
 
@@ -1580,14 +2478,16 @@ function Show-XmlDownloader {
 
         # Campos do modo nao escolhido ficam desabilitados, nunca escondidos
         $atualizaModo = {
-            $m1 = $rbSerie.Checked; $m2 = $rbPeriodo.Checked; $m3 = $rbChave.Checked
+            $m1 = $rbSerie.Checked; $m2 = $rbPeriodo.Checked; $m3 = $rbChave.Checked; $m4 = $rbPedido.Checked
             $cmbSerie.Enabled = $m1; $txtNotas.Enabled = $m1; $lblContagem.Visible = $m1
             $dtIni.Enabled = $m2; $dtFim.Enabled = $m2; $cmbSerie2.Enabled = $m2
             $txtChaves.Enabled = $m3
+            $txtPedidos.Enabled = $m4
             # Destaca o modo ativo: o escolhido em verde, os outros apagados
             if ($m1) { $rbSerie.ForeColor = $Script:UiVerde } else { $rbSerie.ForeColor = $Script:UiSuave }
             if ($m2) { $rbPeriodo.ForeColor = $Script:UiVerde } else { $rbPeriodo.ForeColor = $Script:UiSuave }
             if ($m3) { $rbChave.ForeColor = $Script:UiVerde } else { $rbChave.ForeColor = $Script:UiSuave }
+            if ($m4) { $rbPedido.ForeColor = $Script:UiVerde } else { $rbPedido.ForeColor = $Script:UiSuave }
             $btnConferir.Enabled = $m1
             $btnCopiar.Enabled = ($Script:XmlFaltantes.Count -gt 0)
         }
@@ -1699,6 +2599,10 @@ function Show-XmlDownloader {
             if ($sql.Number -eq 11001) { return "Não achei o servidor ""$srv"" na rede. Confira o nome ou use o IP." }
             if (@(-1, 2, 26, 40, 53, 64, 258, 1225, 10060, 10061, 10065) -contains $sql.Number) {
                 return "Não achei o SQL Server em $srv. Confira o IP, se a máquina está ligada e se o SQL aceita conexão pela rede (porta 1433)."
+            }
+            # 207 coluna / 208 tabela que nao existe: banco de versao antiga do NetWebPDV
+            if ($sql.Number -eq 207 -or $sql.Number -eq 208) {
+                return "Este banco não tem uma tabela ou coluna que essa busca usa (pode ser versão antiga do NetWebPDV): $($sql.Message)"
             }
             return "$($sql.Message)"
         }
@@ -1830,6 +2734,7 @@ function Show-XmlDownloader {
                 Conteudo = ""; Arquivo = ""; Tamanho = 0; Aviso = ""; Inutilizada = $false
                 Codigo = Get-XmlDbValor $rd "CodigoRetorno"; Cancelamento = ""; ChaveCanc = ""
                 Cancelada = $false; DataCancelamento = $null; Linha = $null
+                Pedido = Get-XmlDbValor $rd "Pedido"
             }
 
             $xEnvio = Get-XmlDbValor $rd "xmlEnvio"
@@ -1875,6 +2780,13 @@ function Show-XmlDownloader {
                         if ("$($r.Motivo)" -ne "") { $item.Aviso = $r.Motivo }
                     }
                 }
+            }
+
+            # Nas outras buscas o pedido sai das informacoes complementares do XML
+            # ("Pedido: 73432"), que e o numero impresso no cupom
+            if ($null -eq $item.Pedido -and -not $item.Inutilizada -and $item.Conteudo -ne "") {
+                $achouPedido = [regex]::Match($item.Conteudo, '<infCpl>[^<]*?\bPedido\s*:\s*(\d+)')
+                if ($achouPedido.Success) { $item.Pedido = [long]$achouPedido.Groups[1].Value }
             }
 
             # Numero inutilizado nunca foi autorizado, entao nao tem o que cancelar
@@ -1944,6 +2856,7 @@ function Show-XmlDownloader {
             if ($Item.Tamanho -gt 0) { $tam = "{0:N0} B" -f $Item.Tamanho }
             [void]$lvi.SubItems.Add($tam)
             [void]$lvi.SubItems.Add($Item.Arquivo)
+            [void]$lvi.SubItems.Add("$($Item.Pedido)")
 
             # verde = valida | amarelo = atencao | vermelho = nao vale | cinza = nao existe
             if ($sit -eq "CANCELADA") { $lvi.ForeColor = $Script:UiVermelho }
@@ -2049,6 +2962,13 @@ function Show-XmlDownloader {
             }
             & $atualizaMarcadas
             return $vis.Count
+        }
+
+        # Chaves digitadas: 44 digitos, sem repetir, ignorando pontos e espacos
+        $lerChaves = {
+            return @(("$($txtChaves.Text)" -replace '[;\r\n]', ',') -split ',' |
+                ForEach-Object { ($_ -replace '\D', '') } |
+                Where-Object { $_.Length -eq 44 } | Select-Object -Unique)
         }
 
         $buscar = {
@@ -2196,10 +3116,44 @@ function Show-XmlDownloader {
                         }
                     } while ($veio -eq $pagina)
                 }
+                elseif ($rbPedido.Checked) {
+                    $fxP = ConvertFrom-FaixaNotas -Texto $txtPedidos.Text -Confirmar
+                    if (-not $fxP.Ok) { & $setStatus ("Pedidos: " + $fxP.Erro) $Script:UiVermelho; return $false }
+                    $Script:XmlPedidosBuscados = @($fxP.Notas)
+
+                    # Pedido -> NSUFiscal (tipoDoc 2 = NFC-e, com serie e numero) -> nota.
+                    # Pedido de venda nao fiscal nao tem NSU de NFC-e e fica de fora.
+                    # O numero do pedido zera por dia em muitos clientes (a chave da
+                    # tabela Pedidos inclui o GUID): o mesmo numero traz uma nota por
+                    # dia, da mais recente para a mais antiga.
+                    for ($ini = 0; $ini -lt $fxP.Notas.Count; $ini += 500) {
+                        $fim = [Math]::Min($ini + 499, $fxP.Notas.Count - 1)
+                        $bloco = @($fxP.Notas[$ini..$fim])
+                        $nomes = @()
+                        for ($i = 0; $i -lt $bloco.Count; $i++) { $nomes += "@n$i" }
+                        $inSql = ($nomes -join ",")
+
+                        $sql = ";WITH peds AS (SELECT DISTINCT p.IDParceiro, p.ID AS Pedido, n.Serie AS PSerie, n.NumeroNota AS PNota " +
+                        "FROM Pedidos p JOIN NSUFiscal n ON n.IDParceiro = p.IDParceiro AND n.ID = p.IDNSUFiscal AND n.tipoDoc = 2 " +
+                        "WHERE p.IDParceiro = @parceiro AND p.ID IN ($inSql)), logs AS (" + $cteLogs + " WHERE g.IDParceiro = @parceiro " +
+                        "AND EXISTS (SELECT 1 FROM peds pd WHERE pd.PSerie = g.SerieTokenID AND pd.PNota = g.IDTokenID)) " +
+                        "SELECT " + $colunas + ", pd.Pedido " + $juncao + " JOIN peds pd ON pd.IDParceiro = t.IDParceiro " +
+                        "AND pd.PSerie = t.Serie AND pd.PNota = t.ID ORDER BY pd.Pedido, COALESCE(t.DataEmissao, t.data) DESC"
+
+                        $cmd = $cn.CreateCommand()
+                        $cmd.CommandTimeout = 120
+                        $cmd.CommandText = $sql
+                        $par = $cmd.Parameters.Add("@parceiro", [System.Data.SqlDbType]::BigInt); $par.Value = $parceiro
+                        for ($i = 0; $i -lt $bloco.Count; $i++) {
+                            $par = $cmd.Parameters.Add("@n$i", [System.Data.SqlDbType]::BigInt)
+                            $par.Value = [long]$bloco[$i]
+                        }
+                        [void](& $lerParaLista $cmd $achados)
+                        & $setStatus "Consultando... $($achados.Count) notas lidas" $Script:UiAmarelo
+                    }
+                }
                 else {
-                    $chaves = @(("$($txtChaves.Text)" -replace '[;\r\n]', ',') -split ',' |
-                        ForEach-Object { ($_ -replace '\D', '') } |
-                        Where-Object { $_.Length -eq 44 } | Select-Object -Unique)
+                    $chaves = @(& $lerChaves)
                     if ($chaves.Count -eq 0) {
                         & $setStatus "Informe ao menos uma chave de 44 dígitos." $Script:UiVermelho
                         return $false
@@ -2243,7 +3197,8 @@ function Show-XmlDownloader {
                 # seja mexida antes de baixar
                 if ($rbSerie.Checked) { $Script:XmlFiltro = @{ Modo = 'Serie'; Serie = "$($cmbSerie.Text)".Trim(); Notas = @($Script:XmlPedidas) } }
                 elseif ($rbPeriodo.Checked) { $Script:XmlFiltro = @{ Modo = 'Periodo'; Serie = "$($cmbSerie2.Text)".Trim(); De = $dtIni.Value; Ate = $dtFim.Value } }
-                else { $Script:XmlFiltro = @{ Modo = 'Chave'; Serie = '' } }
+                elseif ($rbPedido.Checked) { $Script:XmlFiltro = @{ Modo = 'Pedido'; Serie = ''; Pedidos = @($Script:XmlPedidosBuscados); Texto = "$($txtPedidos.Text)".Trim() } }
+                else { $Script:XmlFiltro = @{ Modo = 'Chave'; Serie = ''; Texto = ((@(& $lerChaves) | Sort-Object) -join ',') } }
 
                 # @() sobre uma List[object] quebra no PowerShell 5.1 ("Os tipos de
                 # argumento nao correspondem"): vira array uma vez, aqui
@@ -2259,12 +3214,28 @@ function Show-XmlDownloader {
                 # logo depois da busca, sem depender de clicar em CONFERIR SEQUENCIA
                 $Script:XmlFaltantes = $semXmlAgora
 
+                # Pedido sem NFC-e (venda nao fiscal, numero errado, outra loja): vai
+                # para o aviso e para o COPIAR FALTANTES, que no modo pedido copia pedidos
+                $pedidosSemNfce = @()
+                if ($rbPedido.Checked) {
+                    $comNota = @{}
+                    foreach ($a in $achados) { if ($null -ne $a.Pedido) { $comNota["$($a.Pedido)"] = $true } }
+                    $pedidosSemNfce = @($Script:XmlPedidosBuscados | Where-Object { -not $comNota.ContainsKey("$_") })
+                    $Script:XmlFaltantes = @($pedidosSemNfce)
+                }
+
                 if ($achados.Count -eq 0) {
                     & $setStatus "Nada encontrado para esse filtro." $Script:UiAmarelo
                     Log-Message "INFO" "XMLs: busca não encontrou nenhuma nota"
-                    [System.Windows.Forms.MessageBox]::Show(
-                        "Nada encontrado para esse filtro.`r`n`r`nConfira a série, os números e o período informados.",
-                        "Baixar XMLs NFC-e", "OK", "Information") | Out-Null
+                    $avisoNada = "Nada encontrado para esse filtro.`r`n`r`nConfira a série, os números e o período informados."
+                    if ($rbPedido.Checked) {
+                        $avisoNada = "Nenhum desses pedidos tem NFC-e no banco: " + (ConvertTo-FaixaTexto $Script:XmlPedidosBuscados) +
+                        "`r`n`r`nPode ser venda não fiscal, pedido de outra loja (confira o Parceiro) ou número digitado errado."
+                    }
+                    [System.Windows.Forms.MessageBox]::Show($avisoNada, "Baixar XMLs NFC-e", "OK", "Information") | Out-Null
+                }
+                elseif ($pedidosSemNfce.Count -gt 0) {
+                    & $setStatus ("$($achados.Count) nota(s) encontrada(s). Pedidos sem NFC-e (venda não fiscal ou número errado): " + (ConvertTo-FaixaTexto $pedidosSemNfce)) $Script:UiAmarelo
                 }
                 elseif ($visiveis -eq 0) {
                     & $setStatus "$($achados.Count) nota(s) encontrada(s), mas nenhuma se encaixa em ""$($cmbTipo.Text)""." $Script:UiAmarelo
@@ -2308,17 +3279,23 @@ function Show-XmlDownloader {
         # fazia uma busca por periodo sair com o nome "Série 5" da caixa de serie.
         # Sem serie escolhida, entram as series das notas que vao ser gravadas.
         $nomeDoLote = {
-            param($ItensLote)
+            param($ItensLote, [string]$Titulo = "XML NFC-e")
             $filtro = $Script:XmlFiltro
             if ($null -eq $filtro) { $filtro = @{ Modo = 'Chave'; Serie = '' } }
             $seriesLote = @($ItensLote | ForEach-Object { [int]$_.Serie } | Sort-Object -Unique)
             if ($filtro.Modo -eq 'Serie') {
-                return (Get-XmlNomeLote -Modo Serie -Serie $filtro.Serie -Notas $filtro.Notas)
+                return (Get-XmlNomeLote -Modo Serie -Serie $filtro.Serie -Notas $filtro.Notas -Titulo $Titulo)
             }
             if ($filtro.Modo -eq 'Periodo') {
-                return (Get-XmlNomeLote -Modo Periodo -Serie $filtro.Serie -Series $seriesLote -De $filtro.De -Ate $filtro.Ate)
+                return (Get-XmlNomeLote -Modo Periodo -Serie $filtro.Serie -Series $seriesLote -De $filtro.De -Ate $filtro.Ate -Titulo $Titulo)
             }
-            return (Get-XmlNomeLote -Modo Chave -Series $seriesLote -Quantidade @($ItensLote).Count)
+            if ($filtro.Modo -eq 'Pedido') {
+                # Os pedidos que vao no lote, e nao todos os digitados: pedido sem NFC-e nao entra
+                $pedidosLote = @($ItensLote | Where-Object { $null -ne $_.Pedido } | ForEach-Object { [int]$_.Pedido })
+                if ($pedidosLote.Count -eq 0) { $pedidosLote = @($filtro.Pedidos) }
+                return (Get-XmlNomeLote -Modo Pedido -Series $seriesLote -Notas $pedidosLote -Titulo $Titulo)
+            }
+            return (Get-XmlNomeLote -Modo Chave -Series $seriesLote -Quantidade @($ItensLote).Count -Titulo $Titulo)
         }
 
         $baixar = {
@@ -2488,6 +3465,197 @@ function Show-XmlDownloader {
             try { if (Test-Path -LiteralPath $pasta) { Start-Process "explorer.exe" ("`"" + $pasta + "`"") } } catch {}
         }
 
+        # Espelho fiscal (DANFE NFC-e) em PDF das notas marcadas. Por chave ou por
+        # pedido basta digitar e clicar: se a lista ainda nao e dessa busca, busca
+        # antes. Uma nota vai solta em "Arquivos Xmenu\Espelhos NFC-e" e o PDF abre
+        # direto; varias ganham uma pasta de lote com zip, como os XMLs.
+        $gerarPdf = {
+            if ($Script:XmlOcupado) { return }
+            $acabouDeBuscar = $false
+            if ($rbChave.Checked -or $rbPedido.Checked) {
+                $filtro = $Script:XmlFiltro
+                $jaBuscou = $false
+                if ($null -ne $filtro -and $lv.Items.Count -gt 0) {
+                    if ($rbChave.Checked) { $jaBuscou = ($filtro.Modo -eq 'Chave' -and "$($filtro.Texto)" -eq ((@(& $lerChaves) | Sort-Object) -join ',')) }
+                    else { $jaBuscou = ($filtro.Modo -eq 'Pedido' -and "$($filtro.Texto)" -eq "$($txtPedidos.Text)".Trim()) }
+                }
+                if (-not $jaBuscou) {
+                    if (-not (& $buscar)) { return }
+                    $acabouDeBuscar = $true
+                }
+            }
+            # A busca que acabou de rodar ja explicou na tela por que nao veio nada
+            if ($lv.Items.Count -eq 0) {
+                if (-not $acabouDeBuscar) { & $setStatus "Faça a busca antes de gerar o PDF." $Script:UiAmarelo }
+                return
+            }
+            $sel = @()
+            foreach ($lvi in $lv.CheckedItems) { $sel += $lvi.Tag }
+            if ($sel.Count -eq 0) {
+                if (-not $acabouDeBuscar) { & $setStatus "Marque ao menos uma nota na lista para gerar o PDF." $Script:UiAmarelo }
+                return
+            }
+
+            # Numero de pedido que zera por dia: a busca direta pode trazer o mesmo
+            # pedido em varias notas. Em vez de gerar todas, para e deixa escolher
+            # pela data; no clique seguinte (mesma busca) gera o que ficou marcado.
+            if ($acabouDeBuscar -and $rbPedido.Checked) {
+                $repetidos = @($sel | Where-Object { $null -ne $_.Pedido } | Group-Object { "$($_.Pedido)" } | Where-Object { $_.Count -gt 1 })
+                if ($repetidos.Count -gt 0) {
+                    $detalhe = @($repetidos | Select-Object -First 10 | ForEach-Object { "Pedido $($_.Name): $($_.Count) notas" }) -join "`r`n"
+                    & $setStatus "Pedido repetido em mais de uma nota: deixe marcada só a do dia certo e clique de novo em ESPELHO FISCAL (PDF)." $Script:UiAmarelo
+                    [System.Windows.Forms.MessageBox]::Show(
+                        "O número do pedido se repete (ele zera por dia), então a busca trouxe mais de uma nota:`r`n`r`n$detalhe`r`n`r`n" +
+                        "A lista está da mais recente para a mais antiga. Confira a coluna Data, deixe marcada só a nota certa e clique de novo em ESPELHO FISCAL (PDF). " +
+                        "Se quiser todas, é só clicar de novo sem desmarcar.",
+                        "Espelho fiscal (PDF)", "OK", "Information") | Out-Null
+                    return
+                }
+            }
+
+            # Espelho so existe para NFC-e autorizada; a cancelada sai com a tarja
+            $temDanfe = { param($It) ("$($It.Conteudo)" -ne "" -and -not [bool]$It.Inutilizada -and "$($It.Status)" -eq "AUTORIZADA") }
+            $podem = @($sel | Where-Object { & $temDanfe $_ })
+            $fora = @($sel | Where-Object { -not (& $temDanfe $_) })
+            $descreveFora = {
+                $txtFora = @()
+                foreach ($it in ($fora | Select-Object -First 15)) {
+                    $motivo = "$($it.Status)".ToLower()
+                    if ([bool]$it.Inutilizada) { $motivo = "inutilizada, não é nota emitida" }
+                    elseif ("$($it.Conteudo)" -eq "") { $motivo = "sem XML no banco" }
+                    elseif ("$($it.Status)" -eq "SEM PROTOCOLO") { $motivo = "sem protocolo de autorização" }
+                    $txtFora += "Série $($it.Serie) nota $($it.Nota): $motivo"
+                }
+                if ($fora.Count -gt 15) { $txtFora += "... e mais $($fora.Count - 15)" }
+                return ($txtFora -join "`r`n")
+            }
+            if ($podem.Count -eq 0) {
+                & $setStatus "Nenhuma nota autorizada marcada - nenhum PDF gerado." $Script:UiAmarelo
+                [System.Windows.Forms.MessageBox]::Show(
+                    "Nenhuma das notas marcadas tem espelho para gerar. O espelho fiscal só existe para NFC-e autorizada (a cancelada sai com a tarja NOTA CANCELADA).`r`n`r`n" + (& $descreveFora),
+                    "Espelho fiscal (PDF)", "OK", "Information") | Out-Null
+                return
+            }
+
+            $Script:XmlOcupado = $true
+            $Script:XmlCancelar = $false
+            $btnCancelar.Enabled = $true
+            $btnPdf.Enabled = $false
+            $pb.Maximum = $podem.Count
+            $pb.Value = 0
+            $gerados = @()
+            $falhasPdf = @()
+            $interrompido = $false
+            $pasta = ""
+            $zip = ""
+            try {
+                & $setStatus "Gerando o espelho fiscal em PDF..." $Script:UiAmarelo
+                $raizPdf = Join-Path $Script:DownloadFolder "Espelhos NFC-e"
+                if ($podem.Count -eq 1) {
+                    if (-not (Test-Path $raizPdf)) { New-Item -Path $raizPdf -ItemType Directory -Force | Out-Null }
+                    $pasta = $raizPdf
+                }
+                else { $pasta = New-XmlLotePasta (& $nomeDoLote $podem "Espelho NFC-e") -Subpasta "Espelhos NFC-e" }
+
+                $i = 0
+                foreach ($it in $podem) {
+                    $i++
+                    if ($Script:XmlCancelar) {
+                        $interrompido = $true
+                        Log-Message "CANCEL" "Espelho PDF:interrompido em $i de $($podem.Count)"
+                        break
+                    }
+                    $lblProg.Text = "Gerando PDF $i de $($podem.Count)..."
+                    $pb.Value = $i
+                    [System.Windows.Forms.Application]::DoEvents()
+                    try {
+                        $nomes = Get-XmlNomeArquivo -Item $it
+                        $destino = Join-Path $pasta ($nomes.Nota + ".pdf")
+                        # O PDF da mesma nota aberto no leitor fica travado: grava ao lado com (2)
+                        $copia = 1
+                        while ($true) {
+                            try {
+                                Export-DanfeNfcePdf -Xml $it.Conteudo -Caminho $destino -Cancelada:([bool]$it.Cancelada) -DataCancelamento $it.DataCancelamento
+                                break
+                            }
+                            catch {
+                                if ($_.Exception.GetBaseException() -isnot [System.IO.IOException] -or $copia -ge 5) { throw }
+                                $copia++
+                                $destino = Join-Path $pasta ($nomes.Nota + " ($copia).pdf")
+                            }
+                        }
+                        $it.CaminhoPdf = $destino
+                        $gerados += $destino
+                        if ($null -ne $it.Linha -and -not $lv.IsDisposed) {
+                            if ("$($it.Arquivo)" -ne "") { $it.Linha.SubItems[6].Text = "$($it.Arquivo) + PDF" }
+                            else { $it.Linha.SubItems[6].Text = (Split-Path $destino -Leaf) }
+                        }
+                    }
+                    catch {
+                        $falhasPdf += "Série $($it.Serie) nota $($it.Nota): $($_.Exception.Message)"
+                        Log-Message "ERRO" "Espelho PDF:falha na nota $($it.Nota) - $($_.Exception.Message)"
+                    }
+                }
+
+                if ($gerados.Count -eq 0 -and $pasta -ne $raizPdf) {
+                    # Lote sem nenhum PDF: nao deixa pasta vazia para tras
+                    try { [System.IO.Directory]::Delete($pasta) } catch {}
+                }
+                elseif ($gerados.Count -gt 0) {
+                    $Script:XmlUltimoLote = $pasta
+                    if ($gerados.Count -gt 1) {
+                        try {
+                            Add-Type -AssemblyName System.IO.Compression.FileSystem
+                            $zip = $pasta + ".zip"
+                            if (Test-Path $zip) { Remove-Item -LiteralPath $zip -Force -ErrorAction SilentlyContinue }
+                            [System.IO.Compression.ZipFile]::CreateFromDirectory($pasta, $zip)
+                            $Script:XmlUltimoZip = $zip
+                        }
+                        catch {
+                            $zip = ""
+                            Log-Message "ERRO" "Espelho PDF:falha ao gerar o zip - $($_.Exception.Message). A pasta continua disponível."
+                        }
+                    }
+                }
+
+                $resumo = "$($gerados.Count) PDF(s) gerado(s)"
+                if ($fora.Count -gt 0) { $resumo = $resumo + " | $($fora.Count) sem espelho" }
+                if ($falhasPdf.Count -gt 0) { $resumo = $resumo + " | $($falhasPdf.Count) com erro" }
+                if ($interrompido) { $resumo = "INTERROMPIDO - " + $resumo }
+                Log-Message "SUCESSO" "Espelho PDF:$resumo em $pasta"
+                if ($fora.Count -gt 0 -or $falhasPdf.Count -gt 0 -or $interrompido) { & $setStatus ($resumo + " - " + $pasta) $Script:UiAmarelo }
+                else { & $setStatus ($resumo + " - " + $pasta) $Script:UiVerde }
+
+                # Deu tudo certo: so abre o resultado. Aviso so quando algo ficou de fora.
+                if ($fora.Count -gt 0 -or $falhasPdf.Count -gt 0 -or $interrompido) {
+                    $msg = $resumo
+                    if ($gerados.Count -gt 0) { $msg = $msg + "`r`n`r`npasta: $pasta" }
+                    if ($zip -ne "") { $msg = $msg + "`r`nzip: $zip" }
+                    if ($fora.Count -gt 0) { $msg = $msg + "`r`n`r`nSem espelho (só NFC-e autorizada tem espelho fiscal):`r`n" + (& $descreveFora) }
+                    if ($falhasPdf.Count -gt 0) { $msg = $msg + "`r`n`r`nNão deu para gerar:`r`n" + (($falhasPdf | Select-Object -First 15) -join "`r`n") }
+                    [System.Windows.Forms.MessageBox]::Show($msg, "Espelho fiscal (PDF)", "OK", "Warning") | Out-Null
+                }
+                if ($gerados.Count -eq 1) {
+                    try { Start-Process -FilePath $gerados[0] }
+                    catch { try { Start-Process "explorer.exe" ("/select,`"" + $gerados[0] + "`"") } catch {} }
+                }
+                elseif ($gerados.Count -gt 1) {
+                    try { Start-Process "explorer.exe" ("`"" + $pasta + "`"") } catch {}
+                }
+            }
+            catch {
+                & $setStatus ("Erro ao gerar o PDF: " + $_.Exception.Message) $Script:UiVermelho
+                Log-Message "ERRO" "Espelho PDF:$($_.Exception.Message)"
+            }
+            finally {
+                $btnCancelar.Enabled = $false
+                $btnPdf.Enabled = $true
+                $lblProg.Text = ""
+                $pb.Value = 0
+                $Script:XmlOcupado = $false
+            }
+        }
+
         # So consulta: aponta buracos na numeracao sem gravar nada
         $conferir = {
             if ($Script:XmlOcupado) { return }
@@ -2586,6 +3754,7 @@ function Show-XmlDownloader {
         $rbSerie.Add_CheckedChanged($atualizaModo)
         $rbPeriodo.Add_CheckedChanged($atualizaModo)
         $rbChave.Add_CheckedChanged($atualizaModo)
+        $rbPedido.Add_CheckedChanged($atualizaModo)
         $txtNotas.Add_TextChanged($contaNotas)
         $btnTestar.Add_Click({ & $testar })
 
@@ -2600,7 +3769,7 @@ function Show-XmlDownloader {
             "   TESTAR CONEXAO. Ele confirma a versao do SQL e carrega o parceiro e",
             "   as series que existem no banco.",
             "",
-            "2) ESCOLHA UM DOS TRES MODOS",
+            "2) ESCOLHA UM DOS QUATRO MODOS",
             "   - Por serie + sequencia (o mais usado)",
             "       Escolha a serie do caixa e digite os numeros:",
             "         1-15            da 1 ate a 15",
@@ -2611,6 +3780,10 @@ function Show-XmlDownloader {
             "       periodo; acima de 10 mil ele pergunta antes de buscar.",
             "   - Por chave de acesso",
             "       Chaves de 44 digitos, por virgula ou uma por linha.",
+            "   - Por numero do pedido",
+            "       O numero que sai no cupom (""Pedido: 73432""). Aceita lista e",
+            "       intervalo como as notas: 73432 | 73430,73432 | 73400-73432.",
+            "       Pedido sem NFC-e (venda nao fiscal) aparece no aviso da busca.",
             "",
             "3) BUSCAR",
             "   So consulta, nao grava nada. A coluna Situacao diz o que e cada nota:",
@@ -2644,6 +3817,18 @@ function Show-XmlDownloader {
             "   Nota sem XML e pulada e aparece num aviso no fim.",
             "   CANCELAR interrompe tanto a busca quanto o download.",
             "",
+            "6) ESPELHO FISCAL (PDF)",
+            "   Gera o espelho fiscal da nota em PDF, no mesmo formato do cupom",
+            "   (80 mm, com QR Code), das notas marcadas. Por chave ou por pedido",
+            "   nem precisa buscar antes: digite e clique em ESPELHO FISCAL (PDF).",
+            "   O numero do pedido pode se repetir (zera por dia): se ele aparecer",
+            "   em mais de uma nota, a lista mostra todas, da mais recente para a",
+            "   mais antiga. Deixe marcada so a do dia certo e clique de novo.",
+            "   Uma nota: o PDF abre sozinho. Varias: abre a pasta do lote.",
+            "   So NFC-e autorizada tem espelho. A cancelada sai com a tarja",
+            "   NOTA CANCELADA; inutilizada e sem protocolo ficam de fora e",
+            "   aparecem no aviso do fim.",
+            "",
             "ONDE OS ARQUIVOS FICAM",
             "   Area de Trabalho > Arquivos Xmenu > XMLs > <nome do lote>",
             "   O nome do lote diz o que tem dentro, pronto para mandar ao cliente:",
@@ -2664,6 +3849,8 @@ function Show-XmlDownloader {
             "   Subpastas: Inutilizadas, Cancelamentos (os _CANC_EVENTO) e",
             "   Sem protocolo. Na pasta principal fica so o que vale.",
             "   A pasta abre sozinha quando o lote termina.",
+            "   Espelhos em PDF: Arquivos Xmenu > Espelhos NFC-e (uma nota fica",
+            "   solta ali; varias ganham pasta de lote, ex. Espelho NFC-e - Pedido 73432).",
             "",
             "OUTROS BOTOES",
             "   CONFERIR SEQUENCIA  so consulta: mostra os buracos na numeracao da",
@@ -2675,7 +3862,7 @@ function Show-XmlDownloader {
             "   ABRIR PASTA / ZIP   reabrem o ultimo lote baixado.",
             "",
             "ATALHOS",
-            "   Enter no campo Notas ja faz a busca.",
+            "   Enter no campo Notas ou Pedido ja faz a busca.",
             "   Enter no campo Servidor testa a conexao.",
             "   Clique no cabecalho da coluna para ordenar a lista.",
             "   Botao direito na lista: marcar todos, desmarcar todos, copiar chave.",
@@ -2746,6 +3933,7 @@ function Show-XmlDownloader {
             })
 
         $btnConferir.Add_Click($conferir)
+        $btnPdf.Add_Click($gerarPdf)
 
         $btnCopiar.Add_Click({
                 if ($Script:XmlFaltantes.Count -eq 0) {
@@ -2785,7 +3973,10 @@ function Show-XmlDownloader {
                 if ($null -ne $it -and "$($it.Caminho)" -ne "" -and (Test-Path $it.Caminho)) {
                     Start-Process -FilePath $it.Caminho
                 }
-                else { & $setStatus "Baixe a nota antes de abrir o arquivo." $Script:UiAmarelo }
+                elseif ($null -ne $it -and "$($it.CaminhoPdf)" -ne "" -and (Test-Path -LiteralPath $it.CaminhoPdf)) {
+                    Start-Process -FilePath $it.CaminhoPdf
+                }
+                else { & $setStatus "Baixe a nota ou gere o PDF antes de abrir o arquivo." $Script:UiAmarelo }
             })
 
         $miChave.Add_Click({
@@ -2830,6 +4021,7 @@ function Show-XmlDownloader {
                     4 { $expr = { "$($_.Chave)" } }
                     5 { $expr = { [long]$_.Tamanho } }
                     6 { $expr = { "$($_.Arquivo)" } }
+                    7 { $expr = { if ($null -ne $_.Pedido) { [long]$_.Pedido } else { [long]-1 } } }
                 }
                 if ($Script:XmlOrdemAsc) { $ord = @($Script:XmlResultados | Sort-Object $expr) }
                 else { $ord = @($Script:XmlResultados | Sort-Object $expr -Descending) }
@@ -2880,6 +4072,14 @@ function Show-XmlDownloader {
 
         # Enter nos campos principais evita ter que ir ate o botao
         $txtNotas.Add_KeyDown({
+                param($s, $e)
+                if ($e.KeyCode -eq [System.Windows.Forms.Keys]::Enter) {
+                    $e.SuppressKeyPress = $true
+                    [void](& $buscar)
+                }
+            })
+
+        $txtPedidos.Add_KeyDown({
                 param($s, $e)
                 if ($e.KeyCode -eq [System.Windows.Forms.Keys]::Enter) {
                     $e.SuppressKeyPress = $true
@@ -9063,7 +10263,7 @@ $bXml.Text = "Baixar XMLs NFC-e"
 $bXml.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
 $bXml.Cursor = 'Hand'
 Format-SupportBtn $bXml $colorSql
-$Script:ToolTip.SetToolTip($bXml, "Conecta no banco netwebpdv e baixa em lote os XMLs das NFC-e por série e sequência, por período ou por chave de acesso. Já monta a pasta organizada e o .zip pronto para enviar ao cliente, e avisa quais notas não estão no banco.")
+$Script:ToolTip.SetToolTip($bXml, "Conecta no banco netwebpdv e baixa em lote os XMLs das NFC-e por série e sequência, por período, por chave de acesso ou pelo número do pedido. Já monta a pasta organizada e o .zip pronto para enviar ao cliente, avisa quais notas não estão no banco e gera o espelho fiscal da nota em PDF, igual ao cupom.")
 $bXml.Add_Click({ Show-XmlDownloader })
 [void]$tbl.Controls.Add($bXml)
 
@@ -9202,12 +10402,12 @@ Log-Message "LOG" "  SUPORTE E DIAGNÓSTICO ...... impressoras, rede, SQL, backu
 Log-Message "LOG" "  Passe o mouse sobre um botão para ver o que ele faz antes de clicar."
 Log-Message "LOG" "---------------------------------------------------------------"
 Log-Message "LOG" "NOVO NA v5.0"
-Log-Message "SUCESSO" "  Baixar XMLs NFC-e: por série, período ou chave, em .zip pronto para o contador"
+Log-Message "SUCESSO" "  Baixar XMLs NFC-e: por série, período, chave ou pedido, e espelho fiscal da nota em PDF"
 Log-Message "SUCESSO" "  Backup do Banco NetWebPDV: backup completo com o banco no ar, sem parar o serviço"
 Log-Message "SUCESSO" "  Impressoras LPR: cria a impressora, imprime teste e corrige a porta quando o IP muda"
 Log-Message "SUCESSO" "  Drivers de impressora: pesquisa por marca ou modelo"
 Log-Message "LOG" "---------------------------------------------------------------"
-Log-Message "LOG" "Downloads, XMLs e backups ficam em: Área de Trabalho > Arquivos Xmenu"
+Log-Message "LOG" "Downloads, XMLs, espelhos em PDF e backups ficam em: Área de Trabalho > Arquivos Xmenu"
 Log-Message "LOG" "O registro de cada sessão fica em: C:\Arquivos Xmenu\Logs"
 $ehAdmin = $false
 try { $ehAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator) } catch {}
