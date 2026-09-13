@@ -2307,11 +2307,52 @@ function Show-PrinterManager {
                         throw "Arquivo baixado esta corrompido ou invalido (link quebrado ou pagina de erro)."
                     }
                     Log-Message "SUCESSO" "Download concluido: $dlFile"
-                    $this.Text = "  Instalando $dlFile ..."
-                    # WorkingDirectory na pasta de downloads: instaladores auto-extraiveis (WinRAR SFX)
-                    # passam a sugerir essa pasta em vez de C:\WINDOWS\system32.
-                    Start-Process -FilePath $dest -WorkingDirectory $Script:DownloadFolder
-                    Log-Message "SUCESSO" "Instalador iniciado: $dlFile"
+                    Unblock-File -Path $dest -ErrorAction SilentlyContinue
+
+                    if ($dlFile.EndsWith(".zip")) {
+                        # ZIP nao e instalador: extrai e abre a pasta com o conteudo.
+                        Log-Message "ZIP" "Extraindo arquivo: $dlFile"
+                        $this.Text = "  Extraindo $dlFile ..."
+                        [System.Windows.Forms.Application]::DoEvents()
+
+                        Add-Type -AssemblyName System.IO.Compression.FileSystem
+                        $folderName = [System.IO.Path]::GetFileNameWithoutExtension($dlFile)
+                        $finalPath  = Join-Path $Script:DownloadFolder $folderName
+                        $tempPath   = Join-Path $Script:DownloadFolder "temp_$folderName"
+
+                        if (Test-Path $tempPath)  { Remove-Item $tempPath  -Recurse -Force | Out-Null }
+                        if (Test-Path $finalPath) { Remove-Item $finalPath -Recurse -Force | Out-Null }
+                        [System.Windows.Forms.Application]::DoEvents()
+
+                        [System.IO.Compression.ZipFile]::ExtractToDirectory($dest, $tempPath)
+                        [System.Windows.Forms.Application]::DoEvents()
+
+                        # Se o ZIP tem uma pasta raiz unica, sobe um nivel
+                        $items = Get-ChildItem -Path $tempPath
+                        if ($items.Count -eq 1 -and $items[0].PSIsContainer) {
+                            Move-Item -Path $items[0].FullName -Destination $finalPath
+                            Remove-Item $tempPath -Recurse -Force -ErrorAction SilentlyContinue | Out-Null
+                        }
+                        else {
+                            Rename-Item -Path $tempPath -NewName $folderName
+                        }
+
+                        Invoke-Item $finalPath
+                        Log-Message "SUCESSO" "Extraido com sucesso para: $folderName"
+                    }
+                    elseif ($dlFile.EndsWith(".rar")) {
+                        # RAR nao tem suporte nativo no Windows: abre com o programa associado.
+                        $this.Text = "  Abrindo $dlFile ..."
+                        Invoke-Item $dest
+                        Log-Message "SUCESSO" "Arquivo RAR aberto: $dlFile"
+                    }
+                    else {
+                        $this.Text = "  Instalando $dlFile ..."
+                        # WorkingDirectory na pasta de downloads: instaladores auto-extraiveis (WinRAR SFX)
+                        # passam a sugerir essa pasta em vez de C:\WINDOWS\system32.
+                        Start-Process -FilePath $dest -WorkingDirectory $Script:DownloadFolder
+                        Log-Message "SUCESSO" "Instalador iniciado: $dlFile"
+                    }
                     $this.Text = "✔ $origText"
                 } catch {
                     $errMsg = $_.Exception.Message
@@ -2488,6 +2529,7 @@ function Show-PrinterManager {
         Add-DriverButton $pnlDrivers ([ref]$drvY) "  [DRIVER] Zebra ZD220 / ZD230  (ZIP - contem instalador)" "https://www.zebra.com/content/dam/support-dam/en/driver/unrestricted/0002/zddriver-v1062628275-certified.zip" "Zebra_ZD220_ZD230_Driver.zip" $colorXtag
         Add-DriverButton $pnlDrivers ([ref]$drvY) "  [DRIVER] Argox  (Todos os modelos, v2022.1)" "$baseUrl/Argox/Argox_PrinterDrivers_v2022.1.exe" "Argox_PrinterDrivers_v2022.1.exe" $colorXtag
         Add-DriverButton $pnlDrivers ([ref]$drvY) "  [DRIVER] Gainscha  (Todos os modelos, v2020.1)" "$baseUrl/Gainscha/Gainscha_GPrinterDrivers_v2020.1.exe" "Gainscha_GPrinterDrivers_v2020.1.exe" $colorXtag
+        Add-DriverButton $pnlDrivers ([ref]$drvY) "  [DRIVER] Zetex Z60XT  (ZIP - Drive, ~225 MB)" "https://drive.usercontent.google.com/download?id=1wWLiTWrtHCBRP9L0P9GG2eRKGEgfo2HJ&export=download&confirm=t" "Zetex_Z60XT_Driver.zip" $colorXtag
         Add-DriverButton $pnlDrivers ([ref]$drvY) "  [UTILITÁRIO] Gerenciador Elgin L42 PRO FULL  (v1.5.1)" "$xtagBaseUrl/Elgin/L42PRO%20FULL/Utilit%C3%A1rios/GerenciadorL42PRO_Full_1.5.1.exe" "GerenciadorL42PRO_Full_1.5.1.exe" $colorXtagUtil
         Add-DriverButton $pnlDrivers ([ref]$drvY) "  [UTILITÁRIO] Gerenciador Elgin L42 DT  (v1.5.6)" "$xtagBaseUrl/Elgin/L42DT/Utilit%C3%A1rios/GerenciadorL42DT_Full_1.5.6.exe" "GerenciadorL42DT_Full_1.5.6.exe" $colorXtagUtil
 
@@ -4229,6 +4271,7 @@ function Open-Selector {
     
     $versions = @()
     if ($Type -eq "PDV") {
+        $versions += @{Name = "NetPDV v1.3.67.0"; Url = "https://netcontroll.com.br/util/instaladores/netpdv/1.3/67/0/NetPDV.zip"; File = "NetPDV_1.3.67.0.zip" }
         $versions += @{Name = "NetPDV v1.3.64.0"; Url = "https://netcontroll.com.br/util/instaladores/netpdv/1.3/64/0/NetPDV.zip"; File = "NetPDV_1.3.64.0.zip" }
         $versions += @{Name = "NetPDV v1.3.63.0"; Url = "https://netcontroll.com.br/util/instaladores/netpdv/1.3/63/0/NetPDV.zip"; File = "NetPDV_1.3.63.0.zip" }
         $versions += @{Name = "NetPDV v1.3.60.0"; Url = "https://netcontroll.com.br/util/instaladores/netpdv/1.3/60/0/NetPDV.zip"; File = "NetPDV_1.3.60.0.zip" }

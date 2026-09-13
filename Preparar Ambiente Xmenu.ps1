@@ -1,5 +1,5 @@
 ﻿# =============================================================================
-# XMENU SYSTEM MANAGER v17.59
+# XMENU SYSTEM MANAGER v5.0
 # Visual: Dashboard Moderno
 # Correcoes:
 #   - CRITICO: Removido DoEvents do loop de evento de download (causava crash).
@@ -15,6 +15,7 @@ $ErrorActionPreference = "SilentlyContinue"
 # Define diretorios
 $Script:DesktopPath = [Environment]::GetFolderPath("Desktop")
 $Script:DownloadFolder = Join-Path $Script:DesktopPath "Arquivos Xmenu"
+$Script:BackupPasta = Join-Path $Script:DownloadFolder "Backup NetWebPDV"
 $Script:RepoBase = "https://raw.githubusercontent.com/VMazza10/Preparador-de-Ambiente-XMenu/main"
 
 if (-not (Test-Path $Script:DownloadFolder)) {
@@ -810,6 +811,2852 @@ function Show-ServiceManager {
     catch {
         Log-Message "ERRO" "Falha no painel de servicos: $_"
         [System.Windows.Forms.MessageBox]::Show("Falha ao abrir o painel: $($_.Exception.Message)", "Servicos", "OK", "Error") | Out-Null
+    }
+}
+
+# -----------------------------------------------------------------------------
+# BAIXAR XMLs DE NOTAS (BANCO)
+# Le as NFC-e direto do netwebpdv e grava em lote numa pasta + zip.
+#
+# Estrutura real do banco (conferida em cliente com movimento):
+#   NFCeTokenID    = controle de numeracao, 1 linha por nota (Serie + ID).
+#                    Inutilizada=1 -> XML completo em XmlInutilizada (ProcInutNFe).
+#                    OFFLine=1     -> XML em xmlEnvioOff (NFe crua, contingencia).
+#   NFCeTokenIDLog = log de transmissao. Liga por IDParceiro + SerieTokenID + IDTokenID.
+#                    xmlEnvio    = <NFe> sem declaracao.
+#                    xmlResposta = nfeProc COMPLETO (NFe + protNFe) -> fonte preferida.
+#
+# A PK clusterizada da NFCeTokenID comeca em IDParceiro, por isso ele entra em
+# todo WHERE. A NFCeTokenIDLog so tem indice por ID, entao a busca nela e sempre
+# table scan: o lote vai em blocos com um unico scan por bloco, nunca por nota.
+# -----------------------------------------------------------------------------
+
+function ConvertFrom-FaixaNotas {
+    # Converte texto livre em array de inteiros ordenado e sem duplicados.
+    # Aceita "1-10", "1,5,9", "1-10,15,20-25" e tolera espacos. Inverte "10-1".
+    # Tokens invalidos ("abc") sao ignorados; se nada sobrar, devolve erro amigavel.
+    # Devolve hashtable: Ok / Notas / Total / Erro / Ignorados / Confirmar
+    param(
+        [string]$Texto,
+        [int]$LimiteAviso = 2000,
+        [int]$LimiteRigido = 200000,
+        [switch]$Confirmar
+    )
+
+    $res = @{ Ok = $false; Notas = @(); Total = 0; Erro = ""; Ignorados = @(); Confirmar = $false }
+    $amigavel = "Não entendi o intervalo. Informe algo como 1-15 ou 1,5,9."
+
+    if ([string]::IsNullOrWhiteSpace($Texto)) { $res.Erro = $amigavel; return $res }
+
+    # Virgula, ponto-e-virgula e quebra de linha valem como o mesmo separador
+    $partes = ($Texto -replace '[;\r\n]', ',') -split ','
+    $conjunto = New-Object 'System.Collections.Generic.HashSet[int]'
+
+    foreach ($p in $partes) {
+        $item = "$p".Trim()
+        if ($item -eq '') { continue }
+
+        if ($item -match '^(\d+)\s*-\s*(\d+)$') {
+            $a = 0; $b = 0
+            if (-not [int]::TryParse($matches[1], [ref]$a) -or -not [int]::TryParse($matches[2], [ref]$b)) {
+                $res.Ignorados += $item; continue
+            }
+            if ($a -gt $b) { $t = $a; $a = $b; $b = $t }   # "10-1" vira 1-10
+            if ($b -lt 1) { $res.Ignorados += $item; continue }
+            if ($a -lt 1) { $a = 1 }
+            if (($b - $a + 1) -gt $LimiteRigido) {
+                $res.Erro = "O intervalo $item é grande demais (limite de $LimiteRigido notas por busca)."
+                return $res
+            }
+            for ($n = $a; $n -le $b; $n++) { [void]$conjunto.Add($n) }
+        }
+        elseif ($item -match '^(\d+)$') {
+            $n = 0
+            if (-not [int]::TryParse($matches[1], [ref]$n)) { $res.Ignorados += $item; continue }
+            if ($n -lt 1) { $res.Ignorados += $item; continue }
+            [void]$conjunto.Add($n)
+        }
+        else {
+            $res.Ignorados += $item
+        }
+    }
+
+    if ($conjunto.Count -eq 0) { $res.Erro = $amigavel; return $res }
+
+    $res.Notas = @(@($conjunto) | Sort-Object)
+    $res.Total = $res.Notas.Count
+    $res.Ok = $true
+
+    # Lote muito grande: avisa (e pergunta, quando chamada pela interface)
+    if ($res.Total -gt $LimiteAviso) {
+        $res.Confirmar = $true
+        if ($Confirmar) {
+            $msg = "Você selecionou $($res.Total) notas. Isso pode demorar bastante e gerar muitos arquivos.`r`n`r`nDeseja continuar mesmo assim?"
+            $r = [System.Windows.Forms.MessageBox]::Show($msg, "Baixar XMLs NFC-e", "YesNo", "Warning")
+            if ($r -ne [System.Windows.Forms.DialogResult]::Yes) {
+                $res.Ok = $false
+                $res.Erro = "Busca cancelada: $($res.Total) notas é um lote muito grande."
+            }
+        }
+    }
+
+    return $res
+}
+
+function ConvertTo-FaixaTexto {
+    # Caminho inverso: 3,7,8,9,12 vira "3, 7-9, 12" (usado no relatorio de faltantes)
+    param([int[]]$Numeros)
+    if ($null -eq $Numeros -or $Numeros.Count -eq 0) { return "" }
+    $ord = @($Numeros | Sort-Object -Unique)
+    $partes = @()
+    $ini = $ord[0]; $ant = $ord[0]
+    for ($i = 1; $i -lt $ord.Count; $i++) {
+        if ($ord[$i] -eq ($ant + 1)) { $ant = $ord[$i]; continue }
+        $partes += $(if ($ini -eq $ant) { "$ini" } else { "$ini-$ant" })
+        $ini = $ord[$i]; $ant = $ord[$i]
+    }
+    $partes += $(if ($ini -eq $ant) { "$ini" } else { "$ini-$ant" })
+    return ($partes -join ", ")
+}
+
+function Get-XmlDbValor {
+    # Le uma coluna do SqlDataReader devolvendo $null no lugar de DBNull
+    param($Reader, [string]$Coluna)
+    try {
+        $i = $Reader.GetOrdinal($Coluna)
+        if ($Reader.IsDBNull($i)) { return $null }
+        return $Reader.GetValue($i)
+    }
+    catch { return $null }
+}
+
+function Repair-XmlAcentos {
+    # As colunas de XML sao varchar (nao nvarchar). Se o sistema gravou bytes UTF-8
+    # numa coluna de collation Latin1, os acentos voltam como "Ã§", "Ã£", "Âº".
+    # So mexe quando encontra esse padrao, e desfaz sozinho se o palpite estiver errado.
+    param([string]$Texto)
+    if ([string]::IsNullOrEmpty($Texto)) { return $Texto }
+    if ($Texto -notmatch '[\u00C3\u00C2][\u0080-\u00BF]') { return $Texto }
+    try {
+        $latin = [System.Text.Encoding]::GetEncoding(28591)
+        $bytes = $latin.GetBytes($Texto)
+        $utf = New-Object System.Text.UTF8Encoding($false, $true)
+        return $utf.GetString($bytes)
+    }
+    catch { return $Texto }
+}
+
+function Resolve-XmlNfe {
+    # Decide o conteudo final do arquivo a partir do que veio do banco.
+    # Prioridade: xmlResposta (que no NetPDV ja e o nfeProc pronto) > montagem
+    # manual de NFe + protNFe > NFe crua. Nunca lanca excecao: em ultimo caso
+    # devolve o texto original marcado, para o lote nao parar por causa de uma nota.
+    # Devolve hashtable: Ok / Conteudo / Forma / Chave / Aviso / Motivo
+    param([string]$XmlEnvio, [string]$XmlResposta, [switch]$MontarProc)
+
+    $res = @{ Ok = $false; Conteudo = ""; Forma = "vazio"; Chave = ""; Aviso = ""; Motivo = "" }
+    $decl = '<?xml version="1.0" encoding="UTF-8"?>'
+
+    # Protocolo so vale quando a SEFAZ autorizou: 100, ou 150 (fora de prazo).
+    # Rejeicao e denegacao tambem chegam dentro de um protNFe, e montar o nfeProc
+    # com elas gerava um XML que aparecia AUTORIZADA e o contador recusava.
+    # Devolve "" quando autorizado, senao o motivo.
+    $motivoRecusa = {
+        param($Prot)
+        $cs = $Prot.SelectSingleNode(".//*[local-name()='cStat']")
+        if ($null -eq $cs) { return "protocolo sem cStat" }
+        $codigo = "$($cs.InnerText)".Trim()
+        if ($codigo -eq '100' -or $codigo -eq '150') { return "" }
+        $txt = "SEFAZ devolveu cStat $codigo"
+        $mot = $Prot.SelectSingleNode(".//*[local-name()='xMotivo']")
+        if ($null -ne $mot -and "$($mot.InnerText)".Trim() -ne "") { $txt = $txt + " - " + "$($mot.InnerText)".Trim() }
+        return $txt
+    }
+    $motivoProt = ""
+
+    $limpa = {
+        param([string]$s)
+        if ([string]::IsNullOrWhiteSpace($s)) { return "" }
+        $s = Repair-XmlAcentos $s
+        $s = $s.Trim([char]0xFEFF, [char]0x20, [char]0x09, [char]0x0D, [char]0x0A)
+        $p = $s.IndexOf('<')
+        if ($p -gt 0) { $s = $s.Substring($p) }
+        return $s
+    }
+
+    $envio = & $limpa $XmlEnvio
+    $resposta = & $limpa $XmlResposta
+
+    # 1) A resposta da SEFAZ ja costuma ser o nfeProc completo: e o arquivo ideal.
+    # PreserveWhitespace mantem o XML byte a byte: espaco removido dentro da parte
+    # assinada invalidaria a assinatura.
+    $docR = $null
+    if ($resposta -ne "") {
+        $docR = New-Object System.Xml.XmlDocument
+        $docR.PreserveWhitespace = $true
+        try {
+            $docR.LoadXml($resposta)
+            if ($docR.DocumentElement.LocalName -eq 'nfeProc') {
+                $protR = $docR.SelectSingleNode("//*[local-name()='protNFe']")
+                if ($null -ne $protR) { $motivoProt = & $motivoRecusa $protR }
+                if ($null -ne $protR -and $motivoProt -eq "") {
+                    $res.Conteudo = $decl + $docR.DocumentElement.OuterXml
+                    $res.Forma = "nfeProc"
+                    $res.Chave = Get-XmlChave $docR
+                    $res.Ok = $true
+                    return $res
+                }
+            }
+        }
+        catch { $docR = $null }
+    }
+
+    if ($envio -eq "") {
+        # Sem o envio, mas a resposta traz a nota dentro de um nfeProc sem
+        # protocolo valido: segue com a nota de la para sair como SEM PROTOCOLO
+        if ($null -ne $docR -and $docR.DocumentElement.LocalName -eq 'nfeProc') { $envio = $docR.DocumentElement.OuterXml }
+        elseif ($resposta -ne "") {
+            # So a resposta, sem a nota: nao e uma NFC-e autorizada
+            $res.Conteudo = $resposta; $res.Forma = "resposta crua"; $res.Ok = $true
+            $res.Aviso = "SEM PROTOCOLO"; $res.Motivo = "o banco só tem a resposta da SEFAZ, sem a nota"
+            return $res
+        }
+        else {
+            $res.Aviso = "sem XML no banco"
+            return $res
+        }
+    }
+
+    $docE = New-Object System.Xml.XmlDocument
+    $docE.PreserveWhitespace = $true
+    try { $docE.LoadXml($envio) }
+    catch {
+        # Nao parseia: grava assim mesmo, quem chama marca o arquivo como corrompido
+        $res.Conteudo = $envio
+        $res.Forma = "não parseável"
+        $res.Aviso = "XML do banco não é um documento válido"
+        $res.Ok = $true
+        return $res
+    }
+
+    $raiz = $docE.DocumentElement.LocalName
+    $res.Chave = Get-XmlChave $docE
+
+    # 2) Ja veio pronto no proprio envio, com protocolo autorizado
+    if ($raiz -eq 'nfeProc') {
+        $protE = $docE.SelectSingleNode("//*[local-name()='protNFe']")
+        if ($null -ne $protE) {
+            $m = & $motivoRecusa $protE
+            if ($m -eq "") {
+                $res.Conteudo = $decl + $docE.DocumentElement.OuterXml
+                $res.Forma = "nfeProc"
+                $res.Ok = $true
+                return $res
+            }
+            $motivoProt = $m
+        }
+    }
+
+    # 3) Acha o no <NFe>: solto, dentro de um lote <enviNFe> ou de um nfeProc
+    # cujo protocolo nao era de autorizacao
+    $nfe = $null
+    if ($raiz -eq 'NFe') { $nfe = $docE.DocumentElement }
+    elseif ($raiz -eq 'enviNFe' -or $raiz -eq 'nfeProc') {
+        foreach ($n in $docE.DocumentElement.ChildNodes) {
+            if ($n.LocalName -eq 'NFe') { $nfe = $n; break }
+        }
+    }
+
+    if ($null -eq $nfe) {
+        # Inutilizacao (ProcInutNFe), evento, ou formato que eu nao conheco: grava inteiro
+        $res.Conteudo = $decl + $docE.DocumentElement.OuterXml
+        $res.Forma = $raiz
+        $res.Ok = $true
+        return $res
+    }
+
+    if (-not $MontarProc) {
+        $res.Conteudo = $decl + $nfe.OuterXml
+        $res.Forma = "NFe"
+        $res.Ok = $true
+        return $res
+    }
+
+    # 4) Monta o nfeProc na mao: NFe + protNFe tirado da resposta. Resposta de
+    # lote pode trazer o protocolo de mais de uma nota: vale o da mesma chave.
+    $prot = $null
+    if ($resposta -ne "") {
+        try {
+            if ($null -eq $docR) {
+                $docR = New-Object System.Xml.XmlDocument
+                $docR.PreserveWhitespace = $true
+                $docR.LoadXml($resposta)
+            }
+            foreach ($p in $docR.SelectNodes("//*[local-name()='protNFe']")) {
+                $ch = $p.SelectSingleNode(".//*[local-name()='chNFe']")
+                if ($res.Chave -eq "" -or $null -eq $ch -or "$($ch.InnerText)".Trim() -eq $res.Chave) { $prot = $p; break }
+            }
+        }
+        catch { $prot = $null }
+    }
+    if ($null -ne $prot) {
+        $m = & $motivoRecusa $prot
+        if ($m -ne "") { $motivoProt = $m; $prot = $null }
+    }
+
+    $versao = "4.00"
+    foreach ($n in $nfe.ChildNodes) {
+        if ($n.LocalName -eq 'infNFe') {
+            $v = $n.GetAttribute('versao')
+            if (-not [string]::IsNullOrWhiteSpace($v)) { $versao = $v }
+            break
+        }
+    }
+
+    if ($null -ne $prot) {
+        $sb = New-Object System.Text.StringBuilder
+        [void]$sb.Append($decl)
+        [void]$sb.Append('<nfeProc xmlns="http://www.portalfiscal.inf.br/nfe" versao="' + $versao + '">')
+        [void]$sb.Append($nfe.OuterXml)
+        [void]$sb.Append($prot.OuterXml)
+        [void]$sb.Append('</nfeProc>')
+        $res.Conteudo = $sb.ToString()
+        $res.Forma = "nfeProc montado"
+        $res.Ok = $true
+    }
+    else {
+        $res.Conteudo = $decl + $nfe.OuterXml
+        $res.Forma = "NFe"
+        $res.Aviso = "SEM PROTOCOLO"
+        $res.Motivo = $motivoProt
+        $res.Ok = $true
+    }
+    return $res
+}
+
+function ConvertTo-XmlArquivo {
+    # Deixa um XML guardado no banco pronto para gravar em UTF-8: conserta os
+    # acentos, tira o lixo antes do primeiro "<" e troca a declaracao original
+    # (que pode dizer utf-16 ou iso-8859-1) pela de UTF-8. Se nao parsear,
+    # devolve o texto limpo como esta.
+    param([string]$Texto)
+    if ([string]::IsNullOrWhiteSpace($Texto)) { return "" }
+    $s = (Repair-XmlAcentos $Texto).Trim([char]0xFEFF, [char]0x20, [char]0x09, [char]0x0D, [char]0x0A)
+    $p = $s.IndexOf('<')
+    if ($p -gt 0) { $s = $s.Substring($p) }
+    $doc = New-Object System.Xml.XmlDocument
+    $doc.PreserveWhitespace = $true
+    try { $doc.LoadXml($s) } catch { return $s }
+    return '<?xml version="1.0" encoding="UTF-8"?>' + $doc.DocumentElement.OuterXml
+}
+
+function Get-XmlChave {
+    # Tira os 44 digitos da chave de acesso de qualquer um dos formatos
+    param($Doc)
+    try {
+        $no = $Doc.DocumentElement.SelectSingleNode("//*[local-name()='infNFe']")
+        if ($null -ne $no) {
+            $id = "$($no.GetAttribute('Id'))"
+            if ($id -match '(\d{44})') { return $matches[1] }
+        }
+        $no = $Doc.DocumentElement.SelectSingleNode("//*[local-name()='chNFe']")
+        if ($null -ne $no -and "$($no.InnerText)" -match '(\d{44})') { return $matches[1] }
+    }
+    catch {}
+    return ""
+}
+
+function Get-XmlNomeArquivo {
+    # Nome dos arquivos de uma nota, sem extensao. O fim do nome diz a situacao,
+    # para o arquivo continuar legivel quando sai da pasta do lote e se mistura.
+    # Devolve hashtable: Nota (a propria nota) / Evento (XML do cancelamento)
+    param($Item, [switch]$Corrompido)
+    $base = "serie$($Item.Serie)_nota$($Item.Nota)"
+    if ("$($Item.Chave)" -ne "") { $base = $base + "_" + $Item.Chave }
+    $base = ($base -replace '[\\/:*?"<>|]', '_')
+
+    $nota = $base
+    if ([bool]$Item.Inutilizada) { $nota = $nota + "_INUT" }
+    elseif ([bool]$Item.Cancelada) { $nota = $nota + "_CANC" }
+    elseif ("$($Item.Status)" -eq "SEM PROTOCOLO") { $nota = $nota + "_SEM_PROTOCOLO" }
+    if ($Corrompido) { $nota = $nota + "_CORROMPIDO" }
+
+    return @{ Nota = $nota; Evento = $base + "_CANC_EVENTO" }
+}
+
+function Get-XmlNomeLote {
+    # Nome da pasta e do zip do lote, feito para mandar direto ao cliente: diz o
+    # que tem dentro e nada mais, sem data e hora da geracao. Baixar o mesmo
+    # filtro de novo vira "(2)", "(3)" em New-XmlLotePasta.
+    #   Serie ...  XML NFC-e - Série 1 - Notas 1 a 15 e 2000 | ... - Nota 5
+    #   Periodo .  XML NFC-e - Agosto de 2026 | ... - Julho a Agosto de 2026
+    #              XML NFC-e - 01-08-2026 a 12-09-2026 | ... - 12-09-2026
+    #   Chave ...  XML NFC-e - 3 chaves de acesso
+    #   -Series: series das notas gravadas, usadas quando nao ha serie escolhida
+    #            ("Séries 7 e 8"; acima de 3 vira "4 séries")
+    param(
+        [ValidateSet('Serie', 'Periodo', 'Chave')][string]$Modo,
+        [string]$Serie = "",
+        [int[]]$Series = @(),
+        [int[]]$Notas = @(),
+        [datetime]$De,
+        [datetime]$Ate,
+        [int]$Quantidade = 0
+    )
+    $partes = @("XML NFC-e")
+    if ("$Serie".Trim() -ne "") { $partes += "Série " + "$Serie".Trim() }
+    else {
+        $listaSeries = @($Series | Sort-Object -Unique)
+        if ($listaSeries.Count -eq 1) { $partes += "Série $($listaSeries[0])" }
+        elseif ($listaSeries.Count -ge 2 -and $listaSeries.Count -le 3) {
+            $partes += "Séries " + ($listaSeries[0..($listaSeries.Count - 2)] -join ", ") + " e " + $listaSeries[-1]
+        }
+        elseif ($listaSeries.Count -gt 3) { $partes += "$($listaSeries.Count) séries" }
+    }
+
+    if ($Modo -eq 'Serie') {
+        $ord = @($Notas | Sort-Object -Unique)
+        if ($ord.Count -eq 1) { $partes += "Nota $($ord[0])" }
+        elseif ($ord.Count -gt 1) {
+            # "1-10, 15, 20-25" vira "1 a 10, 15 e 20 a 25"
+            $trechos = @((ConvertTo-FaixaTexto $ord) -split ',\s*' | ForEach-Object { $_ -replace '-', ' a ' })
+            $faixa = $trechos[-1]
+            if ($trechos.Count -gt 1) { $faixa = ($trechos[0..($trechos.Count - 2)] -join ", ") + " e " + $faixa }
+            # Lista picada demais nao cabe no nome: resume em quantidade + menor e maior
+            if ($faixa.Length -gt 40) { $partes += "$($ord.Count) notas de $($ord[0]) a $($ord[-1])" }
+            else { $partes += "Notas $faixa" }
+        }
+    }
+    elseif ($Modo -eq 'Periodo') {
+        # Mes por extenso fixo em portugues: nao depende do idioma do Windows
+        $meses = @("", "Janeiro", "Fevereiro", "Março", "Abril", "Maio", "Junho", "Julho",
+            "Agosto", "Setembro", "Outubro", "Novembro", "Dezembro")
+        $d1 = $De.Date; $d2 = $Ate.Date
+        $mesesCheios = ($d1.Day -eq 1 -and $d2.AddDays(1).Day -eq 1 -and $d2 -gt $d1)
+        if ($d1 -eq $d2) { $partes += $d1.ToString("dd-MM-yyyy") }
+        elseif ($mesesCheios -and $d1.Year -eq $d2.Year -and $d1.Month -eq $d2.Month) {
+            $partes += "$($meses[$d1.Month]) de $($d1.Year)"
+        }
+        elseif ($mesesCheios -and $d1.Year -eq $d2.Year) {
+            $partes += "$($meses[$d1.Month]) a $($meses[$d2.Month]) de $($d2.Year)"
+        }
+        elseif ($mesesCheios) {
+            $partes += "$($meses[$d1.Month]) de $($d1.Year) a $($meses[$d2.Month]) de $($d2.Year)"
+        }
+        else { $partes += $d1.ToString("dd-MM-yyyy") + " a " + $d2.ToString("dd-MM-yyyy") }
+    }
+    else {
+        if ($Quantidade -eq 1) { $partes += "1 chave de acesso" }
+        else { $partes += "$Quantidade chaves de acesso" }
+    }
+
+    return ($partes -join " - ")
+}
+
+function New-XmlLotePasta {
+    # Cria a pasta do lote em "Arquivos Xmenu\XMLs" sem nunca sobrescrever outra.
+    # Confere o zip tambem: quem manda o zip e apaga a pasta nao pode perder o
+    # zip antigo quando baixar o mesmo filtro de novo.
+    param([string]$Nome)
+    $raiz = Join-Path $Script:DownloadFolder "XMLs"
+    if (-not (Test-Path $raiz)) { New-Item -Path $raiz -ItemType Directory -Force | Out-Null }
+    $limpo = (($Nome -replace '[\\/:*?"<>|]', '-') -replace '\s+', ' ').Trim()
+    if ($limpo.Length -gt 90) { $limpo = $limpo.Substring(0, 90) }
+    # O Windows descarta ponto e espaco no fim do nome da pasta
+    $limpo = $limpo.TrimEnd('.', ' ')
+    if ($limpo -eq '') { $limpo = "XML NFC-e" }
+    $destino = Join-Path $raiz $limpo
+    # Copia do mesmo lote segue o padrao do Windows: "Nome (2)", "Nome (3)"
+    $n = 1
+    while ((Test-Path -LiteralPath $destino) -or (Test-Path -LiteralPath ($destino + ".zip"))) {
+        $n++; $destino = Join-Path $raiz ($limpo + " ($n)")
+    }
+    New-Item -Path $destino -ItemType Directory -Force | Out-Null
+    return $destino
+}
+
+function Show-XmlDownloader {
+    try {
+        if ($null -ne $Script:XmlForm -and -not $Script:XmlForm.IsDisposed) {
+            $Script:XmlForm.Activate(); return
+        }
+
+        # Credenciais padrao de todo cliente: senha num ponto so
+        $senhaPadrao = "netcontroll"
+        $bancoPadrao = "netwebpdv"
+
+        $Script:XmlCancelar = $false
+        $Script:XmlOcupado = $false
+        $Script:XmlOrdemCol = -1
+        $Script:XmlOrdemAsc = $true
+        $Script:XmlResultados = @()
+        $Script:XmlPedidas = @()
+        $Script:XmlUltimoLote = ""
+        $Script:XmlUltimoZip = ""
+        $Script:XmlFaltantes = @()
+        $Script:XmlArqServidor = Join-Path $Script:DownloadFolder "xml_ultimo_servidor.txt"
+
+        # Servidor da ultima execucao, se houver
+        $srvInicial = "127.0.0.1"
+        try {
+            if (Test-Path $Script:XmlArqServidor) {
+                $lido = (Get-Content -Path $Script:XmlArqServidor -TotalCount 1 -ErrorAction Stop).Trim()
+                if ($lido -ne "") { $srvInicial = $lido }
+            }
+        }
+        catch {}
+
+        $f = New-ToolForm "Baixar XMLs NFC-e" 1000 720
+        $f.MinimumSize = New-Object System.Drawing.Size(1000, 720)
+        $Script:XmlForm = $f
+
+        # Cartao: agrupa cada etapa no mesmo tom que os medidores do monitor usam
+        $novoCartao = {
+            param([int]$X, [int]$Y, [int]$W, [int]$H)
+            $p = New-Object System.Windows.Forms.Panel
+            $p.Location = New-Object System.Drawing.Point($X, $Y)
+            $p.Size = New-Object System.Drawing.Size($W, $H)
+            $p.BackColor = $Script:UiCartao
+            $p.Anchor = 'Top,Left,Right'
+            [void]$f.Controls.Add($p)
+            return $p
+        }
+
+        $novoCampo = {
+            param($Pai, [int]$X, [int]$Y, [int]$W, [string]$Valor = "", [int]$H = 24, [switch]$Multi)
+            $t = New-Object System.Windows.Forms.TextBox
+            $t.Location = New-Object System.Drawing.Point($X, $Y)
+            $t.Size = New-Object System.Drawing.Size($W, $H)
+            $t.BackColor = [System.Drawing.Color]::FromArgb(20, 24, 34)
+            $t.ForeColor = $Script:UiTexto
+            $t.BorderStyle = 'FixedSingle'
+            if ($Multi) { $t.Multiline = $true; $t.ScrollBars = 'Vertical' }
+            $t.Text = $Valor
+            [void]$Pai.Controls.Add($t)
+            return $t
+        }
+
+        $novaCombo = {
+            param($Pai, [int]$X, [int]$Y, [int]$W, [switch]$Editavel)
+            $c = New-Object System.Windows.Forms.ComboBox
+            $c.Location = New-Object System.Drawing.Point($X, $Y)
+            $c.Width = $W
+            $c.BackColor = [System.Drawing.Color]::FromArgb(20, 24, 34)
+            $c.ForeColor = $Script:UiTexto
+            $c.FlatStyle = 'Flat'
+            if ($Editavel) { $c.DropDownStyle = 'DropDown' } else { $c.DropDownStyle = 'DropDownList' }
+            [void]$Pai.Controls.Add($c)
+            return $c
+        }
+
+        $novoRadio = {
+            param($Pai, [string]$Texto, [int]$X, [int]$Y, [int]$W)
+            $r = New-Object System.Windows.Forms.RadioButton
+            $r.Text = $Texto
+            $r.Location = New-Object System.Drawing.Point($X, $Y)
+            $r.Size = New-Object System.Drawing.Size($W, 20)
+            $r.ForeColor = $Script:UiTexto
+            $r.BackColor = [System.Drawing.Color]::Transparent
+            $r.Font = New-Object System.Drawing.Font("Segoe UI", 9.5, [System.Drawing.FontStyle]::Bold)
+            $r.Cursor = 'Hand'
+            [void]$Pai.Controls.Add($r)
+            return $r
+        }
+
+        $novaData = {
+            param($Pai, [int]$X, [int]$Y, [int]$W)
+            $d = New-Object System.Windows.Forms.DateTimePicker
+            $d.Location = New-Object System.Drawing.Point($X, $Y)
+            $d.Width = $W
+            $d.Format = 'Short'
+            $d.CalendarMonthBackground = $Script:UiCartao
+            $d.CalendarForeColor = $Script:UiTexto
+            $d.CalendarTitleBackColor = $Script:UiAzul
+            $d.CalendarTitleForeColor = [System.Drawing.Color]::White
+            [void]$Pai.Controls.Add($d)
+            return $d
+        }
+
+        # ---------------------------------------------------------------------
+        # CARTAO 1: conexao
+        # ---------------------------------------------------------------------
+        $cardConn = & $novoCartao 12 10 960 80
+        New-ToolLabel $cardConn "CONEXÃO COM O BANCO" 14 8 10 -Negrito | Out-Null
+        New-ToolLabel $cardConn "Servidor:" 14 36 9 -Cor $Script:UiSuave | Out-Null
+        $txtServidor = & $novoCampo $cardConn 78 33 160 $srvInicial
+        New-ToolLabel $cardConn "Senha:" 254 36 9 -Cor $Script:UiSuave | Out-Null
+        $txtSenha = & $novoCampo $cardConn 302 33 120 $senhaPadrao
+        New-ToolLabel $cardConn "Parceiro:" 438 36 9 -Cor $Script:UiSuave | Out-Null
+        $cmbParceiro = & $novaCombo $cardConn 498 33 110
+        $dicaTestar = "Conecta no banco $bancoPadrao, mostra a versao do SQL e carrega parceiros e series"
+        $btnTestar = New-ToolButton $cardConn "TESTAR CONEXÃO" 624 32 150 27 $Script:UiAzul $null $dicaTestar
+        $lblConn = New-ToolLabel $cardConn "Informe o servidor e clique em TESTAR CONEXÃO." 14 60 9 -Cor $Script:UiSuave -W 930
+
+        # ---------------------------------------------------------------------
+        # CARTAO 2: os tres modos de busca
+        # ---------------------------------------------------------------------
+        $cardBusca = & $novoCartao 12 98 960 184
+        New-ToolLabel $cardBusca "O QUE BAIXAR" 14 4 10 -Negrito | Out-Null
+
+        $rbSerie = & $novoRadio $cardBusca "Por série + sequência" 12 24 230
+        $rbSerie.Checked = $true
+        New-ToolLabel $cardBusca "Série:" 32 51 9 -Cor $Script:UiSuave | Out-Null
+        $cmbSerie = & $novaCombo $cardBusca 76 48 90 -Editavel
+        New-ToolLabel $cardBusca "Notas:" 182 51 9 -Cor $Script:UiSuave | Out-Null
+        $txtNotas = & $novoCampo $cardBusca 232 48 300 "1-15,2000"
+        $lblContagem = New-ToolLabel $cardBusca "" 546 51 9 -Cor $Script:UiVerde -W 390
+
+        $rbPeriodo = & $novoRadio $cardBusca "Por período" 12 76 230
+        New-ToolLabel $cardBusca "De:" 32 103 9 -Cor $Script:UiSuave | Out-Null
+        $dtIni = & $novaData $cardBusca 60 100 110
+        New-ToolLabel $cardBusca "Até:" 184 103 9 -Cor $Script:UiSuave | Out-Null
+        $dtFim = & $novaData $cardBusca 216 100 110
+        New-ToolLabel $cardBusca "Série (opcional):" 342 103 9 -Cor $Script:UiSuave | Out-Null
+        $cmbSerie2 = & $novaCombo $cardBusca 450 100 90 -Editavel
+
+        $rbChave = & $novoRadio $cardBusca "Por chave de acesso" 12 128 230
+        $txtChaves = & $novoCampo $cardBusca 32 150 640 "" 26 -Multi
+        New-ToolLabel $cardBusca "44 dígitos, por vírgula ou um por linha" 682 154 8.5 -Cor $Script:UiSuave -W 265 | Out-Null
+
+
+        # ---------------------------------------------------------------------
+        # OPCOES DO ARQUIVO
+        # ---------------------------------------------------------------------
+        New-ToolLabel $f "Tipo de nota:" 16 293 9 -Cor $Script:UiSuave | Out-Null
+        $cmbTipo = & $novaCombo $f 108 290 180
+        [void]$cmbTipo.Items.Add("Todas")
+        [void]$cmbTipo.Items.Add("Somente autorizadas")
+        [void]$cmbTipo.Items.Add("Somente inutilizadas")
+        [void]$cmbTipo.Items.Add("Somente canceladas")
+        $cmbTipo.SelectedIndex = 0
+
+        # A busca ja vem com tudo marcado, que e o caso comum. Para baixar so
+        # algumas de um periodo, este botao limpa tudo de uma vez e o contador
+        # ao lado mostra quantas ficaram marcadas.
+        $btnMarcar = New-ToolButton $f "DESMARCAR TODAS" 300 288 140 26 $Script:UiCinza $null "Desmarca todas as notas da lista, para marcar só as que quer baixar. Sem nenhuma marcada, vira MARCAR TODAS."
+        $btnMarcar.Enabled = $false
+        $lblMarcadas = New-ToolLabel $f "" 450 293 9 -Cor $Script:UiSuave -W 150
+
+        # Sem checkbox: gravar a nota sem o protocolo geraria um XML que a SEFAZ e o
+        # contador recusam, e o cancelamento so aparece quando a nota foi cancelada
+        # mesmo. Nao ha escolha util aqui, entao o comportamento e fixo.
+        $lblSaida = New-ToolLabel $f "XML completo, com protocolo e cancelamento quando houver" 622 293 8.5 -Cor $Script:UiSuave -W 350
+        $lblSaida.TextAlign = 'TopRight'
+        $lblSaida.Anchor = 'Top,Right'
+
+        # ---------------------------------------------------------------------
+        # LISTA
+        # A cor da linha ja diz o que aconteceu (verde autorizada, amarelo
+        # inutilizada, vermelho sem XML), entao nao existe coluna de status.
+        # ---------------------------------------------------------------------
+        $lv = New-Object System.Windows.Forms.ListView
+        $lv.Location = New-Object System.Drawing.Point(12, 320)
+        $lv.Size = New-Object System.Drawing.Size(960, 230)
+        $lv.Anchor = 'Top,Left,Right,Bottom'
+        $lv.MultiSelect = $true
+        $lv.CheckBoxes = $true
+        $lv.ShowItemToolTips = $true
+        Format-ToolListView $lv
+        [void]$lv.Columns.Add("Nota", 55)
+        [void]$lv.Columns.Add("Série", 50)
+        [void]$lv.Columns.Add("Data", 115)
+        [void]$lv.Columns.Add("Situação", 115)
+        [void]$lv.Columns.Add("Chave de acesso", 275)
+        [void]$lv.Columns.Add("Tamanho", 75)
+        [void]$lv.Columns.Add("Arquivo gerado", 240)
+        [void]$f.Controls.Add($lv)
+
+        # Aviso sobreposto a lista: no rodape ficava discreto demais para uma
+        # consulta que pode levar alguns segundos.
+        $lblCarregando = New-Object System.Windows.Forms.Label
+        $lblCarregando.TextAlign = 'MiddleCenter'
+        $lblCarregando.Font = New-Object System.Drawing.Font("Segoe UI", 12, [System.Drawing.FontStyle]::Bold)
+        $lblCarregando.ForeColor = $Script:UiAmarelo
+        $lblCarregando.BackColor = [System.Drawing.Color]::FromArgb(20, 24, 34)
+        $lblCarregando.Location = New-Object System.Drawing.Point(13, 400)
+        $lblCarregando.Size = New-Object System.Drawing.Size(958, 70)
+        $lblCarregando.Anchor = 'Top,Left,Right'
+        $lblCarregando.Visible = $false
+        [void]$f.Controls.Add($lblCarregando)
+
+        $menu = New-Object System.Windows.Forms.ContextMenuStrip
+        $miChave = $menu.Items.Add("Copiar chave")
+        $miPasta = $menu.Items.Add("Abrir pasta do arquivo")
+        [void]$menu.Items.Add("-")
+        $miTodos = $menu.Items.Add("Marcar todos")
+        $miNenhum = $menu.Items.Add("Desmarcar todos")
+        $lv.ContextMenuStrip = $menu
+
+        # Cada campo explica a si mesmo no balao, para nao precisar abrir a ajuda.
+        # Fica aqui no fim porque todos os controles ja tem que existir.
+        if ($Script:ToolTip) {
+            $Script:ToolTip.SetToolTip($txtServidor, "Onde está o SQL Server. Deixe 127.0.0.1 quando o banco roda na própria máquina; use o IP ou o nome do servidor quando o PDV é terminal. A janela lembra o último usado.")
+            $Script:ToolTip.SetToolTip($txtSenha, "Senha do usuário sa. Nos clientes é sempre netcontroll; só mude se esse cliente tiver senha diferente.")
+            $Script:ToolTip.SetToolTip($cmbParceiro, "Código da loja dentro do banco. Carrega sozinho ao testar a conexão. Quando só existe um, já vem escolhido.")
+            $Script:ToolTip.SetToolTip($rbSerie, "O modo mais usado: você sabe a série e os números das notas que o cliente pediu.")
+            $Script:ToolTip.SetToolTip($cmbSerie, "Série do caixa. A lista vem do próprio banco depois de testar a conexão.")
+            $Script:ToolTip.SetToolTip($txtNotas, "Aceita intervalo, lista ou os dois juntos:  1-15  |  1,5,9  |  1-10,15,20-25. Pode digitar com espaços. Enter já faz a busca.")
+            $Script:ToolTip.SetToolTip($rbPeriodo, "Quando o cliente pede tudo de um dia ou de um mês, em vez de números específicos.")
+            $Script:ToolTip.SetToolTip($rbChave, "Quando o cliente mandou a chave de acesso da nota em vez do número.")
+            $Script:ToolTip.SetToolTip($txtChaves, "Cole as chaves de 44 dígitos separadas por vírgula ou uma por linha. Pontos e espaços são ignorados.")
+            $Script:ToolTip.SetToolTip($cmbTipo, "Serve como filtro da lista também: depois de buscar, troque a opção e a tela mostra só o que interessa, sem consultar o banco de novo. Em 'Todas', cada número traz a nota autorizada e, se aquele número tiver sido inutilizado, traz a inutilizada no lugar — nunca as duas para o mesmo número.")
+            $Script:ToolTip.SetToolTip($lv, "A coluna Situação diz o que é cada nota. Verde = autorizada, vale. Vermelho = cancelada, não vale. Amarelo = inutilizada ou sem protocolo. Cinza = não existe no banco. Passe o mouse na linha para o detalhe, clique no cabeçalho para ordenar e use o botão direito para marcar ou desmarcar tudo.")
+        }
+
+        # ---------------------------------------------------------------------
+        # PROGRESSO E RODAPE
+        # ---------------------------------------------------------------------
+        $lblProg = New-ToolLabel $f "" 12 560 9 -Cor $Script:UiSuave -W 260
+        $lblProg.Anchor = 'Bottom,Left'
+
+        $pb = New-Object System.Windows.Forms.ProgressBar
+        $pb.Location = New-Object System.Drawing.Point(280, 560)
+        $pb.Size = New-Object System.Drawing.Size(572, 16)
+        $pb.Style = 'Continuous'
+        $pb.Anchor = 'Bottom,Left'
+        [void]$f.Controls.Add($pb)
+
+        $btnCancelar = New-ToolButton $f "CANCELAR" 862 556 110 24 $Script:UiVermelho $null "Interrompe a busca em andamento, ou o download na próxima nota fechando o zip com o que já veio"
+        $btnCancelar.Enabled = $false
+        $btnCancelar.Anchor = 'Bottom,Left'
+
+        # Rodape em grade: 5 colunas de 184px com 10px de respiro. As duas linhas
+        # comecam em 12 e terminam em 972, alinhadas entre si e com a lista.
+        $btnBuscar = New-ToolButton $f "BUSCAR" 12 586 184 30 $Script:UiAzul $null "Consulta o banco e lista as notas do filtro, sem gravar nada ainda"
+        $btnBaixarSel = New-ToolButton $f "BAIXAR SELECIONADOS" 206 586 184 30 $Script:UiVerde $null "Grava so as linhas marcadas na lista"
+        $btnBaixarTudo = New-ToolButton $f "BAIXAR TUDO" 400 586 184 30 $Script:UiVerde $null "Grava todas as linhas que estão aparecendo na lista. Se o Tipo de nota estiver filtrando, baixa só o que o filtro deixou à mostra."
+        $btnConferir = New-ToolButton $f "CONFERIR SEQUÊNCIA" 594 586 184 30 $Script:UiAmarelo $null "So consulta: aponta as lacunas da numeracao na serie, sem baixar nada"
+        $btnAjuda = New-ToolButton $f "COMO USAR" 788 586 184 30 $Script:UiCinza $null "Abre um passo a passo da janela"
+        $btnCopiar = New-ToolButton $f "COPIAR FALTANTES" 12 620 184 30 $Script:UiCinza $null "Copia os números que faltaram na última busca ou conferência, já formatados, para colar num e-mail ou WhatsApp para o cliente"
+        $btnPasta = New-ToolButton $f "ABRIR PASTA" 206 620 184 30 $Script:UiCinza $null "Abre a pasta do ultimo lote baixado"
+        $btnZip = New-ToolButton $f "ABRIR ZIP" 400 620 184 30 $Script:UiCinza $null "Abre a pasta compactada do ultimo lote"
+        $btnFechar = New-ToolButton $f "FECHAR" 788 620 184 30 $Script:UiCinza $null "Fecha esta janela"
+        foreach ($b in @($btnBuscar, $btnBaixarSel, $btnBaixarTudo, $btnConferir, $btnAjuda, $btnCopiar, $btnPasta, $btnZip, $btnFechar)) {
+            $b.Anchor = 'Bottom,Left'
+        }
+
+        $lblStatus = New-ToolLabel $f "Pronto." 12 656 9 -Cor $Script:UiSuave -W 960
+        $lblStatus.Anchor = 'Bottom,Left,Right'
+
+        # ---------------------------------------------------------------------
+        # ROTINAS DA JANELA
+        # ---------------------------------------------------------------------
+        $setStatus = {
+            param([string]$Texto, $Cor = $null)
+            if ($Cor) { $lblStatus.ForeColor = $Cor } else { $lblStatus.ForeColor = $Script:UiSuave }
+            $lblStatus.Text = $Texto
+            [System.Windows.Forms.Application]::DoEvents()
+        }
+
+        # Campos do modo nao escolhido ficam desabilitados, nunca escondidos
+        $atualizaModo = {
+            $m1 = $rbSerie.Checked; $m2 = $rbPeriodo.Checked; $m3 = $rbChave.Checked
+            $cmbSerie.Enabled = $m1; $txtNotas.Enabled = $m1; $lblContagem.Visible = $m1
+            $dtIni.Enabled = $m2; $dtFim.Enabled = $m2; $cmbSerie2.Enabled = $m2
+            $txtChaves.Enabled = $m3
+            # Destaca o modo ativo: o escolhido em verde, os outros apagados
+            if ($m1) { $rbSerie.ForeColor = $Script:UiVerde } else { $rbSerie.ForeColor = $Script:UiSuave }
+            if ($m2) { $rbPeriodo.ForeColor = $Script:UiVerde } else { $rbPeriodo.ForeColor = $Script:UiSuave }
+            if ($m3) { $rbChave.ForeColor = $Script:UiVerde } else { $rbChave.ForeColor = $Script:UiSuave }
+            $btnConferir.Enabled = $m1
+            $btnCopiar.Enabled = ($Script:XmlFaltantes.Count -gt 0)
+        }
+
+        $contaNotas = {
+            $bruto = "$($txtNotas.Text)".Trim()
+            if ($bruto -eq "") {
+                # Campo vazio vira a propria explicacao de como se preenche
+                $lblContagem.ForeColor = $Script:UiSuave
+                $lblContagem.Text = "ex.:  1-15   |   1,5,9   |   1-10,15,20-25"
+                return
+            }
+            $r = ConvertFrom-FaixaNotas -Texto $bruto
+            if ($r.Ok) {
+                $lblContagem.ForeColor = $Script:UiVerde
+                $txt = "$($r.Total) notas selecionadas"
+                if ($r.Confirmar) { $txt = $txt + " (lote grande)" }
+                $lblContagem.Text = $txt
+            }
+            else {
+                $lblContagem.ForeColor = $Script:UiVermelho
+                $lblContagem.Text = $r.Erro
+            }
+        }
+
+        $novaConexao = {
+            param([int]$Timeout = 8)
+            $srv = "$($txtServidor.Text)".Trim()
+            if ($srv -eq "") { $srv = "127.0.0.1" }
+            # Servidor remoto vai forcado por TCP. Sem protocolo, quando o TCP falha o
+            # SqlClient ainda tenta Named Pipes, que ignora o Connect Timeout: IP
+            # errado levava de 11 a 24 s para dar erro. A propria maquina fica como
+            # esta (memoria compartilhada) e quem ja digitou "tcp:"/"np:" tambem.
+            $local = '^(\.|\(local\)|localhost|127\.0\.0\.1|' + [regex]::Escape($env:COMPUTERNAME) + ')([\\,]|$)'
+            if ($srv -notmatch ':' -and $srv -notmatch $local) { $srv = "tcp:" + $srv }
+            $senha = "$($txtSenha.Text)"
+            $cs = "Server=$srv;Database=$bancoPadrao;User Id=sa;Password=$senha;Connect Timeout=$Timeout;TrustServerCertificate=True"
+            return (New-Object System.Data.SqlClient.SqlConnection($cs))
+        }
+
+        # Abre a conexao sem travar a janela. O Open() segurava a tela inteira ate
+        # o SQL desistir ("Nao respondendo"); o OpenAsync volta na hora e a janela
+        # segue respondendo enquanto espera. -Rotulo mostra os segundos passando.
+        $abrirConexao = {
+            param([int]$Timeout = 8, $Rotulo = $null)
+            $cn = & $novaConexao $Timeout
+            $tarefa = $cn.OpenAsync()
+            $relogio = [System.Diagnostics.Stopwatch]::StartNew()
+            $textoBase = ""
+            if ($null -ne $Rotulo) { $textoBase = $Rotulo.Text }
+            $f.UseWaitCursor = $true
+            try {
+                while (-not $tarefa.IsCompleted) {
+                    if ($null -ne $Rotulo) { $Rotulo.Text = "$textoBase $([int]$relogio.Elapsed.TotalSeconds)s" }
+                    [System.Windows.Forms.Application]::DoEvents()
+                    Start-Sleep -Milliseconds 40
+                }
+            }
+            finally { $f.UseWaitCursor = $false }
+            if ($tarefa.IsFaulted) {
+                $erro = $tarefa.Exception.GetBaseException()
+                $cn.Dispose()
+                throw $erro
+            }
+            return $cn
+        }
+
+        # Roda a consulta sem travar a janela e devolve o leitor. O ExecuteReader
+        # segurava a tela ate o SQL Server responder, e um periodo grande num banco
+        # pesado deixava a janela em "Nao respondendo" por dezenas de segundos.
+        # -Cancelavel: o botao CANCELAR interrompe a consulta no proprio servidor.
+        $executarLeitor = {
+            param($Cmd, [switch]$Cancelavel)
+            $tarefa = $Cmd.ExecuteReaderAsync()
+            $pediuCancelar = $false
+            $f.UseWaitCursor = $true
+            try {
+                while (-not $tarefa.IsCompleted) {
+                    if ($Cancelavel -and $Script:XmlCancelar -and -not $pediuCancelar) {
+                        $pediuCancelar = $true
+                        try { $Cmd.Cancel() } catch {}
+                    }
+                    [System.Windows.Forms.Application]::DoEvents()
+                    Start-Sleep -Milliseconds 40
+                }
+            }
+            finally { $f.UseWaitCursor = $false }
+            if ($Cancelavel -and $Script:XmlCancelar) {
+                if (-not $tarefa.IsFaulted -and -not $tarefa.IsCanceled) {
+                    try { $Cmd.Cancel(); $tarefa.Result.Close() } catch {}
+                }
+                throw "Busca cancelada."
+            }
+            if ($tarefa.IsFaulted) { throw $tarefa.Exception.GetBaseException() }
+            # A virgula impede o PowerShell de desenrolar o leitor linha por linha
+            return , $tarefa.Result
+        }
+
+        # Traduz a falha de conexao numa frase que diz o que conferir. Erro que nao
+        # e de conexao (consulta, permissao) volta com a mensagem original.
+        $explicaFalha = {
+            param($Erro)
+            $srv = "$($txtServidor.Text)".Trim()
+            $sql = $Erro
+            while ($null -ne $sql -and $sql -isnot [System.Data.SqlClient.SqlException]) { $sql = $sql.InnerException }
+            if ($null -eq $sql) { return "$($Erro.Message)" }
+            if ($sql.Number -eq 18456) { return "O SQL em $srv recusou o usuário sa com essa senha." }
+            if ($sql.Number -eq 4060) { return "Conectou em $srv, mas o banco $bancoPadrao não existe nesse SQL." }
+            if ($sql.Number -eq 11001) { return "Não achei o servidor ""$srv"" na rede. Confira o nome ou use o IP." }
+            if (@(-1, 2, 26, 40, 53, 64, 258, 1225, 10060, 10061, 10065) -contains $sql.Number) {
+                return "Não achei o SQL Server em $srv. Confira o IP, se a máquina está ligada e se o SQL aceita conexão pela rede (porta 1433)."
+            }
+            return "$($sql.Message)"
+        }
+
+        $carregarSeries = {
+            param($Conexao, $Parceiro)
+            $cmbSerie.Items.Clear(); $cmbSerie2.Items.Clear()
+            $cmd = $Conexao.CreateCommand()
+            $cmd.CommandTimeout = 30
+            $cmd.CommandText = "SELECT DISTINCT Serie FROM NFCeTokenID WHERE IDParceiro = @p ORDER BY Serie"
+            $par = $cmd.Parameters.Add("@p", [System.Data.SqlDbType]::BigInt); $par.Value = [long]$Parceiro
+            $rd = & $executarLeitor $cmd
+            while ($rd.Read()) {
+                $s = "$($rd['Serie'])"
+                [void]$cmbSerie.Items.Add($s)
+                [void]$cmbSerie2.Items.Add($s)
+            }
+            $rd.Close()
+            if ($cmbSerie.Items.Count -gt 0 -and "$($cmbSerie.Text)".Trim() -eq "") { $cmbSerie.SelectedIndex = 0 }
+        }
+
+        $testar = {
+            # -Auto e a tentativa unica feita ao abrir a janela: timeout curto para
+            # nao deixar a tela presa quando a maquina nao tem SQL instalado.
+            param([switch]$Auto)
+            # A janela responde enquanto conecta: sem essa trava, um segundo clique
+            # abriria outra conexao por cima da primeira
+            if ($Script:XmlOcupado) { return }
+            $Script:XmlOcupado = $true
+            $cn = $null
+            try {
+                $btnTestar.Enabled = $false
+                $lblConn.ForeColor = $Script:UiAmarelo
+                $srvTexto = "$($txtServidor.Text)".Trim()
+                if ($srvTexto -eq "") { $srvTexto = "127.0.0.1" }
+                $lblConn.Text = "Conectando em $srvTexto..."
+
+                if ($Auto) { $cn = & $abrirConexao 3 $lblConn } else { $cn = & $abrirConexao 5 $lblConn }
+
+                $cmd = $cn.CreateCommand()
+                $cmd.CommandTimeout = 30
+                $cmd.CommandText = "SELECT @@VERSION AS versao, DB_NAME() AS banco"
+                $rd = & $executarLeitor $cmd
+                $versao = ""; $banco = ""
+                if ($rd.Read()) {
+                    $versao = ("$($rd['versao'])" -split "`n")[0].Trim()
+                    $banco = "$($rd['banco'])"
+                }
+                $rd.Close()
+
+                $cmd2 = $cn.CreateCommand()
+                $cmd2.CommandTimeout = 30
+                $cmd2.CommandText = "SELECT IDParceiro, COUNT(*) AS notas FROM NFCeTokenID GROUP BY IDParceiro ORDER BY notas DESC"
+                $rd2 = & $executarLeitor $cmd2
+                $cmbParceiro.Items.Clear()
+                while ($rd2.Read()) { [void]$cmbParceiro.Items.Add("$($rd2['IDParceiro'])") }
+                $rd2.Close()
+
+                if ($cmbParceiro.Items.Count -eq 0) {
+                    $lblConn.ForeColor = $Script:UiAmarelo
+                    $lblConn.Text = "Conectado em $banco ($versao), mas a tabela NFCeTokenID está vazia."
+                    Log-Message "INFO" "XMLs: conectado em $banco sem notas na NFCeTokenID"
+                    return
+                }
+                $cmbParceiro.SelectedIndex = 0
+                & $carregarSeries $cn ("$($cmbParceiro.Text)".Trim())
+
+                $lblConn.ForeColor = $Script:UiVerde
+                $lblConn.Text = "OK - $versao | banco: $banco | parceiros: $($cmbParceiro.Items.Count) | séries: $($cmbSerie.Items.Count)"
+                Log-Message "SUCESSO" "XMLs: conectado em $($txtServidor.Text) / $banco"
+
+                # Lembra o servidor para a proxima abertura
+                try { "$($txtServidor.Text)".Trim() | Out-File -FilePath $Script:XmlArqServidor -Encoding UTF8 -Force } catch {}
+            }
+            catch {
+                $msg = $_.Exception.Message
+                $amigavel = & $explicaFalha $_.Exception
+                $lblConn.ForeColor = $Script:UiVermelho
+                if ($Auto) {
+                    $lblConn.Text = "Não conectou sozinho. $amigavel"
+                    Log-Message "INFO" "XMLs: conexão automática não respondeu - $msg"
+                }
+                else {
+                    $lblConn.Text = $amigavel
+                    Log-Message "ERRO" "XMLs: falha de conexão - $msg"
+                }
+            }
+            finally {
+                if ($null -ne $cn) { try { $cn.Close() } catch {} }
+                $btnTestar.Enabled = $true
+                $Script:XmlOcupado = $false
+            }
+        }
+
+        # ---------------------------------------------------------------------
+        # SQL
+        # A log so tem indice por ID, entao ela e varrida uma vez por bloco e
+        # deduplicada com ROW_NUMBER (preferindo a autorizada, CodigoRetorno 100).
+        # ---------------------------------------------------------------------
+        $cteLogs = "SELECT g.IDParceiro, g.SerieTokenID, g.IDTokenID, g.Chave, g.nProtocolo, " +
+        "g.CodigoRetorno, g.DataEmissao AS LogDataEmissao, g.xmlEnvio, g.xmlResposta, " +
+        "g.xmlCancelamento, g.xmlRespostaCancelamento, g.DataEmissaoCancelamento, " +
+        "g.ChaveCancelamento, ROW_NUMBER() OVER (PARTITION BY " +
+        "g.IDParceiro, g.SerieTokenID, g.IDTokenID ORDER BY " +
+        "CASE WHEN g.CodigoRetorno = 100 THEN 0 ELSE 1 END, " +
+        "CASE WHEN g.xmlResposta IS NULL THEN 1 ELSE 0 END, g.ID DESC) AS rn FROM NFCeTokenIDLog g"
+
+        $colunas = "t.Serie, t.ID, t.Usada, t.Inutilizada, t.Erro, t.Ignorada, t.OFFLine, " +
+        "t.DataEmissao, t.data, t.xmlEnvioOff, t.XmlInutilizada, t.MotivoInutilizada, " +
+        "l.Chave, l.nProtocolo, l.CodigoRetorno, l.LogDataEmissao, l.xmlEnvio, l.xmlResposta, " +
+        "l.xmlCancelamento, l.xmlRespostaCancelamento, l.DataEmissaoCancelamento, l.ChaveCancelamento"
+
+        $juncao = "FROM NFCeTokenID t LEFT JOIN logs l ON l.IDParceiro = t.IDParceiro " +
+        "AND l.SerieTokenID = t.Serie AND l.IDTokenID = t.ID AND l.rn = 1"
+
+        # Transforma uma linha do reader no registro usado pela lista e pelo download.
+        # A situacao sai so dos dados, nunca do "Tipo de nota": o filtro e aplicado
+        # depois, na tela, e trocar a opcao nao pode mudar o que a nota e.
+        $lerLinha = {
+            param($rd, [bool]$MontarProc, [bool]$IncluirCanc)
+
+            $dataE = Get-XmlDbValor $rd "DataEmissao"
+            if ($null -eq $dataE) { $dataE = Get-XmlDbValor $rd "LogDataEmissao" }
+            if ($null -eq $dataE) { $dataE = Get-XmlDbValor $rd "data" }
+
+            $item = @{
+                Nota = [long](Get-XmlDbValor $rd "ID"); Serie = [int](Get-XmlDbValor $rd "Serie")
+                Data = $dataE; Chave = ""; Status = "NÃO ENCONTRADA"; Origem = ""
+                Conteudo = ""; Arquivo = ""; Tamanho = 0; Aviso = ""; Inutilizada = $false
+                Codigo = Get-XmlDbValor $rd "CodigoRetorno"; Cancelamento = ""; ChaveCanc = ""
+                Cancelada = $false; DataCancelamento = $null; Linha = $null
+            }
+
+            $xEnvio = Get-XmlDbValor $rd "xmlEnvio"
+            $xResp = Get-XmlDbValor $rd "xmlResposta"
+            $xOff = Get-XmlDbValor $rd "xmlEnvioOff"
+            $xInut = Get-XmlDbValor $rd "XmlInutilizada"
+            $chaveLog = "$(Get-XmlDbValor $rd 'Chave')".Trim()
+
+            $flagInut = Get-XmlDbValor $rd "Inutilizada"
+            $temNormal = ($null -ne $xResp -or $null -ne $xEnvio -or $null -ne $xOff)
+            $temInut = ($null -ne $xInut -or ($null -ne $flagInut -and [bool]$flagInut))
+
+            # Inutilizada ganha da normal: o numero inutilizado quase sempre deixa no
+            # log a tentativa de envio que falhou, e essa tentativa nunca teve
+            # protocolo - era ela que fazia a inutilizada aparecer como SEM PROTOCOLO.
+            if ($temInut) {
+                $item.Status = "INUTILIZADA"
+                $item.Inutilizada = $true
+                $r = Resolve-XmlNfe -XmlEnvio "$xInut" -XmlResposta ""
+                if ($null -ne $xInut -and $r.Ok) {
+                    $item.Conteudo = $r.Conteudo
+                    $item.Origem = "XmlInutilizada"
+                    $item.Chave = $r.Chave
+                }
+                else { $item.Aviso = "inutilizada, mas o XML da inutilização não ficou no banco" }
+            }
+            elseif ($temNormal) {
+                $fonte = $xEnvio
+                if ($null -eq $fonte) { $fonte = $xOff }
+                $r = Resolve-XmlNfe -XmlEnvio "$fonte" -XmlResposta "$xResp" -MontarProc:$MontarProc
+                if ($r.Ok) {
+                    $item.Conteudo = $r.Conteudo
+                    $item.Status = "AUTORIZADA"
+                    $item.Aviso = $r.Aviso
+                    if ($r.Forma -eq "nfeProc") { $item.Origem = "xmlResposta" }
+                    elseif ($r.Forma -eq "nfeProc montado") { $item.Origem = "xmlEnvio+protNFe" }
+                    elseif ($null -eq $xEnvio -and $null -ne $xOff) { $item.Origem = "xmlEnvioOff" }
+                    else { $item.Origem = "xmlEnvio" }
+                    if ($chaveLog -ne "") { $item.Chave = $chaveLog } else { $item.Chave = $r.Chave }
+                    if ($r.Aviso -eq "SEM PROTOCOLO") {
+                        $item.Status = "SEM PROTOCOLO"
+                        # O motivo (rejeicao, denegacao) aparece no balao da linha
+                        if ("$($r.Motivo)" -ne "") { $item.Aviso = $r.Motivo }
+                    }
+                }
+            }
+
+            # Numero inutilizado nunca foi autorizado, entao nao tem o que cancelar
+            if ($IncluirCanc -and -not $item.Inutilizada) {
+                # Mesma logica da nota: o documento util e a RESPOSTA da SEFAZ.
+                # xmlRespostaCancelamento traz o procEventoNFe autorizado, enquanto
+                # xmlCancelamento (so o envio) costuma vir nulo neste banco.
+                # DataEmissaoCancelamento sozinha ja prova que a nota foi cancelada.
+                $dataCanc = Get-XmlDbValor $rd "DataEmissaoCancelamento"
+                $fonteCanc = Get-XmlDbValor $rd "xmlRespostaCancelamento"
+                if ($null -eq $fonteCanc -or "$fonteCanc".Trim() -eq "") {
+                    $fonteCanc = Get-XmlDbValor $rd "xmlCancelamento"
+                }
+                if ($null -ne $fonteCanc -and "$fonteCanc".Trim() -ne "") {
+                    # Mesmo tratamento da nota: acentos consertados e declaracao UTF-8
+                    $item.Cancelamento = ConvertTo-XmlArquivo "$fonteCanc"
+                    $item.ChaveCanc = "$(Get-XmlDbValor $rd 'ChaveCancelamento')".Trim()
+                    $item.Cancelada = $true
+                }
+                elseif ($null -ne $dataCanc) {
+                    # Cancelada, mas o XML do evento nao ficou guardado
+                    $item.Cancelada = $true
+                    $item.Aviso = "cancelada sem XML do evento"
+                }
+                if ($null -ne $dataCanc) { $item.DataCancelamento = $dataCanc }
+            }
+            return $item
+        }
+
+        # Le todas as linhas de uma consulta para a lista, com a janela respondendo
+        # enquanto chegam. Devolve quantas linhas vieram.
+        $lerParaLista = {
+            param($Cmd, $Lista)
+            $rd = & $executarLeitor $Cmd -Cancelavel
+            $n = 0
+            try {
+                while ($rd.Read()) {
+                    $Lista.Add((& $lerLinha $rd $true $true))
+                    $n++
+                    if ($n % 50 -eq 0) {
+                        [System.Windows.Forms.Application]::DoEvents()
+                        # Cancel antes do Close: sem ele o Close ainda baixaria o resto
+                        if ($Script:XmlCancelar) { try { $Cmd.Cancel() } catch {}; throw "Busca cancelada." }
+                    }
+                }
+            }
+            finally { $rd.Close() }
+            return $n
+        }
+
+        $pintaLinha = {
+            param($Item)
+            $lvi = New-Object System.Windows.Forms.ListViewItem("$($Item.Nota)")
+            [void]$lvi.SubItems.Add("$($Item.Serie)")
+            $dt = ""
+            if ($null -ne $Item.Data) { try { $dt = ([datetime]$Item.Data).ToString("dd/MM/yyyy HH:mm") } catch { $dt = "$($Item.Data)" } }
+            [void]$lvi.SubItems.Add($dt)
+
+            # Situacao escrita na coluna: uma nota cancelada continua autorizada,
+            # mas o que importa ver na lista e que ela foi cancelada.
+            $sit = $Item.Status
+            if ([bool]$Item.Cancelada) { $sit = "CANCELADA" }
+            [void]$lvi.SubItems.Add($sit)
+
+            [void]$lvi.SubItems.Add($Item.Chave)
+            $tam = ""
+            if ($Item.Tamanho -gt 0) { $tam = "{0:N0} B" -f $Item.Tamanho }
+            [void]$lvi.SubItems.Add($tam)
+            [void]$lvi.SubItems.Add($Item.Arquivo)
+
+            # verde = valida | amarelo = atencao | vermelho = nao vale | cinza = nao existe
+            if ($sit -eq "CANCELADA") { $lvi.ForeColor = $Script:UiVermelho }
+            elseif ($sit -eq "AUTORIZADA") { $lvi.ForeColor = $Script:UiVerde }
+            elseif ($sit -eq "INUTILIZADA" -or $sit -eq "SEM PROTOCOLO") { $lvi.ForeColor = $Script:UiAmarelo }
+            elseif ($sit -eq "CORROMPIDO" -or $sit -eq "ERRO") { $lvi.ForeColor = $Script:UiVermelho }
+            else { $lvi.ForeColor = $Script:UiSuave }
+
+            $dica = $Item.Status
+            if ("$($Item.Origem)" -ne "") { $dica = $dica + " - origem: $($Item.Origem)" }
+            if ("$($Item.Aviso)" -ne "" -and $Item.Aviso -ne $Item.Status) { $dica = $dica + " - $($Item.Aviso)" }
+            if ([bool]$Item.Cancelada) {
+                $dica = $dica + " - CANCELADA"
+                if ($null -ne $Item.DataCancelamento) {
+                    try { $dica = $dica + " em " + ([datetime]$Item.DataCancelamento).ToString("dd/MM/yyyy HH:mm") } catch {}
+                }
+            }
+            $lvi.ToolTipText = $dica
+            if ($Item.ContainsKey('Marcado')) { $lvi.Checked = [bool]$Item.Marcado }
+            else { $lvi.Checked = ($Item.Conteudo -ne "") }
+            $lvi.Tag = $Item
+            $Item.Linha = $lvi
+            [void]$lv.Items.Add($lvi)
+        }
+
+        $mostraCarregando = {
+            param([string]$Texto)
+            if ($Texto -eq "") { $lblCarregando.Visible = $false }
+            else {
+                $lblCarregando.Text = $Texto
+                $lblCarregando.Visible = $true
+                $lblCarregando.BringToFront()
+            }
+            [System.Windows.Forms.Application]::DoEvents()
+        }
+
+        # O "Tipo de nota" vale como filtro da tela tambem: depois de buscar tudo
+        # da para trocar a opcao e ver so o que interessa, sem voltar ao banco.
+        $filtraTipo = {
+            param($Item)
+            $idx = $cmbTipo.SelectedIndex
+            # Sem protocolo nao e autorizada: fica fora de "Somente autorizadas"
+            if ($idx -eq 1) { return ($Item.Status -eq "AUTORIZADA") }
+            if ($idx -eq 2) { return ($Item.Status -eq "INUTILIZADA") }
+            if ($idx -eq 3) { return ([bool]$Item.Cancelada) }
+            return $true
+        }
+
+        # Contador "2 de 291 marcadas" e o texto do botao ao lado do filtro.
+        # Com alguma marcada o botao oferece limpar; com nenhuma, marcar de volta.
+        $atualizaMarcadas = {
+            $total = $lv.Items.Count
+            if ($total -eq 0) {
+                $lblMarcadas.Text = ""
+                $btnMarcar.Text = "DESMARCAR TODAS"
+                $btnMarcar.Enabled = $false
+                return
+            }
+            $marc = $lv.CheckedItems.Count
+            if ($marc -eq 1) { $lblMarcadas.Text = "1 de $total marcada" }
+            else { $lblMarcadas.Text = "$marc de $total marcadas" }
+            if ($marc -eq 0) { $lblMarcadas.ForeColor = $Script:UiAmarelo } else { $lblMarcadas.ForeColor = $Script:UiVerde }
+            if ($marc -gt 0) { $btnMarcar.Text = "DESMARCAR TODAS" } else { $btnMarcar.Text = "MARCAR TODAS" }
+            $btnMarcar.Enabled = $true
+        }
+
+        # Marca ou desmarca a lista inteira de uma vez. Marcar pega so as que tem
+        # XML, igual a busca faz: nota sem XML marcada so geraria aviso no fim.
+        $marcarTodas = {
+            param([bool]$Marcar)
+            # Cada Checked dispararia o ItemChecked: o evento sai enquanto marca
+            # e o contador e refeito uma vez so no fim
+            $lv.remove_ItemChecked($aoMarcarLinha)
+            $lv.BeginUpdate()
+            try {
+                foreach ($lvi in $lv.Items) {
+                    if ($Marcar) { $lvi.Checked = ($null -ne $lvi.Tag -and "$($lvi.Tag.Conteudo)" -ne "") }
+                    else { $lvi.Checked = $false }
+                }
+            }
+            finally {
+                $lv.EndUpdate()
+                $lv.add_ItemChecked($aoMarcarLinha)
+            }
+            & $atualizaMarcadas
+        }
+
+        $repintaLista = {
+            # Reaplica ordem e filtro sobre o resultado da ultima busca
+            foreach ($lvi in $lv.Items) { if ($null -ne $lvi.Tag) { $lvi.Tag.Marcado = $lvi.Checked } }
+            $vis = @($Script:XmlResultados | Where-Object { & $filtraTipo $_ })
+            # Item que entra ja marcado tambem dispara o ItemChecked: com o evento
+            # ligado, 5000 linhas recontariam a lista inteira 5000 vezes
+            $lv.remove_ItemChecked($aoMarcarLinha)
+            $lv.BeginUpdate()
+            try {
+                $lv.Items.Clear()
+                foreach ($a in $vis) { & $pintaLinha $a }
+            }
+            finally {
+                $lv.EndUpdate()
+                $lv.add_ItemChecked($aoMarcarLinha)
+            }
+            & $atualizaMarcadas
+            return $vis.Count
+        }
+
+        $buscar = {
+            if ($Script:XmlOcupado) { return $false }
+            $Script:XmlOcupado = $true
+            $cn = $null
+            try {
+                $lv.Items.Clear()
+                & $atualizaMarcadas
+                $Script:XmlResultados = @()
+                $Script:XmlPedidas = @()
+                $Script:XmlFaltantes = @()
+                $pb.Value = 0
+                $lblProg.Text = ""
+
+                if ($cmbParceiro.Items.Count -eq 0 -or "$($cmbParceiro.Text)".Trim() -eq "") {
+                    & $setStatus "Clique em TESTAR CONEXÃO antes de buscar." $Script:UiVermelho
+                    return $false
+                }
+                $parceiro = [long]("$($cmbParceiro.Text)".Trim())
+                # Lista em vez de "+=": somar num array copia tudo a cada nota, e
+                # num periodo de 20 mil notas isso sozinho levava minutos
+                $achados = New-Object 'System.Collections.Generic.List[object]'
+
+                # A busca agora pode ser interrompida pelo CANCELAR
+                $Script:XmlCancelar = $false
+                $btnCancelar.Enabled = $true
+                & $setStatus "Consultando o banco..." $Script:UiAmarelo
+                & $mostraCarregando "Consultando o banco..."
+                $cn = & $abrirConexao
+
+                if ($rbSerie.Checked) {
+                    if ("$($cmbSerie.Text)".Trim() -eq "") {
+                        & $setStatus "Escolha a série." $Script:UiVermelho; return $false
+                    }
+                    $serie = [int]("$($cmbSerie.Text)".Trim())
+                    $fx = ConvertFrom-FaixaNotas -Texto $txtNotas.Text -Confirmar
+                    if (-not $fx.Ok) { & $setStatus $fx.Erro $Script:UiVermelho; return $false }
+                    $Script:XmlPedidas = $fx.Notas
+
+                    # Blocos de no maximo 500 numeros por query
+                    for ($ini = 0; $ini -lt $fx.Notas.Count; $ini += 500) {
+                        $fim = [Math]::Min($ini + 499, $fx.Notas.Count - 1)
+                        $bloco = @($fx.Notas[$ini..$fim])
+                        $nomes = @()
+                        for ($i = 0; $i -lt $bloco.Count; $i++) { $nomes += "@n$i" }
+                        $inSql = ($nomes -join ",")
+
+                        $sql = ";WITH logs AS (" + $cteLogs + " WHERE g.IDParceiro = @parceiro " +
+                        "AND g.SerieTokenID = @serie AND g.IDTokenID IN ($inSql)) SELECT " + $colunas +
+                        " " + $juncao + " WHERE t.IDParceiro = @parceiro AND t.Serie = @serie " +
+                        "AND t.ID IN ($inSql) ORDER BY t.ID"
+
+                        $cmd = $cn.CreateCommand()
+                        $cmd.CommandTimeout = 120
+                        $cmd.CommandText = $sql
+                        $par = $cmd.Parameters.Add("@parceiro", [System.Data.SqlDbType]::BigInt); $par.Value = $parceiro
+                        $par = $cmd.Parameters.Add("@serie", [System.Data.SqlDbType]::Int); $par.Value = $serie
+                        for ($i = 0; $i -lt $bloco.Count; $i++) {
+                            $par = $cmd.Parameters.Add("@n$i", [System.Data.SqlDbType]::BigInt)
+                            $par.Value = [long]$bloco[$i]
+                        }
+                        [void](& $lerParaLista $cmd $achados)
+                        & $setStatus "Consultando... $($achados.Count) notas lidas" $Script:UiAmarelo
+                    }
+
+                    # Numero pedido que nem linha tem na tabela de numeracao
+                    $vistos = @{}
+                    foreach ($a in $achados) { $vistos["$($a.Nota)"] = $true }
+                    foreach ($n in $fx.Notas) {
+                        if (-not $vistos.ContainsKey("$n")) {
+                            $achados.Add(@{
+                                Nota = [long]$n; Serie = $serie; Data = $null; Chave = ""
+                                Status = "NÃO ENCONTRADA"; Origem = ""; Conteudo = ""; Arquivo = ""
+                                Tamanho = 0; Aviso = "sem registro na NFCeTokenID"; Inutilizada = $false
+                                Codigo = $null; Cancelamento = ""; ChaveCanc = ""
+                                Cancelada = $false; DataCancelamento = $null; Linha = $null
+                            })
+                        }
+                    }
+                    $achados = @($achados | Sort-Object { [long]$_.Nota })
+                }
+                elseif ($rbPeriodo.Checked) {
+                    $d1 = $dtIni.Value.Date
+                    $d2 = $dtFim.Value.Date.AddDays(1)
+                    if ($d2 -le $d1) { & $setStatus "A data final não pode ser anterior à inicial." $Script:UiVermelho; return $false }
+                    $serieOpc = "$($cmbSerie2.Text)".Trim()
+
+                    $filtroPeriodo = "t.IDParceiro = @parceiro AND (@serie IS NULL OR t.Serie = @serie) " +
+                    "AND COALESCE(t.DataEmissao, t.data) >= @d1 AND COALESCE(t.DataEmissao, t.data) < @d2"
+                    $novoCmdPeriodo = {
+                        param([string]$Sql)
+                        $c = $cn.CreateCommand()
+                        $c.CommandTimeout = 300
+                        $c.CommandText = $Sql
+                        $p = $c.Parameters.Add("@parceiro", [System.Data.SqlDbType]::BigInt); $p.Value = $parceiro
+                        $p = $c.Parameters.Add("@serie", [System.Data.SqlDbType]::Int)
+                        if ($serieOpc -eq "") { $p.Value = [System.DBNull]::Value } else { $p.Value = [int]$serieOpc }
+                        $p = $c.Parameters.Add("@d1", [System.Data.SqlDbType]::DateTime); $p.Value = $d1
+                        $p = $c.Parameters.Add("@d2", [System.Data.SqlDbType]::DateTime); $p.Value = $d2
+                        return $c
+                    }
+
+                    # Conta antes de buscar. Antes havia um TOP (5000) calado: um mes de
+                    # supermercado vinha cortado e a tela dizia que estava tudo certo.
+                    $rdTotal = & $executarLeitor (& $novoCmdPeriodo ("SELECT COUNT(*) FROM NFCeTokenID t WHERE " + $filtroPeriodo)) -Cancelavel
+                    $totalPeriodo = 0
+                    try { if ($rdTotal.Read()) { $totalPeriodo = [int]$rdTotal.GetValue(0) } }
+                    finally { $rdTotal.Close() }
+
+                    if ($totalPeriodo -gt 10000) {
+                        & $mostraCarregando ""
+                        $resp = [System.Windows.Forms.MessageBox]::Show(
+                            "O período tem $totalPeriodo notas.`r`n`r`nBuscar todas pode levar alguns minutos e usar bastante memória. Se não precisar de tudo, diminua o período ou escolha a série.`r`n`r`nDeseja buscar as $totalPeriodo notas?",
+                            "Baixar XMLs NFC-e", "YesNo", "Warning")
+                        if ($resp -ne [System.Windows.Forms.DialogResult]::Yes) {
+                            & $setStatus "Busca cancelada: o período tem $totalPeriodo notas." $Script:UiAmarelo
+                            return $false
+                        }
+                    }
+
+                    # Paginas de 5000 por (Serie, ID): ate 5000 notas continua sendo uma
+                    # consulta so, igual antes; acima disso vem tudo, pagina a pagina
+                    $pagina = 5000
+                    $ultSerie = -1; $ultId = [long]-1
+                    do {
+                        $texto = "Consultando o banco... $($achados.Count) de $totalPeriodo notas"
+                        & $setStatus $texto $Script:UiAmarelo
+                        & $mostraCarregando $texto
+
+                        $sql = ";WITH logs AS (" + $cteLogs + " WHERE g.IDParceiro = @parceiro " +
+                        "AND (@serie IS NULL OR g.SerieTokenID = @serie)) SELECT TOP (@pagina) " + $colunas +
+                        " " + $juncao + " WHERE " + $filtroPeriodo +
+                        " AND (t.Serie > @ultSerie OR (t.Serie = @ultSerie AND t.ID > @ultId)) ORDER BY t.Serie, t.ID"
+                        $cmd = & $novoCmdPeriodo $sql
+                        $par = $cmd.Parameters.Add("@pagina", [System.Data.SqlDbType]::Int); $par.Value = $pagina
+                        $par = $cmd.Parameters.Add("@ultSerie", [System.Data.SqlDbType]::Int); $par.Value = $ultSerie
+                        $par = $cmd.Parameters.Add("@ultId", [System.Data.SqlDbType]::BigInt); $par.Value = $ultId
+
+                        $veio = & $lerParaLista $cmd $achados
+                        if ($veio -gt 0) {
+                            $ultimo = $achados[$achados.Count - 1]
+                            $ultSerie = [int]$ultimo.Serie
+                            $ultId = [long]$ultimo.Nota
+                        }
+                    } while ($veio -eq $pagina)
+                }
+                else {
+                    $chaves = @(("$($txtChaves.Text)" -replace '[;\r\n]', ',') -split ',' |
+                        ForEach-Object { ($_ -replace '\D', '') } |
+                        Where-Object { $_.Length -eq 44 } | Select-Object -Unique)
+                    if ($chaves.Count -eq 0) {
+                        & $setStatus "Informe ao menos uma chave de 44 dígitos." $Script:UiVermelho
+                        return $false
+                    }
+
+                    $cte3 = "SELECT g.IDParceiro, g.SerieTokenID, g.IDTokenID, g.Chave, g.nProtocolo, " +
+                    "g.CodigoRetorno, g.DataEmissao AS LogDataEmissao, g.xmlEnvio, g.xmlResposta, " +
+                    "g.xmlCancelamento, g.xmlRespostaCancelamento, g.DataEmissaoCancelamento, " +
+                    "g.ChaveCancelamento, ROW_NUMBER() OVER (PARTITION BY g.Chave " +
+                    "ORDER BY CASE WHEN g.CodigoRetorno = 100 THEN 0 ELSE 1 END, g.ID DESC) AS rn " +
+                    "FROM NFCeTokenIDLog g"
+                    $cols3 = "COALESCE(t.Serie, l.SerieTokenID) AS Serie, COALESCE(t.ID, l.IDTokenID) AS ID, " +
+                    "t.Usada, t.Inutilizada, t.Erro, t.Ignorada, t.OFFLine, t.DataEmissao, t.data, " +
+                    "t.xmlEnvioOff, t.XmlInutilizada, t.MotivoInutilizada, l.Chave, l.nProtocolo, " +
+                    "l.CodigoRetorno, l.LogDataEmissao, l.xmlEnvio, l.xmlResposta, l.xmlCancelamento, " +
+                    "l.xmlRespostaCancelamento, l.DataEmissaoCancelamento, l.ChaveCancelamento"
+
+                    for ($ini = 0; $ini -lt $chaves.Count; $ini += 500) {
+                        $fim = [Math]::Min($ini + 499, $chaves.Count - 1)
+                        $bloco = @($chaves[$ini..$fim])
+                        $nomes = @()
+                        for ($i = 0; $i -lt $bloco.Count; $i++) { $nomes += "@k$i" }
+                        $inSql = ($nomes -join ",")
+
+                        $sql = ";WITH logs AS (" + $cte3 + " WHERE RIGHT(g.Chave, 44) IN ($inSql)) SELECT " +
+                        $cols3 + " FROM logs l LEFT JOIN NFCeTokenID t ON t.IDParceiro = l.IDParceiro " +
+                        "AND t.Serie = l.SerieTokenID AND t.ID = l.IDTokenID WHERE l.rn = 1 ORDER BY l.Chave"
+
+                        $cmd = $cn.CreateCommand()
+                        $cmd.CommandTimeout = 120
+                        $cmd.CommandText = $sql
+                        for ($i = 0; $i -lt $bloco.Count; $i++) {
+                            $par = $cmd.Parameters.Add("@k$i", [System.Data.SqlDbType]::VarChar, 44)
+                            $par.Value = [string]$bloco[$i]
+                        }
+                        [void](& $lerParaLista $cmd $achados)
+                    }
+                }
+
+                # Guarda o filtro desta busca: o nome do lote sai dele, mesmo que a tela
+                # seja mexida antes de baixar
+                if ($rbSerie.Checked) { $Script:XmlFiltro = @{ Modo = 'Serie'; Serie = "$($cmbSerie.Text)".Trim(); Notas = @($Script:XmlPedidas) } }
+                elseif ($rbPeriodo.Checked) { $Script:XmlFiltro = @{ Modo = 'Periodo'; Serie = "$($cmbSerie2.Text)".Trim(); De = $dtIni.Value; Ate = $dtFim.Value } }
+                else { $Script:XmlFiltro = @{ Modo = 'Chave'; Serie = '' } }
+
+                # @() sobre uma List[object] quebra no PowerShell 5.1 ("Os tipos de
+                # argumento nao correspondem"): vira array uma vez, aqui
+                if ($achados -isnot [array]) { $achados = $achados.ToArray() }
+                $Script:XmlResultados = @($achados)
+                & $mostraCarregando ""
+                $visiveis = & $repintaLista
+
+                $semXmlAgora = @($achados | Where-Object { "$($_.Conteudo)" -eq "" } | ForEach-Object { [int]$_.Nota })
+                $nOk = $achados.Count - $semXmlAgora.Count
+
+                # Ja deixa os faltantes prontos: o COPIAR FALTANTES tem que funcionar
+                # logo depois da busca, sem depender de clicar em CONFERIR SEQUENCIA
+                $Script:XmlFaltantes = $semXmlAgora
+
+                if ($achados.Count -eq 0) {
+                    & $setStatus "Nada encontrado para esse filtro." $Script:UiAmarelo
+                    Log-Message "INFO" "XMLs: busca não encontrou nenhuma nota"
+                    [System.Windows.Forms.MessageBox]::Show(
+                        "Nada encontrado para esse filtro.`r`n`r`nConfira a série, os números e o período informados.",
+                        "Baixar XMLs NFC-e", "OK", "Information") | Out-Null
+                }
+                elseif ($visiveis -eq 0) {
+                    & $setStatus "$($achados.Count) nota(s) encontrada(s), mas nenhuma se encaixa em ""$($cmbTipo.Text)""." $Script:UiAmarelo
+                }
+                elseif ($nOk -eq 0) {
+                    # Avisa na hora, sem esperar o usuario clicar em BAIXAR a toa
+                    & $setStatus ("Nenhuma das $($achados.Count) notas tem XML no banco - " + (ConvertTo-FaixaTexto $semXmlAgora)) $Script:UiVermelho
+                }
+                elseif ($semXmlAgora.Count -gt 0) {
+                    & $setStatus ("$($achados.Count) linha(s): $nOk com XML. Sem XML: " + (ConvertTo-FaixaTexto $semXmlAgora)) $Script:UiAmarelo
+                }
+                else {
+                    & $setStatus "$($achados.Count) linha(s), todas com XML. Marque e clique em BAIXAR." $Script:UiVerde
+                }
+                Log-Message "INFO" "XMLs: busca retornou $($achados.Count) linha(s), $nOk com XML"
+                & $atualizaModo
+                return $true
+            }
+            catch {
+                $msg = $_.Exception.Message
+                if ($Script:XmlCancelar) {
+                    & $setStatus "Busca cancelada." $Script:UiAmarelo
+                    Log-Message "CANCEL" "XMLs: busca cancelada pelo usuário"
+                }
+                else {
+                    & $setStatus ("Erro na consulta: " + (& $explicaFalha $_.Exception)) $Script:UiVermelho
+                    Log-Message "ERRO" "XMLs: falha na consulta - $msg"
+                }
+                return $false
+            }
+            finally {
+                & $mostraCarregando ""
+                if ($null -ne $cn) { try { $cn.Close() } catch {} }
+                $btnCancelar.Enabled = $false
+                $Script:XmlOcupado = $false
+            }
+        }
+
+        # Nome do lote pelo filtro da ULTIMA BUSCA (guardado no $buscar), e nao pelo
+        # que esta na tela na hora de baixar: mexer na tela entre buscar e baixar
+        # fazia uma busca por periodo sair com o nome "Série 5" da caixa de serie.
+        # Sem serie escolhida, entram as series das notas que vao ser gravadas.
+        $nomeDoLote = {
+            param($ItensLote)
+            $filtro = $Script:XmlFiltro
+            if ($null -eq $filtro) { $filtro = @{ Modo = 'Chave'; Serie = '' } }
+            $seriesLote = @($ItensLote | ForEach-Object { [int]$_.Serie } | Sort-Object -Unique)
+            if ($filtro.Modo -eq 'Serie') {
+                return (Get-XmlNomeLote -Modo Serie -Serie $filtro.Serie -Notas $filtro.Notas)
+            }
+            if ($filtro.Modo -eq 'Periodo') {
+                return (Get-XmlNomeLote -Modo Periodo -Serie $filtro.Serie -Series $seriesLote -De $filtro.De -Ate $filtro.Ate)
+            }
+            return (Get-XmlNomeLote -Modo Chave -Series $seriesLote -Quantidade @($ItensLote).Count)
+        }
+
+        $baixar = {
+            param($Itens)
+            $lista = @($Itens)
+            if ($lista.Count -eq 0) {
+                & $setStatus "Nada para baixar: marque ao menos uma linha." $Script:UiAmarelo
+                return
+            }
+
+            # Separa antes de criar qualquer coisa: nota sem XML no banco nao gera
+            # arquivo, entao nao vale abrir pasta nem zip por causa dela.
+            $comXml = @($lista | Where-Object { "$($_.Conteudo)" -ne "" })
+            $semXml = @($lista | Where-Object { "$($_.Conteudo)" -eq "" })
+            $faltaram = @($semXml | ForEach-Object { [int]$_.Nota })
+
+            if ($comXml.Count -eq 0) {
+                # Nenhuma tem XML: avisa e sai sem criar pasta e sem gerar zip
+                $Script:XmlFaltantes = $faltaram
+                & $atualizaModo
+                $aviso = "Nenhuma das $($lista.Count) notas selecionadas tem XML no banco."
+                if ($faltaram.Count -gt 0) { $aviso = $aviso + "`r`n`r`nSem XML: " + (ConvertTo-FaixaTexto $faltaram) }
+                $aviso = $aviso + "`r`n`r`nNada foi baixado e nenhuma pasta foi criada."
+                & $setStatus "Nenhuma das notas tem XML no banco - nada foi gravado." $Script:UiVermelho
+                Log-Message "ERRO" "XMLs: nenhuma das $($lista.Count) notas tem XML no banco"
+                [System.Windows.Forms.MessageBox]::Show($aviso, "Baixar XMLs NFC-e", "OK", "Warning") | Out-Null
+                return
+            }
+
+            $Script:XmlCancelar = $false
+            $btnCancelar.Enabled = $true
+            $pb.Maximum = $comXml.Count
+            $pb.Value = 0
+
+            $pasta = New-XmlLotePasta (& $nomeDoLote $comXml)
+            $Script:XmlUltimoLote = $pasta
+            $Script:XmlUltimoZip = ""
+            $pastaInut = Join-Path $pasta "Inutilizadas"
+            $pastaCanc = Join-Path $pasta "Cancelamentos"
+            # Nota sem protocolo fica separada: a pasta principal e so do que vale
+            $pastaSemProt = Join-Path $pasta "Sem protocolo"
+
+            $nNormal = 0; $nInut = 0; $nCorr = 0; $nCanc = 0; $nSemProt = 0
+            $nFalta = $semXml.Count
+            $baixadas = @()
+            $i = 0
+            $interrompido = $false
+
+            foreach ($it in $comXml) {
+                $i++
+                if ($Script:XmlCancelar) {
+                    $interrompido = $true
+                    Log-Message "CANCEL" "XMLs: lote interrompido em $i de $($comXml.Count)"
+                    break
+                }
+                $lblProg.Text = "Baixando $i de $($comXml.Count)..."
+                $pb.Value = $i
+
+                try {
+                    # XML que nao parseia ainda e gravado, so que marcado
+                    $corrompido = $false
+                    try { $null = [xml]$it.Conteudo } catch { $corrompido = $true }
+                    if ($corrompido) { $nCorr++ }
+
+                    # serie + numero + chave, e no fim _INUT / _CANC / _CORROMPIDO
+                    $nomes = Get-XmlNomeArquivo -Item $it -Corrompido:$corrompido
+
+                    # Guardado antes: o Status pode virar CORROMPIDO logo abaixo
+                    $semProt = ("$($it.Status)" -eq "SEM PROTOCOLO")
+                    $destino = $pasta
+                    if ($it.Inutilizada) { $destino = $pastaInut }
+                    elseif ($semProt) { $destino = $pastaSemProt }
+                    if (-not (Test-Path $destino)) { New-Item -Path $destino -ItemType Directory -Force | Out-Null }
+
+                    $caminho = Join-Path $destino ($nomes.Nota + ".xml")
+                    [System.IO.File]::WriteAllText($caminho, $it.Conteudo, (New-Object System.Text.UTF8Encoding($false)))
+                    $it.Arquivo = $nomes.Nota + ".xml"
+                    $it.Caminho = $caminho
+                    $it.Tamanho = (Get-Item -LiteralPath $caminho).Length
+                    if ($corrompido) { $it.Status = "CORROMPIDO" }
+                    if ($it.Inutilizada) { $nInut++ }
+                    elseif ($semProt) { $nSemProt++ }
+                    else { $nNormal++ }
+                    $baixadas += [int]$it.Nota
+
+                    if ("$($it.Cancelamento)" -ne "") {
+                        if (-not (Test-Path $pastaCanc)) { New-Item -Path $pastaCanc -ItemType Directory -Force | Out-Null }
+                        $nomeC = $nomes.Evento + ".xml"
+                        [System.IO.File]::WriteAllText((Join-Path $pastaCanc $nomeC), $it.Cancelamento, (New-Object System.Text.UTF8Encoding($false)))
+                        $nCanc++
+                    }
+                }
+                catch {
+                    $nFalta++
+                    $it.Status = "ERRO"
+                    $it.Aviso = $_.Exception.Message
+                    Log-Message "ERRO" "XMLs: falha ao gravar a nota $($it.Nota) - $($_.Exception.Message)"
+                }
+
+                if ($null -ne $it.Linha -and -not $lv.IsDisposed) {
+                    if ($it.Tamanho -gt 0) { $it.Linha.SubItems[5].Text = "{0:N0} B" -f $it.Tamanho }
+                    $it.Linha.SubItems[6].Text = $it.Arquivo
+                    # A situacao so muda quando a gravacao deu problema
+                    if ($it.Status -eq "CORROMPIDO" -or $it.Status -eq "ERRO") {
+                        $it.Linha.SubItems[3].Text = $it.Status
+                        $it.Linha.ForeColor = $Script:UiVermelho
+                        $it.Linha.ToolTipText = "$($it.Status) - $($it.Aviso)"
+                    }
+                }
+                [System.Windows.Forms.Application]::DoEvents()
+            }
+
+            # Faltantes: so faz sentido no modo por serie, onde existe lista pedida
+            $Script:XmlFaltantes = @()
+            if ($rbSerie.Checked -and $Script:XmlPedidas.Count -gt 0) {
+                $veio = @{}
+                foreach ($n in $baixadas) { $veio["$n"] = $true }
+                $Script:XmlFaltantes = @($Script:XmlPedidas | Where-Object { -not $veio.ContainsKey("$_") })
+            }
+            else { $Script:XmlFaltantes = $faltaram }
+
+            # A pasta fica so com os XMLs: o resumo do lote vai para o log e para a
+            # janela, e os faltantes saem pelo botao COPIAR FALTANTES.
+
+            # Zip sempre ao final, mesmo com o lote interrompido
+            try {
+                Add-Type -AssemblyName System.IO.Compression.FileSystem
+                $zip = $pasta + ".zip"
+                if (Test-Path $zip) { Remove-Item -LiteralPath $zip -Force -ErrorAction SilentlyContinue }
+                [System.IO.Compression.ZipFile]::CreateFromDirectory($pasta, $zip)
+                $Script:XmlUltimoZip = $zip
+                Log-Message "ZIP" "XMLs: pasta compactada em $zip"
+            }
+            catch {
+                Log-Message "ERRO" "XMLs: falha ao gerar o zip - $($_.Exception.Message). A pasta continua disponível."
+            }
+
+            $btnCancelar.Enabled = $false
+            $lblProg.Text = ""
+            $pb.Value = 0
+            & $atualizaModo
+
+            $pedidas = $lista.Count
+            if ($rbSerie.Checked -and $Script:XmlPedidas.Count -gt 0) { $pedidas = $Script:XmlPedidas.Count }
+            $resumo = "$pedidas pedidas | $nNormal autorizadas | $nInut inutilizadas | $nFalta não encontradas"
+            if ($nSemProt -gt 0) { $resumo = $resumo + " | $nSemProt sem protocolo" }
+            if ($nCanc -gt 0) { $resumo = $resumo + " | $nCanc com cancelamento" }
+            if ($nCorr -gt 0) { $resumo = $resumo + " | $nCorr corrompidas" }
+            if ($nSemProt -gt 0 -or $nCorr -gt 0) { & $setStatus $resumo $Script:UiAmarelo }
+            else { & $setStatus $resumo $Script:UiVerde }
+            Log-Message "SUCESSO" "XMLs: $resumo"
+
+            $msg = $resumo + "`r`n`r`npasta: $pasta"
+            if ($Script:XmlUltimoZip -ne "") { $msg = $msg + "`r`nzip: " + $Script:XmlUltimoZip }
+            if ($Script:XmlFaltantes.Count -gt 0) {
+                $msg = $msg + "`r`n`r`nSem XML no banco (não baixadas): " + (ConvertTo-FaixaTexto $Script:XmlFaltantes)
+            }
+            if ($nSemProt -gt 0) {
+                $msg = $msg + "`r`n`r`nATENÇÃO: $nSemProt nota(s) sem protocolo de autorização, na subpasta ""Sem protocolo"". " +
+                "Não valem como NFC-e autorizada: confira no PDV antes de enviar ao contador."
+            }
+            if ($interrompido) { $msg = "LOTE INTERROMPIDO`r`n`r`n" + $msg }
+            [System.Windows.Forms.MessageBox]::Show($msg, "Baixar XMLs NFC-e", "OK", "Information") | Out-Null
+
+            # Todo lote termina indo para a pasta: abre direto em vez de exigir mais um clique
+            # Caminho entre aspas: o nome do lote pode ter virgula, que o explorer le como separador
+            try { if (Test-Path -LiteralPath $pasta) { Start-Process "explorer.exe" ("`"" + $pasta + "`"") } } catch {}
+        }
+
+        # So consulta: aponta buracos na numeracao sem gravar nada
+        $conferir = {
+            if ($Script:XmlOcupado) { return }
+            $Script:XmlOcupado = $true
+            $cn = $null
+            try {
+                if ("$($cmbParceiro.Text)".Trim() -eq "") {
+                    & $setStatus "Clique em TESTAR CONEXÃO antes de conferir." $Script:UiVermelho; return
+                }
+                if ("$($cmbSerie.Text)".Trim() -eq "") {
+                    & $setStatus "Escolha a série." $Script:UiVermelho; return
+                }
+                $fx = ConvertFrom-FaixaNotas -Texto $txtNotas.Text
+                if (-not $fx.Ok) { & $setStatus $fx.Erro $Script:UiVermelho; return }
+
+                $parceiro = [long]("$($cmbParceiro.Text)".Trim())
+                $serie = [int]("$($cmbSerie.Text)".Trim())
+                $Script:XmlCancelar = $false
+                $btnCancelar.Enabled = $true
+                & $setStatus "Conferindo a sequência..." $Script:UiAmarelo
+                & $mostraCarregando "Conferindo a sequência..."
+                $cn = & $abrirConexao
+
+                $existe = @{}
+                $naoUsadas = @()
+                $inutil = @()
+
+                # Confere exatamente os numeros pedidos, em blocos de 500. Usar
+                # BETWEEN do menor ao maior traria notas que ninguem perguntou:
+                # digitar "1-15,2000" acabaria conferindo as 2000 da serie.
+                for ($ini = 0; $ini -lt $fx.Notas.Count; $ini += 500) {
+                    $fim = [Math]::Min($ini + 499, $fx.Notas.Count - 1)
+                    $bloco = @($fx.Notas[$ini..$fim])
+                    $nomes = @()
+                    for ($i = 0; $i -lt $bloco.Count; $i++) { $nomes += "@n$i" }
+
+                    $cmd = $cn.CreateCommand()
+                    $cmd.CommandTimeout = 120
+                    $cmd.CommandText = "SELECT ID, Usada, Inutilizada FROM NFCeTokenID " +
+                    "WHERE IDParceiro = @p AND Serie = @s AND ID IN (" + ($nomes -join ",") + ") ORDER BY ID"
+                    $par = $cmd.Parameters.Add("@p", [System.Data.SqlDbType]::BigInt); $par.Value = $parceiro
+                    $par = $cmd.Parameters.Add("@s", [System.Data.SqlDbType]::Int); $par.Value = $serie
+                    for ($i = 0; $i -lt $bloco.Count; $i++) {
+                        $par = $cmd.Parameters.Add("@n$i", [System.Data.SqlDbType]::BigInt)
+                        $par.Value = [long]$bloco[$i]
+                    }
+
+                    $rd = & $executarLeitor $cmd -Cancelavel
+                    while ($rd.Read()) {
+                        $id = [int]$rd["ID"]
+                        $existe["$id"] = $true
+                        if (-not [bool]$rd["Usada"]) { $naoUsadas += $id }
+                        if (-not $rd.IsDBNull($rd.GetOrdinal("Inutilizada")) -and [bool]$rd["Inutilizada"]) { $inutil += $id }
+                    }
+                    $rd.Close()
+                    [System.Windows.Forms.Application]::DoEvents()
+                }
+
+                $semRegistro = @($fx.Notas | Where-Object { -not $existe.ContainsKey("$_") })
+
+                $linhas = @()
+                $linhas += "Série $serie - $($fx.Total) nota(s) conferida(s): " + (ConvertTo-FaixaTexto $fx.Notas)
+                $linhas += ""
+                if ($semRegistro.Count -eq 0) { $linhas += "Numeração sem lacunas: todos os números têm registro." }
+                else { $linhas += "SEM REGISTRO no banco ($($semRegistro.Count)): " + (ConvertTo-FaixaTexto $semRegistro) }
+                if ($naoUsadas.Count -gt 0) { $linhas += "Token gerado e NÃO USADO ($($naoUsadas.Count)): " + (ConvertTo-FaixaTexto $naoUsadas) }
+                if ($inutil.Count -gt 0) { $linhas += "Inutilizadas ($($inutil.Count)): " + (ConvertTo-FaixaTexto $inutil) }
+
+                $Script:XmlFaltantes = @($semRegistro)
+                & $atualizaModo
+                if ($semRegistro.Count -eq 0) { & $setStatus $linhas[2] $Script:UiVerde }
+                else { & $setStatus $linhas[2] $Script:UiAmarelo }
+                Log-Message "INFO" "XMLs: conferência da série $serie - $($semRegistro.Count) sem registro"
+                & $mostraCarregando ""
+                [System.Windows.Forms.MessageBox]::Show(($linhas -join "`r`n"), "Conferir sequência", "OK", "Information") | Out-Null
+            }
+            catch {
+                $msg = $_.Exception.Message
+                if ($Script:XmlCancelar) { & $setStatus "Conferência cancelada." $Script:UiAmarelo }
+                else {
+                    & $setStatus ("Erro ao conferir: " + (& $explicaFalha $_.Exception)) $Script:UiVermelho
+                    Log-Message "ERRO" "XMLs: falha ao conferir a sequência - $msg"
+                }
+            }
+            finally {
+                & $mostraCarregando ""
+                if ($null -ne $cn) { try { $cn.Close() } catch {} }
+                $btnCancelar.Enabled = $false
+                $Script:XmlOcupado = $false
+            }
+        }
+
+        # ---------------------------------------------------------------------
+        # LIGACAO DOS EVENTOS
+        # ---------------------------------------------------------------------
+        $rbSerie.Add_CheckedChanged($atualizaModo)
+        $rbPeriodo.Add_CheckedChanged($atualizaModo)
+        $rbChave.Add_CheckedChanged($atualizaModo)
+        $txtNotas.Add_TextChanged($contaNotas)
+        $btnTestar.Add_Click({ & $testar })
+
+        # Texto da ajuda montado como array para nao depender de here-string indentada
+        $ajudaTexto = @(
+            "COMO USAR ESTA JANELA",
+            "=====================",
+            "",
+            "1) CONEXAO",
+            "   A janela ja tenta conectar sozinha ao abrir, no servidor da ultima vez.",
+            "   Se o SQL estiver em outra maquina, troque o servidor e clique em",
+            "   TESTAR CONEXAO. Ele confirma a versao do SQL e carrega o parceiro e",
+            "   as series que existem no banco.",
+            "",
+            "2) ESCOLHA UM DOS TRES MODOS",
+            "   - Por serie + sequencia (o mais usado)",
+            "       Escolha a serie do caixa e digite os numeros:",
+            "         1-15            da 1 ate a 15",
+            "         1,5,9           so essas tres",
+            "         1-10,15,20-25   pode misturar intervalo e avulsas",
+            "   - Por periodo",
+            "       Data inicial e final, com serie opcional. Traz todas as notas do",
+            "       periodo; acima de 10 mil ele pergunta antes de buscar.",
+            "   - Por chave de acesso",
+            "       Chaves de 44 digitos, por virgula ou uma por linha.",
+            "",
+            "3) BUSCAR",
+            "   So consulta, nao grava nada. A coluna Situacao diz o que e cada nota:",
+            "       AUTORIZADA ......  verde, nota valida",
+            "       CANCELADA .......  vermelho, foi cancelada depois de autorizada",
+            "       INUTILIZADA .....  amarelo, o numero foi inutilizado",
+            "       SEM PROTOCOLO ...  amarelo, tem a nota mas nao o protocolo de",
+            "                          autorizacao (rejeitada, denegada ou nunca",
+            "                          transmitida). O motivo aparece no balao.",
+            "       NAO ENCONTRADA ..  cinza, nao existe XML no banco",
+            "   Passe o mouse na linha para ver o detalhe.",
+            "",
+            "4) FILTRAR O QUE JA FOI BUSCADO",
+            "   O campo Tipo de nota tambem funciona como filtro da tela. Busque",
+            "   tudo uma vez e depois troque a opcao: a lista se ajusta na hora,",
+            "   sem consultar o banco de novo.",
+            "       Todas .................  mostra tudo que a busca trouxe",
+            "       Somente autorizadas ...  so as que valem: esconde inutilizadas,",
+            "                                sem protocolo e sem XML",
+            "       Somente inutilizadas ..  so as inutilizadas",
+            "       Somente canceladas ....  so as que tem XML de cancelamento",
+            "",
+            "5) BAIXAR",
+            "   A busca ja vem com todas as notas com XML marcadas. Para baixar so",
+            "   algumas, clique em DESMARCAR TODAS (ao lado do Tipo de nota),",
+            "   marque as que quer e use BAIXAR SELECIONADOS. O contador ao lado",
+            "   mostra quantas estao marcadas.",
+            "   BAIXAR SELECIONADOS grava as linhas marcadas.",
+            "   BAIXAR TUDO grava tudo que esta aparecendo na lista, entao com o",
+            "   filtro ligado ele baixa so o que o filtro deixou a mostra.",
+            "   Nota sem XML e pulada e aparece num aviso no fim.",
+            "   CANCELAR interrompe tanto a busca quanto o download.",
+            "",
+            "ONDE OS ARQUIVOS FICAM",
+            "   Area de Trabalho > Arquivos Xmenu > XMLs > <nome do lote>",
+            "   O nome do lote diz o que tem dentro, pronto para mandar ao cliente:",
+            "       XML NFC-e - Série 1 - Notas 1 a 15 e 2000",
+            "       XML NFC-e - Série 1 - Agosto de 2026",
+            "       XML NFC-e - 01-08-2026 a 12-09-2026",
+            "       XML NFC-e - 3 chaves de acesso",
+            "   Baixar o mesmo filtro de novo cria (2), (3), sem apagar o anterior.",
+            "   Um .zip do mesmo lote fica ao lado, pronto para enviar.",
+            "   Nome do arquivo: serie<serie>_nota<numero>_<chave>.xml",
+            "   O fim do nome diz a situacao, para o caso de os arquivos saírem",
+            "   da pasta e se misturarem:",
+            "       _INUT ..........  nota inutilizada",
+            "       _CANC ..........  nota cancelada depois de autorizada",
+            "       _CANC_EVENTO ...  o XML do cancelamento em si",
+            "       _SEM_PROTOCOLO .  nota sem protocolo de autorizacao, nao vale",
+            "       _CORROMPIDO ....  o XML do banco nao abriu como documento valido",
+            "   Subpastas: Inutilizadas, Cancelamentos (os _CANC_EVENTO) e",
+            "   Sem protocolo. Na pasta principal fica so o que vale.",
+            "   A pasta abre sozinha quando o lote termina.",
+            "",
+            "OUTROS BOTOES",
+            "   CONFERIR SEQUENCIA  so consulta: mostra os buracos na numeracao da",
+            "                       serie, util para saber se o cliente pulou nota",
+            "                       antes de baixar qualquer coisa.",
+            "   COPIAR FALTANTES    copia os numeros que nao tem XML no banco, ja",
+            "                       formatados, para colar num e-mail ou WhatsApp",
+            "                       para o cliente.",
+            "   ABRIR PASTA / ZIP   reabrem o ultimo lote baixado.",
+            "",
+            "ATALHOS",
+            "   Enter no campo Notas ja faz a busca.",
+            "   Enter no campo Servidor testa a conexao.",
+            "   Clique no cabecalho da coluna para ordenar a lista.",
+            "   Botao direito na lista: marcar todos, desmarcar todos, copiar chave.",
+            "   Duplo clique numa linha ja baixada abre o XML."
+        ) -join "`r`n"
+
+        $btnAjuda.Add_Click({
+                $fa = New-ToolForm "Como usar - Baixar XMLs NFC-e" 720 580
+                $pad = New-Object System.Windows.Forms.Panel
+                $pad.Dock = 'Fill'
+                $pad.Padding = New-Object System.Windows.Forms.Padding(14, 14, 14, 14)
+                $pad.BackColor = $Script:UiFundo
+                $tb = New-Object System.Windows.Forms.TextBox
+                $tb.Multiline = $true
+                $tb.ReadOnly = $true
+                $tb.ScrollBars = 'Vertical'
+                $tb.Dock = 'Fill'
+                $tb.BackColor = [System.Drawing.Color]::FromArgb(20, 24, 34)
+                $tb.ForeColor = $Script:UiTexto
+                $tb.BorderStyle = 'None'
+                $tb.Font = New-Object System.Drawing.Font("Consolas", 9.5)
+                $tb.Text = $ajudaTexto
+                [void]$pad.Controls.Add($tb)
+                [void]$fa.Controls.Add($pad)
+                $fa.Add_Shown({ $tb.Select(0, 0) })
+                [void]$fa.ShowDialog($f)
+                $fa.Dispose()
+            })
+        $cmbParceiro.Add_SelectedIndexChanged({
+                # Durante o TESTAR CONEXAO a propria rotina ja carrega as series
+                if ($Script:XmlOcupado) { return }
+                if ("$($cmbParceiro.Text)".Trim() -eq "") { return }
+                $Script:XmlOcupado = $true
+                $cn = $null
+                try {
+                    $cn = & $abrirConexao
+                    & $carregarSeries $cn ("$($cmbParceiro.Text)".Trim())
+                }
+                catch {}
+                finally {
+                    if ($null -ne $cn) { try { $cn.Close() } catch {} }
+                    $Script:XmlOcupado = $false
+                }
+            })
+
+        $btnBuscar.Add_Click({ [void](& $buscar) })
+
+        $btnBaixarSel.Add_Click({
+                $sel = @()
+                foreach ($lvi in $lv.CheckedItems) { $sel += $lvi.Tag }
+                if ($sel.Count -eq 0) {
+                    & $setStatus "Marque ao menos uma linha na lista." $Script:UiAmarelo
+                    return
+                }
+                & $baixar $sel
+            })
+
+        $btnBaixarTudo.Add_Click({
+                # "Tudo" e tudo que esta na tela: se o tipo estiver filtrando,
+                # baixa so o que o filtro deixou aparecer.
+                if ($lv.Items.Count -eq 0) {
+                    & $setStatus "Faça a busca antes de baixar." $Script:UiAmarelo
+                    return
+                }
+                $todas = @()
+                foreach ($lvi in $lv.Items) { $todas += $lvi.Tag }
+                & $baixar $todas
+            })
+
+        $btnConferir.Add_Click($conferir)
+
+        $btnCopiar.Add_Click({
+                if ($Script:XmlFaltantes.Count -eq 0) {
+                    & $setStatus "Não há faltantes para copiar." $Script:UiAmarelo
+                    return
+                }
+                $txt = ConvertTo-FaixaTexto $Script:XmlFaltantes
+                try { Set-Clipboard -Value $txt -ErrorAction Stop }
+                catch { [System.Windows.Forms.Clipboard]::SetText($txt) }
+                & $setStatus "Copiado: $txt" $Script:UiVerde
+            })
+
+        $btnPasta.Add_Click({
+                if ($Script:XmlUltimoLote -ne "" -and (Test-Path -LiteralPath $Script:XmlUltimoLote)) {
+                    Start-Process "explorer.exe" ("`"" + $Script:XmlUltimoLote + "`"")
+                }
+                else { & $setStatus "Nenhum lote baixado ainda." $Script:UiAmarelo }
+            })
+
+        $btnZip.Add_Click({
+                if ($Script:XmlUltimoZip -ne "" -and (Test-Path $Script:XmlUltimoZip)) {
+                    Start-Process "explorer.exe" ("/select,`"" + $Script:XmlUltimoZip + "`"")
+                }
+                else { & $setStatus "Nenhum zip gerado ainda." $Script:UiAmarelo }
+            })
+
+        $btnCancelar.Add_Click({
+                $Script:XmlCancelar = $true
+                & $setStatus "Cancelando..." $Script:UiAmarelo
+            })
+
+        $btnFechar.Add_Click({ $f.Close() })
+
+        $lv.Add_DoubleClick({
+                if ($lv.SelectedItems.Count -eq 0) { return }
+                $it = $lv.SelectedItems[0].Tag
+                if ($null -ne $it -and "$($it.Caminho)" -ne "" -and (Test-Path $it.Caminho)) {
+                    Start-Process -FilePath $it.Caminho
+                }
+                else { & $setStatus "Baixe a nota antes de abrir o arquivo." $Script:UiAmarelo }
+            })
+
+        $miChave.Add_Click({
+                if ($lv.SelectedItems.Count -eq 0) { return }
+                $it = $lv.SelectedItems[0].Tag
+                if ($null -eq $it -or "$($it.Chave)" -eq "") {
+                    & $setStatus "Essa linha não tem chave de acesso." $Script:UiAmarelo
+                    return
+                }
+                try { Set-Clipboard -Value $it.Chave -ErrorAction Stop }
+                catch { [System.Windows.Forms.Clipboard]::SetText($it.Chave) }
+                & $setStatus "Chave copiada: $($it.Chave)" $Script:UiVerde
+            })
+
+        $miPasta.Add_Click({
+                if ($lv.SelectedItems.Count -eq 0) { return }
+                $it = $lv.SelectedItems[0].Tag
+                if ($null -ne $it -and "$($it.Caminho)" -ne "" -and (Test-Path $it.Caminho)) {
+                    Start-Process "explorer.exe" ("/select,`"" + $it.Caminho + "`"")
+                }
+                elseif ($Script:XmlUltimoLote -ne "" -and (Test-Path -LiteralPath $Script:XmlUltimoLote)) {
+                    Start-Process "explorer.exe" ("`"" + $Script:XmlUltimoLote + "`"")
+                }
+                else { & $setStatus "Nenhum arquivo gravado para essa linha." $Script:UiAmarelo }
+            })
+
+        # Clique no cabecalho reordena a lista. Repinta a partir dos resultados em
+        # memoria, guardando antes o que estava marcado para nao perder a selecao.
+        $lv.Add_ColumnClick({
+                param($s, $e)
+                if ($Script:XmlResultados.Count -eq 0) { return }
+                foreach ($lvi in $lv.Items) { if ($null -ne $lvi.Tag) { $lvi.Tag.Marcado = $lvi.Checked } }
+
+                if ($Script:XmlOrdemCol -eq $e.Column) { $Script:XmlOrdemAsc = -not $Script:XmlOrdemAsc }
+                else { $Script:XmlOrdemCol = $e.Column; $Script:XmlOrdemAsc = $true }
+
+                $expr = { [long]$_.Nota }
+                switch ($e.Column) {
+                    1 { $expr = { [int]$_.Serie } }
+                    2 { $expr = { if ($null -ne $_.Data) { [datetime]$_.Data } else { [datetime]::MinValue } } }
+                    3 { $expr = { if ([bool]$_.Cancelada) { "CANCELADA" } else { "$($_.Status)" } } }
+                    4 { $expr = { "$($_.Chave)" } }
+                    5 { $expr = { [long]$_.Tamanho } }
+                    6 { $expr = { "$($_.Arquivo)" } }
+                }
+                if ($Script:XmlOrdemAsc) { $ord = @($Script:XmlResultados | Sort-Object $expr) }
+                else { $ord = @($Script:XmlResultados | Sort-Object $expr -Descending) }
+                $Script:XmlResultados = $ord
+                [void](& $repintaLista)
+            })
+
+        # Trocar o tipo depois da busca refiltra a tela na hora, sem nova consulta
+        $cmbTipo.Add_SelectedIndexChanged({
+                if ($Script:XmlResultados.Count -eq 0) { return }
+                $vis = & $repintaLista
+                if ($vis -eq 0) {
+                    & $setStatus "Nenhuma das $($Script:XmlResultados.Count) notas se encaixa em ""$($cmbTipo.Text)""." $Script:UiAmarelo
+                }
+                elseif ($vis -eq $Script:XmlResultados.Count) {
+                    & $setStatus "Mostrando todas as $vis notas da busca." $Script:UiVerde
+                }
+                else {
+                    & $setStatus "Mostrando $vis de $($Script:XmlResultados.Count) notas - filtro: $($cmbTipo.Text)" $Script:UiVerde
+                }
+            })
+
+        $miTodos.Add_Click({
+                & $marcarTodas $true
+                & $setStatus "$($lv.CheckedItems.Count) nota(s) com XML marcadas." $Script:UiSuave
+            })
+
+        $miNenhum.Add_Click({
+                & $marcarTodas $false
+                & $setStatus "Nenhuma nota marcada. Marque as que quer baixar e clique em BAIXAR SELECIONADOS." $Script:UiSuave
+            })
+
+        $btnMarcar.Add_Click({
+                if ($lv.CheckedItems.Count -gt 0) {
+                    & $marcarTodas $false
+                    & $setStatus "Nenhuma nota marcada. Marque as que quer baixar e clique em BAIXAR SELECIONADOS." $Script:UiSuave
+                }
+                else {
+                    & $marcarTodas $true
+                    & $setStatus "$($lv.CheckedItems.Count) nota(s) com XML marcadas." $Script:UiSuave
+                }
+            })
+
+        # Clique na caixinha de uma linha atualiza o contador e o botao. O delegate
+        # fica guardado para a lista poder soltar e religar o mesmo evento.
+        $aoMarcarLinha = [System.Windows.Forms.ItemCheckedEventHandler] { & $atualizaMarcadas }
+        $lv.add_ItemChecked($aoMarcarLinha)
+
+        # Enter nos campos principais evita ter que ir ate o botao
+        $txtNotas.Add_KeyDown({
+                param($s, $e)
+                if ($e.KeyCode -eq [System.Windows.Forms.Keys]::Enter) {
+                    $e.SuppressKeyPress = $true
+                    [void](& $buscar)
+                }
+            })
+
+        $txtServidor.Add_KeyDown({
+                param($s, $e)
+                if ($e.KeyCode -eq [System.Windows.Forms.Keys]::Enter) {
+                    $e.SuppressKeyPress = $true
+                    & $testar
+                }
+            })
+
+        $f.Add_FormClosing({ $Script:XmlCancelar = $true; $Script:XmlForm = $null })
+
+        & $atualizaModo
+        & $contaNotas
+        Log-Message "INFO" "XMLs: janela de download aberta"
+
+        # Uma unica tentativa de conexao, ja com a janela na tela e com timeout de
+        # 3s: em PDV sem SQL a tela abre normal em vez de ficar presa esperando.
+        $f.Add_Shown({ & $testar -Auto })
+        [void]$f.ShowDialog($Script:MainForm)
+    }
+    catch {
+        Log-Message "ERRO" "Falha no download de XMLs: $_"
+        [System.Windows.Forms.MessageBox]::Show("Falha ao abrir a janela: $($_.Exception.Message)", "Baixar XMLs NFC-e", "OK", "Error") | Out-Null
+    }
+}
+
+# -----------------------------------------------------------------------------
+# BACKUP DO BANCO (SQL SERVER)
+# O mesmo backup "Cheio" do manual interno (SSMS > Tarefas > Backup), feito pelo
+# proprio SQL: o banco fica online, sem parar o servico e sem desanexar. O .bak
+# nasce no disco da maquina do SQL e quem grava e a conta do servico do SQL, por
+# isso a janela roda no servidor e libera a pasta de destino para essa conta.
+# -----------------------------------------------------------------------------
+
+function New-SqlTextoConexao {
+    # Texto de conexao com o usuario sa. Servidor remoto vai forcado por TCP: sem
+    # protocolo, quando o TCP falha o SqlClient ainda tenta Named Pipes, que ignora
+    # o Connect Timeout (IP errado levava ate 24 s para dar erro).
+    param([string]$Servidor, [string]$Senha, [string]$Banco = "master", [int]$Timeout = 8)
+    $srv = "$Servidor".Trim()
+    if ($srv -eq "") { $srv = "127.0.0.1" }
+    $local = '^(\.|\(local\)|localhost|127\.0\.0\.1|' + [regex]::Escape($env:COMPUTERNAME) + ')([\\,]|$)'
+    if ($srv -notmatch ':' -and $srv -notmatch $local) { $srv = "tcp:" + $srv }
+    # O builder cuida de senha com ; ou aspas. Pelas chaves: no PowerShell ele e um
+    # dicionario, e $b.DataSource = ... viraria uma chave "DataSource" invalida.
+    $b = New-Object System.Data.SqlClient.SqlConnectionStringBuilder
+    $b["Data Source"] = $srv
+    $b["Initial Catalog"] = $Banco
+    $b["User ID"] = "sa"
+    $b["Password"] = $Senha
+    $b["Connect Timeout"] = $Timeout
+    $b["TrustServerCertificate"] = $true
+    return $b.ConnectionString
+}
+
+function Wait-SqlTarefa {
+    # Espera uma tarefa assincrona do SqlClient (OpenAsync, ExecuteNonQueryAsync...)
+    # com a janela respondendo. -AoEsperar roda a cada -IntervaloMs durante a espera.
+    # Se a tarefa falhou, lanca o erro original.
+    param($Tarefa, [scriptblock]$AoEsperar, [int]$IntervaloMs = 250)
+    $relogioEspera = [System.Diagnostics.Stopwatch]::StartNew()
+    while (-not $Tarefa.IsCompleted) {
+        [System.Windows.Forms.Application]::DoEvents()
+        Start-Sleep -Milliseconds 40
+        if ($null -ne $AoEsperar -and $relogioEspera.ElapsedMilliseconds -ge $IntervaloMs) {
+            $relogioEspera.Restart()
+            $null = & $AoEsperar
+        }
+    }
+    if ($Tarefa.IsFaulted) { throw $Tarefa.Exception.GetBaseException() }
+    if ($Tarefa.IsCanceled) { throw (New-Object System.OperationCanceledException) }
+}
+
+function Format-BytesTexto {
+    param([long]$Bytes)
+    if ($Bytes -ge 1GB) { return "{0:N1} GB" -f ($Bytes / 1GB) }
+    if ($Bytes -ge 1MB) { return "{0:N0} MB" -f ($Bytes / 1MB) }
+    return "{0:N0} KB" -f [math]::Ceiling($Bytes / 1KB)
+}
+
+function Test-SqlLocal {
+    # O backup so faz sentido na maquina do SQL: e no disco dela que o .bak nasce
+    param([string]$MaquinaSql)
+    return ("$MaquinaSql".Trim() -ieq "$env:COMPUTERNAME")
+}
+
+function Test-EspacoBackup {
+    # Cabe o backup no disco da pasta de destino? Pede 10% de folga.
+    # Devolve hashtable: Ok / Livre / Precisa / Texto
+    param([string]$Pasta, [long]$Bytes)
+    $raiz = [System.IO.Path]::GetPathRoot([System.IO.Path]::GetFullPath($Pasta))
+    $livre = [long](New-Object System.IO.DriveInfo($raiz)).AvailableFreeSpace
+    $precisa = [long]($Bytes * 1.1)
+    $res = @{ Ok = ($livre -ge $precisa); Livre = $livre; Precisa = $precisa; Texto = "" }
+    if (-not $res.Ok) {
+        $res.Texto = "Não há espaço em {0} para o backup: precisa de {1} e há {2} livres." -f $raiz.TrimEnd('\'), (Format-BytesTexto $precisa), (Format-BytesTexto $livre)
+    }
+    return $res
+}
+
+function Get-SqlIdLoja {
+    # ID da loja (IDParceiro do NetWebPDV), tirado da tabela de numeracao das NFC-e.
+    # Mais de uma loja no mesmo banco vem junta ("1234-77"), a de mais notas
+    # primeiro. Banco sem essa tabela devolve "".
+    param($Conexao, [string]$Banco)
+    $tabela = "[" + $Banco.Replace("]", "]]") + "].dbo.NFCeTokenID"
+    try {
+        $cmd = $Conexao.CreateCommand()
+        $cmd.CommandTimeout = 30
+        $cmd.CommandText = "IF OBJECT_ID(@t) IS NOT NULL SELECT TOP (3) CAST(IDParceiro AS nvarchar(40)) AS loja FROM " + $tabela +
+        " GROUP BY IDParceiro ORDER BY COUNT(*) DESC"
+        [void]$cmd.Parameters.AddWithValue("@t", $tabela)
+        $tarefa = $cmd.ExecuteReaderAsync()
+        Wait-SqlTarefa $tarefa
+        $rd = $tarefa.Result
+        $lojas = @()
+        try { while ($rd.Read()) { $lojas += "$($rd['loja'])" } }
+        finally { $rd.Close() }
+        return ($lojas -join "-")
+    }
+    catch { return "" }
+}
+
+function Get-BackupNomeArquivo {
+    # "NetWebPDV - Loja 1234 - 12-09-2026 15h30.bak": banco, ID da loja e data. A
+    # hora vai junto para dois backups do mesmo dia nao se confundirem. Sem ID da
+    # loja, entra o nome da maquina. Nunca repete um .bak ou .zip que ja esteja na
+    # pasta: vira "(2)", "(3)".
+    param([string]$Banco, [string]$Loja, [string]$Maquina, [datetime]$Data, [string]$Pasta)
+    $nomeBanco = $Banco
+    if ($Banco -ieq 'netwebpdv') { $nomeBanco = 'NetWebPDV' }
+    $origem = $Maquina
+    if ("$Loja".Trim() -ne "") { $origem = "Loja " + "$Loja".Trim() }
+    $base = ($nomeBanco + " - " + $origem + " - " + $Data.ToString("dd-MM-yyyy HH'h'mm")) -replace '[\\/:*?"<>|]', '-'
+    $caminho = Join-Path $Pasta ($base + ".bak")
+    $n = 1
+    while ((Test-Path -LiteralPath $caminho) -or (Test-Path -LiteralPath ([System.IO.Path]::ChangeExtension($caminho, ".zip")))) {
+        $n++
+        $caminho = Join-Path $Pasta ($base + " ($n).bak")
+    }
+    return $caminho
+}
+
+function Get-TextoErroSql {
+    # Junta todas as mensagens do SqlException: o BACKUP manda o motivo real numa
+    # mensagem e o "terminating abnormally" em outra
+    param($Erro)
+    $e = $Erro
+    while ($null -ne $e -and $e -isnot [System.Data.SqlClient.SqlException]) { $e = $e.InnerException }
+    if ($null -ne $e) { return (@($e.Errors | ForEach-Object { $_.Message }) -join " ") }
+    return "$($Erro.Message)"
+}
+
+function Test-ErroSemPermissao {
+    # "Operating system error 5(Access is denied.)" ou, com o SQL em portugues,
+    # "Erro do sistema operacional 5(Acesso negado.)"
+    param($Erro)
+    return ((Get-TextoErroSql $Erro) -match '(error|erro)\D{0,30}\b5\s*\(')
+}
+
+function Get-BackupErroTexto {
+    # Frase que diz o que fazer, no lugar da mensagem crua do SQL
+    param($Erro, [string]$Pasta)
+    $texto = Get-TextoErroSql $Erro
+    if (Test-ErroSemPermissao $Erro) {
+        return "O SQL Server não tem permissão para gravar em ""$Pasta"" nem na pasta de dados dele. Rode o Preparador como administrador e tente de novo."
+    }
+    if ($texto -match '\b112\s*\(') { return "Acabou o espaço no disco durante o backup. Libere espaço e tente de novo." }
+    $sql = $Erro
+    while ($null -ne $sql -and $sql -isnot [System.Data.SqlClient.SqlException]) { $sql = $sql.InnerException }
+    if ($null -ne $sql) {
+        if ($sql.Number -eq 18456) { return "O SQL Server recusou o usuário sa com essa senha." }
+        if (@(-1, 2, 26, 40, 53, 64, 258, 1225, 10060, 10061, 10065, 11001) -contains $sql.Number) {
+            return "Não achei o SQL Server nesta máquina. Confira em Serviços do SQL Server se ele está iniciado."
+        }
+    }
+    return $texto
+}
+
+function Get-SqlContasServico {
+    # Contas com que o servico do SQL grava no disco: a conta de logon do servico
+    # (NETWORK SERVICE, conta de dominio...) e a conta virtual NT SERVICE\MSSQL...,
+    # que o SQL 2008 em diante usa a partir do Windows 7 / Server 2008 R2
+    param($Conexao)
+    $contas = New-Object System.Collections.Generic.List[string]
+    $instancia = ""
+    try {
+        $cmd = $Conexao.CreateCommand()
+        $cmd.CommandTimeout = 30
+        $cmd.CommandText = "SELECT CAST(SERVERPROPERTY('InstanceName') AS nvarchar(128))"
+        $v = $cmd.ExecuteScalar()
+        if ($null -ne $v -and $v -isnot [System.DBNull]) { $instancia = "$v" }
+
+        # sys.dm_server_services so existe do 2008 R2 SP1 em diante
+        $cmd.CommandText = 'DECLARE @s TABLE (servico nvarchar(256), conta nvarchar(256)); ' +
+        'BEGIN TRY INSERT @s EXEC (N''SELECT servicename, service_account FROM sys.dm_server_services''); END TRY BEGIN CATCH END CATCH; ' +
+        'SELECT servico, conta FROM @s'
+        $rd = $cmd.ExecuteReader()
+        try {
+            while ($rd.Read()) {
+                if ("$($rd['servico'])" -like 'SQL Server (*' -and -not $rd.IsDBNull(1)) { $contas.Add("$($rd['conta'])") }
+            }
+        }
+        finally { $rd.Close() }
+    }
+    catch {}
+
+    $nomeServico = "MSSQLSERVER"
+    if ($instancia -ne "") { $nomeServico = 'MSSQL$' + $instancia }
+    $contas.Add('NT SERVICE\' + $nomeServico)
+    try {
+        $svc = Get-CimInstance -ClassName Win32_Service -Filter ("Name='" + $nomeServico.Replace("'", "''") + "'") -ErrorAction Stop
+        if ($null -ne $svc -and "$($svc.StartName)" -ne "") { $contas.Add("$($svc.StartName)") }
+    }
+    catch {}
+
+    # ".\usuario" e conta local: o Windows so reconhece com o nome da maquina
+    return @($contas | ForEach-Object { $_ -replace '^\.\\', ($env:COMPUTERNAME + '\') } | Select-Object -Unique)
+}
+
+function Grant-PastaBackupSql {
+    # Cria a pasta e da permissao de alteracao as contas do servico do SQL, que e
+    # quem grava o .bak. Conta que nao existe nesta maquina e so ignorada.
+    # Devolve as contas que receberam a permissao.
+    param([string]$Pasta, [string[]]$Contas)
+    if (-not (Test-Path -LiteralPath $Pasta)) { New-Item -ItemType Directory -Path $Pasta -Force | Out-Null }
+    $dir = New-Object System.IO.DirectoryInfo($Pasta)
+    $dadas = New-Object System.Collections.Generic.List[string]
+    foreach ($conta in @($Contas | Where-Object { "$_".Trim() -ne "" } | Select-Object -Unique)) {
+        # LocalSystem ja tem acesso a tudo
+        if ($conta -match '^(LocalSystem|NT AUTHORITY\\SYSTEM)$') { continue }
+        try {
+            $acl = $dir.GetAccessControl()
+            $regra = New-Object System.Security.AccessControl.FileSystemAccessRule($conta, 'Modify', 'ContainerInherit,ObjectInherit', 'None', 'Allow')
+            $acl.AddAccessRule($regra)
+            $dir.SetAccessControl($acl)
+            $dadas.Add($conta)
+        }
+        catch {}
+    }
+    return $dadas.ToArray()
+}
+
+function Compress-ArquivoZip {
+    # Compacta um arquivo sozinho num .zip, com progresso e cancelamento. O
+    # ZipFile.CreateFromDirectory nao avisa progresso, e um .bak de alguns GB
+    # deixaria a janela parada. Devolve $true se terminou; cancelado apaga o .zip.
+    param([string]$Origem, [string]$Destino, [scriptblock]$AoProgredir, [scriptblock]$Cancelado)
+    Add-Type -AssemblyName System.IO.Compression
+    $zipTotal = (Get-Item -LiteralPath $Origem).Length
+    $zipCancelou = $false
+    $zipArquivo = [System.IO.File]::Open($Destino, [System.IO.FileMode]::Create)
+    try {
+        $zipPacote = New-Object System.IO.Compression.ZipArchive($zipArquivo, [System.IO.Compression.ZipArchiveMode]::Create)
+        try {
+            $zipEntrada = $zipPacote.CreateEntry([System.IO.Path]::GetFileName($Origem), [System.IO.Compression.CompressionLevel]::Optimal)
+            $zipEntrada.LastWriteTime = [DateTimeOffset](Get-Item -LiteralPath $Origem).LastWriteTime
+            $zipSaida = $zipEntrada.Open()
+            $zipLeitura = [System.IO.File]::OpenRead($Origem)
+            try {
+                $zipBuffer = New-Object byte[] (4MB)
+                $zipLidos = [long]0
+                $zipRelogio = [System.Diagnostics.Stopwatch]::StartNew()
+                while (($zipN = $zipLeitura.Read($zipBuffer, 0, $zipBuffer.Length)) -gt 0) {
+                    $zipSaida.Write($zipBuffer, 0, $zipN)
+                    $zipLidos += $zipN
+                    [System.Windows.Forms.Application]::DoEvents()
+                    if ($null -ne $Cancelado -and (& $Cancelado)) { $zipCancelou = $true; break }
+                    if ($null -ne $AoProgredir -and $zipRelogio.ElapsedMilliseconds -ge 250) {
+                        $zipRelogio.Restart()
+                        $null = & $AoProgredir ([math]::Round(100.0 * $zipLidos / [math]::Max($zipTotal, 1), 1))
+                    }
+                }
+            }
+            finally {
+                $zipLeitura.Dispose()
+                $zipSaida.Dispose()
+            }
+        }
+        finally { $zipPacote.Dispose() }
+    }
+    finally { $zipArquivo.Dispose() }
+    if ($zipCancelou) {
+        Remove-Item -LiteralPath $Destino -Force -ErrorAction SilentlyContinue
+        return $false
+    }
+    if ($null -ne $AoProgredir) { $null = & $AoProgredir 100 }
+    return $true
+}
+
+function Invoke-BackupBanco {
+    # Faz o backup completo do banco e confere o arquivo. Nao lanca excecao: o
+    # resultado diz o que aconteceu, e a janela so cuida da tela.
+    #   -AoProgredir { param($Etapa, $Pct) }   Pct -1 = etapa sem porcentagem
+    #   -Cancelado { $true para parar }
+    #   -SoPelaPastaDoSql: pula a gravacao direta no destino (testa a 2a tentativa)
+    # Devolve hashtable: Ok / Cancelado / Verificado / Arquivo / Bytes / Zip / ZipBytes /
+    #   Duracao / Erro / Aviso / PelaPastaDoSql / Loja
+    param([string]$TextoConexao, [string]$Banco, [string]$Pasta, [switch]$Compactar,
+        [scriptblock]$AoProgredir, [scriptblock]$Cancelado, [switch]$SoPelaPastaDoSql)
+
+    $res = @{
+        Ok = $false; Cancelado = $false; Verificado = $false; Arquivo = ""; Bytes = [long]0; Zip = ""; ZipBytes = [long]0
+        Duracao = [timespan]::Zero; Erro = ""; Aviso = ""; PelaPastaDoSql = $false; Loja = ""
+    }
+    # Nomes proprios de proposito: estes blocos rodam de dentro de outras funcoes
+    # (Wait-SqlTarefa, Compress-ArquivoZip), e um nome comum como $AoProgredir
+    # seria achado primeiro la dentro, chamando a si mesmo
+    $bkpAoProgredir = $AoProgredir
+    $bkpCancelado = $Cancelado
+    $bkpAvisa = { param($Etapa, $Pct) if ($null -ne $bkpAoProgredir) { $null = & $bkpAoProgredir $Etapa $Pct } }
+    $bkpParar = { ($null -ne $bkpCancelado) -and [bool](& $bkpCancelado) }
+    $bkpEstado = @{ PediuParar = $false }
+    $bkpRelogio = [System.Diagnostics.Stopwatch]::StartNew()
+    $bkpApagar = New-Object System.Collections.Generic.List[string]
+    $cnBanco = $null
+    $cnVigia = $null
+
+    try {
+        & $bkpAvisa "Conectando" -1
+        $cnBanco = New-Object System.Data.SqlClient.SqlConnection($TextoConexao)
+        Wait-SqlTarefa $cnBanco.OpenAsync()
+        $cnVigia = New-Object System.Data.SqlClient.SqlConnection($TextoConexao)
+        Wait-SqlTarefa $cnVigia.OpenAsync()
+
+        $bkpValor = {
+            param([string]$Sql, $Valor)
+            $cmdValor = $cnBanco.CreateCommand()
+            $cmdValor.CommandTimeout = 60
+            $cmdValor.CommandText = $Sql
+            if ($null -ne $Valor) { [void]$cmdValor.Parameters.AddWithValue("@v", $Valor) }
+            $tarefaValor = $cmdValor.ExecuteScalarAsync()
+            Wait-SqlTarefa $tarefaValor
+            $v = $tarefaValor.Result
+            if ($v -is [System.DBNull]) { return $null }
+            return $v
+        }
+
+        $maquina = "$(& $bkpValor "SELECT CAST(SERVERPROPERTY('MachineName') AS nvarchar(128))")"
+        if (-not (Test-SqlLocal -MaquinaSql $maquina)) {
+            throw "Esse SQL Server está na máquina $maquina, e o backup precisa ser feito nela: abra o Preparador no servidor."
+        }
+        if ($null -eq (& $bkpValor "SELECT DB_ID(@v)" $Banco)) { throw "O banco ""$Banco"" não existe nesse SQL Server." }
+        $nomeSql = "[" + $Banco.Replace("]", "]]") + "]"
+
+        # O backup ocupa mais ou menos as paginas de dados em uso
+        $usado = [long](& $bkpValor ("SELECT ISNULL(SUM(CAST(used_pages AS bigint)), 0) * 8192 FROM " + $nomeSql + ".sys.allocation_units"))
+        if (-not (Test-Path -LiteralPath $Pasta)) { New-Item -ItemType Directory -Path $Pasta -Force | Out-Null }
+        $espaco = Test-EspacoBackup -Pasta $Pasta -Bytes $usado
+        if (-not $espaco.Ok) { throw $espaco.Texto }
+
+        # Maquina pelo nome do Windows (o do SQL pode vir com outra caixa), igual a
+        # previa da janela; so entra no nome quando o banco nao tem ID de loja
+        $res.Loja = Get-SqlIdLoja -Conexao $cnBanco -Banco $Banco
+        $arquivo = Get-BackupNomeArquivo -Banco $Banco -Loja $res.Loja -Maquina $env:COMPUTERNAME -Data (Get-Date) -Pasta $Pasta
+        $spid = [int](& $bkpValor "SELECT @@SPID")
+
+        # Comando longo (BACKUP, RESTORE VERIFYONLY) sem travar a janela: a
+        # porcentagem vem de outra conexao e o cancelamento e atendido na hora
+        $bkpLongo = {
+            param([string]$Sql, [string]$Etapa, [string]$Caminho)
+            $cmdLongo = $cnBanco.CreateCommand()
+            $cmdLongo.CommandTimeout = 0
+            $cmdLongo.CommandText = $Sql
+            [void]$cmdLongo.Parameters.AddWithValue("@arquivo", $Caminho)
+            $cmdVigia = $cnVigia.CreateCommand()
+            $cmdVigia.CommandTimeout = 10
+            $cmdVigia.CommandText = "SELECT percent_complete FROM sys.dm_exec_requests WHERE session_id = @s"
+            [void]$cmdVigia.Parameters.AddWithValue("@s", $spid)
+            if (& $bkpParar) { $bkpEstado.PediuParar = $true; throw "Backup cancelado." }
+            & $bkpAvisa $Etapa 0
+            $tarefaLonga = $cmdLongo.ExecuteNonQueryAsync()
+            Wait-SqlTarefa $tarefaLonga -IntervaloMs 500 -AoEsperar {
+                if (-not $bkpEstado.PediuParar -and (& $bkpParar)) {
+                    $bkpEstado.PediuParar = $true
+                    try { $cmdLongo.Cancel() } catch {}
+                }
+                try {
+                    $pctLido = $cmdVigia.ExecuteScalar()
+                    if ($null -ne $pctLido -and $pctLido -isnot [System.DBNull] -and [double]$pctLido -gt 0) {
+                        & $bkpAvisa $Etapa ([math]::Round([double]$pctLido, 1))
+                    }
+                }
+                catch {}
+            }
+            if ($bkpEstado.PediuParar) { throw "Backup cancelado." }
+            & $bkpAvisa $Etapa 100
+        }
+
+        # COPY_ONLY: nao mexe na sequencia de backups que o cliente ja tenha.
+        # CHECKSUM: o SQL confere cada pagina enquanto grava.
+        $sqlBackup = "BACKUP DATABASE " + $nomeSql + " TO DISK = @arquivo WITH COPY_ONLY, INIT, CHECKSUM, NAME = N'Preparador de Ambiente'"
+        $gravarEm = $null
+        if (-not $SoPelaPastaDoSql) {
+            [void](Grant-PastaBackupSql -Pasta $Pasta -Contas (Get-SqlContasServico -Conexao $cnBanco))
+            $bkpApagar.Add($arquivo)
+            try {
+                & $bkpLongo $sqlBackup "Fazendo backup" $arquivo
+                $gravarEm = $arquivo
+            }
+            catch {
+                if ($bkpEstado.PediuParar -or -not (Test-ErroSemPermissao $_.Exception)) { throw }
+            }
+        }
+        if ($null -eq $gravarEm) {
+            # Segunda tentativa: o SQL nao conseguiu gravar no destino (Area de
+            # Trabalho no OneDrive, politica de rede...). Grava na pasta de dados
+            # do proprio banco, onde ele sempre tem permissao, e depois move.
+            $mdf = "$(& $bkpValor "SELECT TOP 1 physical_name FROM sys.master_files WHERE database_id = DB_ID(@v) AND type = 0 ORDER BY file_id" $Banco)"
+            $gravarEm = Join-Path (Split-Path $mdf) (Split-Path $arquivo -Leaf)
+            $bkpApagar.Add($gravarEm)
+            & $bkpLongo $sqlBackup "Fazendo backup" $gravarEm
+        }
+
+        # RESTORE VERIFYONLY: confirma que o arquivo esta integro e restauravel
+        & $bkpLongo "RESTORE VERIFYONLY FROM DISK = @arquivo WITH CHECKSUM" "Conferindo o arquivo" $gravarEm
+        $res.Verificado = $true
+
+        if ($gravarEm -ne $arquivo) {
+            & $bkpAvisa "Movendo para a pasta de backups" -1
+            $bkpApagar.Add($arquivo)
+            Move-Item -LiteralPath $gravarEm -Destination $arquivo -Force
+            # Larga as permissoes da pasta do SQL e herda as da pasta de destino,
+            # como se o arquivo tivesse nascido la
+            $seguranca = New-Object System.Security.AccessControl.FileSecurity
+            $seguranca.SetAccessRuleProtection($false, $false)
+            [System.IO.File]::SetAccessControl($arquivo, $seguranca)
+            $res.PelaPastaDoSql = $true
+        }
+
+        $res.Arquivo = $arquivo
+        $res.Bytes = (Get-Item -LiteralPath $arquivo).Length
+        $bkpApagar.Clear()
+        $res.Ok = $true
+
+        if ($Compactar) {
+            $zip = [System.IO.Path]::ChangeExtension($arquivo, ".zip")
+            try {
+                & $bkpAvisa "Compactando" 0
+                $zipPronto = Compress-ArquivoZip -Origem $arquivo -Destino $zip -AoProgredir { param($pctZip) & $bkpAvisa "Compactando" $pctZip } -Cancelado $bkpCancelado
+                if ($zipPronto) {
+                    $res.Zip = $zip
+                    $res.ZipBytes = (Get-Item -LiteralPath $zip).Length
+                }
+                else { $res.Aviso = "Compactação cancelada: o .bak ficou pronto, só não tem o .zip." }
+            }
+            catch {
+                Remove-Item -LiteralPath $zip -Force -ErrorAction SilentlyContinue
+                $res.Aviso = "Não deu para compactar ($($_.Exception.Message)). O .bak ficou pronto."
+            }
+        }
+    }
+    catch {
+        if ($bkpEstado.PediuParar -or (& $bkpParar)) {
+            $res.Cancelado = $true
+            $res.Erro = "Backup cancelado."
+        }
+        else { $res.Erro = Get-BackupErroTexto -Erro $_.Exception -Pasta $Pasta }
+        # Nada pela metade: o SQL ainda pode segurar o arquivo por um instante
+        foreach ($parcial in $bkpApagar) {
+            for ($tentativa = 0; $tentativa -lt 20 -and (Test-Path -LiteralPath $parcial); $tentativa++) {
+                try { Remove-Item -LiteralPath $parcial -Force -ErrorAction Stop }
+                catch { Start-Sleep -Milliseconds 250 }
+            }
+        }
+    }
+    finally {
+        foreach ($conexaoAberta in @($cnBanco, $cnVigia)) {
+            if ($null -ne $conexaoAberta) { try { $conexaoAberta.Close() } catch {} }
+        }
+        $res.Duracao = $bkpRelogio.Elapsed
+    }
+    return $res
+}
+
+function Show-BackupBanco {
+    try {
+        if ($null -ne $Script:BkpForm -and -not $Script:BkpForm.IsDisposed) {
+            $Script:BkpForm.Activate(); return
+        }
+
+        $Script:BkpCancelar = $false
+        $Script:BkpOcupado = $false
+        $Script:BkpFecharAoTerminar = $false
+        $Script:BkpBancos = @{}
+        $Script:BkpLojas = @{}
+
+        $f = New-ToolForm "Backup do Banco NetWebPDV" 780 540
+        $f.MinimumSize = New-Object System.Drawing.Size(780, 540)
+        $Script:BkpForm = $f
+
+        $novoCartao = {
+            param([int]$Y, [int]$H)
+            $p = New-Object System.Windows.Forms.Panel
+            $p.Location = New-Object System.Drawing.Point(20, $Y)
+            $p.Size = New-Object System.Drawing.Size(724, $H)
+            $p.BackColor = $Script:UiCartao
+            $p.Anchor = 'Top,Left,Right'
+            [void]$f.Controls.Add($p)
+            return $p
+        }
+        $novoCampo = {
+            param($Pai, [int]$X, [int]$Y, [int]$W, [string]$Valor)
+            $t = New-Object System.Windows.Forms.TextBox
+            $t.Location = New-Object System.Drawing.Point($X, $Y)
+            $t.Size = New-Object System.Drawing.Size($W, 24)
+            $t.BackColor = [System.Drawing.Color]::FromArgb(20, 24, 34)
+            $t.ForeColor = $Script:UiTexto
+            $t.BorderStyle = 'FixedSingle'
+            $t.Text = $Valor
+            [void]$Pai.Controls.Add($t)
+            return $t
+        }
+
+        New-ToolLabel $f "BACKUP DO BANCO DE DADOS" 20 14 12 -Negrito | Out-Null
+        New-ToolLabel $f "Backup completo pelo próprio SQL Server, com o banco online: sem parar o serviço e sem desanexar." 20 42 9 -Cor $Script:UiSuave -W 724 | Out-Null
+
+        # CONEXAO
+        $cardConn = & $novoCartao 70 86
+        New-ToolLabel $cardConn "CONEXÃO" 14 8 10 -Negrito | Out-Null
+        New-ToolLabel $cardConn "Servidor:" 14 38 9 -Cor $Script:UiSuave | Out-Null
+        $txtBkpServidor = & $novoCampo $cardConn 80 35 150 "127.0.0.1"
+        New-ToolLabel $cardConn "Senha:" 246 38 9 -Cor $Script:UiSuave | Out-Null
+        $txtBkpSenha = & $novoCampo $cardConn 294 35 130 "netcontroll"
+        $btnBkpTestar = New-ToolButton $cardConn "TESTAR CONEXÃO" 440 34 150 27 $Script:UiAzul $null "Conecta no SQL Server desta máquina e lista os bancos"
+        $lblBkpConn = New-ToolLabel $cardConn "Conectando..." 14 64 9 -Cor $Script:UiSuave -W 700
+
+        # O QUE SALVAR
+        $cardBkp = & $novoCartao 166 146
+        New-ToolLabel $cardBkp "O QUE SALVAR" 14 8 10 -Negrito | Out-Null
+        New-ToolLabel $cardBkp "Banco:" 14 40 9 -Cor $Script:UiSuave | Out-Null
+        $cmbBkpBanco = New-Object System.Windows.Forms.ComboBox
+        $cmbBkpBanco.Location = New-Object System.Drawing.Point(90, 37)
+        $cmbBkpBanco.Width = 220
+        $cmbBkpBanco.DropDownStyle = 'DropDownList'
+        $cmbBkpBanco.FlatStyle = 'Flat'
+        $cmbBkpBanco.BackColor = [System.Drawing.Color]::FromArgb(20, 24, 34)
+        $cmbBkpBanco.ForeColor = $Script:UiTexto
+        [void]$cardBkp.Controls.Add($cmbBkpBanco)
+        $lblBkpTamanho = New-ToolLabel $cardBkp "" 324 40 9 -Cor $Script:UiSuave -W 390
+        New-ToolLabel $cardBkp "Salvar em:" 14 70 9 -Cor $Script:UiSuave | Out-Null
+        $lblBkpPasta = New-ToolLabel $cardBkp $Script:BackupPasta 90 70 9 -W 620
+        New-ToolLabel $cardBkp "Arquivo:" 14 94 9 -Cor $Script:UiSuave | Out-Null
+        $lblBkpArquivo = New-ToolLabel $cardBkp "" 90 94 9 -Cor $Script:UiSuave -W 620
+        $chkBkpZip = New-Object System.Windows.Forms.CheckBox
+        $chkBkpZip.Text = "Compactar em .zip ao terminar (fica bem menor para enviar)"
+        $chkBkpZip.Location = New-Object System.Drawing.Point(14, 118)
+        $chkBkpZip.Size = New-Object System.Drawing.Size(600, 22)
+        $chkBkpZip.ForeColor = $Script:UiTexto
+        $chkBkpZip.BackColor = [System.Drawing.Color]::Transparent
+        $chkBkpZip.Checked = $true
+        [void]$cardBkp.Controls.Add($chkBkpZip)
+
+        # PROGRESSO E BOTOES
+        $lblBkpEtapa = New-ToolLabel $f "" 20 326 9.5 -Negrito -W 724
+        $pbBkp = New-Object System.Windows.Forms.ProgressBar
+        $pbBkp.Location = New-Object System.Drawing.Point(20, 350)
+        $pbBkp.Size = New-Object System.Drawing.Size(724, 18)
+        $pbBkp.Style = 'Continuous'
+        $pbBkp.MarqueeAnimationSpeed = 30
+        $pbBkp.Anchor = 'Top,Left,Right'
+        [void]$f.Controls.Add($pbBkp)
+
+        $btnBkpFazer = New-ToolButton $f "FAZER BACKUP" 20 384 200 34 $Script:UiVerde $null "Faz o backup completo, confere se o arquivo restaura e abre a pasta no fim"
+        $btnBkpFazer.Enabled = $false
+        $btnBkpCancelar = New-ToolButton $f "CANCELAR" 230 384 120 34 $Script:UiVermelho $null "Interrompe o backup e apaga o arquivo pela metade"
+        $btnBkpCancelar.Enabled = $false
+        $btnBkpPasta = New-ToolButton $f "ABRIR PASTA" 360 384 150 34 $Script:UiCinza $null "Abre a pasta dos backups"
+        $btnBkpFechar = New-ToolButton $f "FECHAR" 624 384 120 34 $Script:UiCinza $null "Fecha esta janela"
+        $btnBkpFechar.Anchor = 'Top,Right'
+        $lblBkpStatus = New-ToolLabel $f "O banco continua no ar durante o backup: o PDV não trava e ninguém precisa parar de vender." 20 430 9 -Cor $Script:UiSuave -W 724
+
+        if ($Script:ToolTip) {
+            $Script:ToolTip.SetToolTip($txtBkpServidor, "Deixe 127.0.0.1: o backup é gravado no disco da máquina do SQL, então o Preparador precisa estar rodando nela.")
+            $Script:ToolTip.SetToolTip($cmbBkpBanco, "Bancos de usuário desse SQL Server. O netwebpdv já vem escolhido quando existe.")
+            $Script:ToolTip.SetToolTip($lblBkpPasta, "Pasta fixa dos backups, dentro de Arquivos Xmenu na Área de Trabalho.")
+            $Script:ToolTip.SetToolTip($chkBkpZip, "O .bak tem o tamanho dos dados. Compactado costuma ficar 80 a 90% menor, bom para WeTransfer ou pendrive.")
+        }
+
+        # ---------------------------------------------------------------------
+        # ROTINAS DA JANELA
+        # ---------------------------------------------------------------------
+        $atualizaArquivo = {
+            $nomeBanco = "$($cmbBkpBanco.Text)"
+            if ($nomeBanco -eq "") { $lblBkpTamanho.Text = ""; $lblBkpArquivo.Text = ""; return }
+            if ($Script:BkpBancos.ContainsKey($nomeBanco)) {
+                $lblBkpTamanho.Text = "ocupa " + (Format-BytesTexto ([long]$Script:BkpBancos[$nomeBanco])) + " no disco (dados + log)"
+            }
+            $lojaPrevia = ""
+            if ($Script:BkpLojas.ContainsKey($nomeBanco)) { $lojaPrevia = $Script:BkpLojas[$nomeBanco] }
+            $nomeArq = Split-Path (Get-BackupNomeArquivo -Banco $nomeBanco -Loja $lojaPrevia -Maquina $env:COMPUTERNAME -Data (Get-Date) -Pasta $Script:BackupPasta) -Leaf
+            if ($chkBkpZip.Checked) { $nomeArq = $nomeArq + "   +   .zip" }
+            $lblBkpArquivo.Text = $nomeArq
+        }
+
+        $testarBkp = {
+            param([switch]$Auto)
+            if ($Script:BkpOcupado) { return }
+            $Script:BkpOcupado = $true
+            $cnTeste = $null
+            $btnBkpTestar.Enabled = $false
+            $btnBkpFazer.Enabled = $false
+            try {
+                $lblBkpConn.ForeColor = $Script:UiAmarelo
+                $lblBkpConn.Text = "Conectando..."
+                $limite = 8
+                if ($Auto) { $limite = 3 }
+                $cnTeste = New-Object System.Data.SqlClient.SqlConnection((New-SqlTextoConexao -Servidor $txtBkpServidor.Text -Senha $txtBkpSenha.Text -Timeout $limite))
+                Wait-SqlTarefa $cnTeste.OpenAsync()
+
+                $cmdTeste = $cnTeste.CreateCommand()
+                $cmdTeste.CommandTimeout = 30
+                $cmdTeste.CommandText = "SELECT CAST(SERVERPROPERTY('MachineName') AS nvarchar(128)) AS maquina, " +
+                "CAST(SERVERPROPERTY('Edition') AS nvarchar(128)) AS edicao, CAST(SERVERPROPERTY('ProductVersion') AS nvarchar(64)) AS versao; " +
+                "SELECT d.name, SUM(CAST(mf.size AS bigint)) * 8192 AS bytes FROM sys.databases d " +
+                "JOIN sys.master_files mf ON mf.database_id = d.database_id WHERE d.database_id > 4 AND d.state = 0 " +
+                "GROUP BY d.name ORDER BY d.name"
+                $tarefaTeste = $cmdTeste.ExecuteReaderAsync()
+                Wait-SqlTarefa $tarefaTeste
+                $rdTeste = $tarefaTeste.Result
+                $maquinaSql = ""
+                $versaoSql = ""
+                try {
+                    if ($rdTeste.Read()) {
+                        $maquinaSql = "$($rdTeste['maquina'])"
+                        $versaoSql = "$($rdTeste['edicao']) $($rdTeste['versao'])"
+                    }
+                    [void]$rdTeste.NextResult()
+                    $Script:BkpBancos = @{}
+                    $cmbBkpBanco.Items.Clear()
+                    while ($rdTeste.Read()) {
+                        $Script:BkpBancos["$($rdTeste['name'])"] = [long]$rdTeste['bytes']
+                        [void]$cmbBkpBanco.Items.Add("$($rdTeste['name'])")
+                    }
+                }
+                finally { $rdTeste.Close() }
+
+                # ID da loja de cada banco, para a previa do nome do arquivo
+                $Script:BkpLojas = @{}
+                foreach ($nomeLista in @($Script:BkpBancos.Keys)) {
+                    $Script:BkpLojas[$nomeLista] = Get-SqlIdLoja -Conexao $cnTeste -Banco $nomeLista
+                }
+
+                if (-not (Test-SqlLocal -MaquinaSql $maquinaSql)) {
+                    $lblBkpConn.ForeColor = $Script:UiVermelho
+                    $lblBkpConn.Text = "Esse SQL Server está na máquina $maquinaSql. O backup precisa ser feito nela: abra o Preparador no servidor."
+                    return
+                }
+                if ($cmbBkpBanco.Items.Count -eq 0) {
+                    $lblBkpConn.ForeColor = $Script:UiAmarelo
+                    $lblBkpConn.Text = "Conectado ($versaoSql), mas esse SQL Server não tem bancos de usuário."
+                    return
+                }
+                $cmbBkpBanco.SelectedIndex = 0
+                for ($i = 0; $i -lt $cmbBkpBanco.Items.Count; $i++) {
+                    if ("$($cmbBkpBanco.Items[$i])" -ieq 'netwebpdv') { $cmbBkpBanco.SelectedIndex = $i; break }
+                }
+                $lblBkpConn.ForeColor = $Script:UiVerde
+                $lblBkpConn.Text = "OK - $versaoSql | máquina: $maquinaSql | bancos: $($cmbBkpBanco.Items.Count)"
+                $btnBkpFazer.Enabled = $true
+            }
+            catch {
+                $lblBkpConn.ForeColor = $Script:UiVermelho
+                $lblBkpConn.Text = Get-BackupErroTexto -Erro $_.Exception -Pasta $Script:BackupPasta
+                if (-not $Auto) { Log-Message "ERRO" "Backup: falha de conexão - $($_.Exception.Message)" }
+            }
+            finally {
+                if ($null -ne $cnTeste) { try { $cnTeste.Close() } catch {} }
+                $btnBkpTestar.Enabled = $true
+                $Script:BkpOcupado = $false
+                & $atualizaArquivo
+            }
+        }
+
+        $fazerBkp = {
+            if ($Script:BkpOcupado -or "$($cmbBkpBanco.Text)" -eq "") { return }
+            $Script:BkpOcupado = $true
+            $Script:BkpCancelar = $false
+            $travados = @($btnBkpFazer, $btnBkpTestar, $cmbBkpBanco, $chkBkpZip, $txtBkpServidor, $txtBkpSenha)
+            foreach ($ctl in $travados) { $ctl.Enabled = $false }
+            $btnBkpCancelar.Enabled = $true
+            $bancoEscolhido = "$($cmbBkpBanco.Text)"
+            $lblBkpStatus.ForeColor = $Script:UiAmarelo
+            $lblBkpStatus.Text = "Backup em andamento. O banco continua no ar e o PDV pode seguir vendendo."
+            Log-Message "INFO" "Backup: iniciando o backup do banco $bancoEscolhido em $($Script:BackupPasta)"
+            try {
+                $argsBkp = @{
+                    TextoConexao = (New-SqlTextoConexao -Servidor $txtBkpServidor.Text -Senha $txtBkpSenha.Text -Timeout 15)
+                    Banco        = $bancoEscolhido
+                    Pasta        = $Script:BackupPasta
+                    Compactar    = $chkBkpZip.Checked
+                    AoProgredir  = {
+                        param($Etapa, $Pct)
+                        if ($Pct -lt 0) {
+                            $pbBkp.Style = 'Marquee'
+                            $lblBkpEtapa.Text = "$Etapa..."
+                        }
+                        else {
+                            $pbBkp.Style = 'Continuous'
+                            $pbBkp.Value = [int][math]::Min(100, [math]::Max(0, $Pct))
+                            $lblBkpEtapa.Text = "$Etapa... $([math]::Floor($Pct))%"
+                        }
+                    }
+                    Cancelado    = { $Script:BkpCancelar }
+                }
+                $resBkp = Invoke-BackupBanco @argsBkp
+
+                $pbBkp.Style = 'Continuous'
+                if ($resBkp.Ok) {
+                    $pbBkp.Value = 100
+                    $duracao = "{0}min {1:00}s" -f [int][math]::Floor($resBkp.Duracao.TotalMinutes), $resBkp.Duracao.Seconds
+                    $texto = "Backup pronto e conferido: " + (Split-Path $resBkp.Arquivo -Leaf) + " (" + (Format-BytesTexto $resBkp.Bytes) + ")"
+                    if ($resBkp.Zip -ne "") { $texto = $texto + " | .zip com " + (Format-BytesTexto $resBkp.ZipBytes) }
+                    $texto = $texto + " | " + $duracao
+                    $lblBkpEtapa.Text = "Concluído"
+                    if ($resBkp.Aviso -ne "") {
+                        $lblBkpStatus.ForeColor = $Script:UiAmarelo
+                        $texto = $texto + " | " + $resBkp.Aviso
+                    }
+                    else { $lblBkpStatus.ForeColor = $Script:UiVerde }
+                    $lblBkpStatus.Text = $texto
+                    Log-Message "SUCESSO" "Backup: $texto - $($resBkp.Arquivo)"
+
+                    # Termina na pasta, com o arquivo pronto para enviar ja selecionado
+                    $selecionar = $resBkp.Arquivo
+                    if ($resBkp.Zip -ne "") { $selecionar = $resBkp.Zip }
+                    try { Start-Process "explorer.exe" ("/select,`"" + $selecionar + "`"") } catch {}
+                }
+                elseif ($resBkp.Cancelado) {
+                    $pbBkp.Value = 0
+                    $lblBkpEtapa.Text = ""
+                    $lblBkpStatus.ForeColor = $Script:UiAmarelo
+                    $lblBkpStatus.Text = "Backup cancelado. Nenhum arquivo pela metade ficou na pasta."
+                    Log-Message "CANCEL" "Backup: cancelado pelo usuário"
+                }
+                else {
+                    $pbBkp.Value = 0
+                    $lblBkpEtapa.Text = ""
+                    $lblBkpStatus.ForeColor = $Script:UiVermelho
+                    $lblBkpStatus.Text = "Não foi possível fazer o backup: $($resBkp.Erro)"
+                    Log-Message "ERRO" "Backup: $($resBkp.Erro)"
+                    [System.Windows.Forms.MessageBox]::Show($resBkp.Erro, "Backup do Banco", "OK", "Error") | Out-Null
+                }
+            }
+            finally {
+                foreach ($ctl in $travados) { $ctl.Enabled = $true }
+                $btnBkpCancelar.Enabled = $false
+                $Script:BkpOcupado = $false
+                & $atualizaArquivo
+                if ($Script:BkpFecharAoTerminar) { $f.Close() }
+            }
+        }
+
+        # ---------------------------------------------------------------------
+        # EVENTOS
+        # ---------------------------------------------------------------------
+        $btnBkpTestar.Add_Click({ & $testarBkp })
+        $btnBkpFazer.Add_Click($fazerBkp)
+        $btnBkpCancelar.Add_Click({
+                $Script:BkpCancelar = $true
+                $lblBkpStatus.ForeColor = $Script:UiAmarelo
+                $lblBkpStatus.Text = "Cancelando o backup..."
+            })
+        $btnBkpPasta.Add_Click({
+                try {
+                    if (-not (Test-Path -LiteralPath $Script:BackupPasta)) { New-Item -ItemType Directory -Path $Script:BackupPasta -Force | Out-Null }
+                    Start-Process "explorer.exe" ("`"" + $Script:BackupPasta + "`"")
+                }
+                catch { $lblBkpStatus.Text = "Não deu para abrir a pasta: $($_.Exception.Message)" }
+            })
+        $btnBkpFechar.Add_Click({ $f.Close() })
+        $cmbBkpBanco.Add_SelectedIndexChanged($atualizaArquivo)
+        $chkBkpZip.Add_CheckedChanged($atualizaArquivo)
+        $txtBkpSenha.Add_KeyDown({
+                param($s, $e)
+                if ($e.KeyCode -eq [System.Windows.Forms.Keys]::Enter) { $e.SuppressKeyPress = $true; & $testarBkp }
+            })
+
+        $f.Add_FormClosing({
+                param($s, $e)
+                # Fechar no meio do backup cancela primeiro, para nao sobrar arquivo pela metade
+                if ($Script:BkpOcupado -and $btnBkpCancelar.Enabled) {
+                    $r = [System.Windows.Forms.MessageBox]::Show("Há um backup em andamento.`r`n`r`nDeseja cancelar o backup e fechar a janela?",
+                        "Backup do Banco", "YesNo", "Warning")
+                    if ($r -eq [System.Windows.Forms.DialogResult]::Yes) {
+                        $Script:BkpCancelar = $true
+                        $Script:BkpFecharAoTerminar = $true
+                    }
+                    $e.Cancel = $true
+                    return
+                }
+                $Script:BkpForm = $null
+            })
+
+        Log-Message "INFO" "Backup: janela aberta"
+        $f.Add_Shown({ & $testarBkp -Auto })
+        [void]$f.ShowDialog($Script:MainForm)
+    }
+    catch {
+        Log-Message "ERRO" "Falha na janela de backup: $_"
+        [System.Windows.Forms.MessageBox]::Show("Falha ao abrir a janela: $($_.Exception.Message)", "Backup do Banco", "OK", "Error") | Out-Null
     }
 }
 
@@ -2154,6 +5001,918 @@ function Show-PrinterScanner {
     }
 }
 
+# -----------------------------------------------------------------------------
+# FILTRO DA ABA DE DRIVERS
+# -----------------------------------------------------------------------------
+
+function ConvertTo-TextoBusca {
+    # Texto so com letras e numeros, minusculo e sem acento: "TM-T20" vira "tmt20"
+    # e "UTILITARIO" com acento vira "utilitario"
+    param([string]$Texto)
+    if ([string]::IsNullOrEmpty($Texto)) { return "" }
+    $decomposto = $Texto.Normalize([System.Text.NormalizationForm]::FormD)
+    $sb = New-Object System.Text.StringBuilder
+    foreach ($ch in $decomposto.ToCharArray()) {
+        if ([System.Globalization.CharUnicodeInfo]::GetUnicodeCategory($ch) -ne [System.Globalization.UnicodeCategory]::NonSpacingMark) {
+            [void]$sb.Append($ch)
+        }
+    }
+    return ($sb.ToString().ToLowerInvariant() -replace '[^a-z0-9]', '')
+}
+
+function Test-CombinaBusca {
+    # Cada palavra da busca precisa aparecer no indice (ja normalizado)
+    param([string]$Indice, [string]$Busca)
+    foreach ($palavra in ("$Busca" -split '\s+')) {
+        $n = ConvertTo-TextoBusca $palavra
+        if ($n -ne "" -and $Indice.IndexOf($n) -lt 0) { return $false }
+    }
+    return $true
+}
+
+function Initialize-IndiceDrivers {
+    # Guarda em cada botao o texto de busca (marca + texto + nome do arquivo). O
+    # texto do botao vira barra de progresso durante o download, entao a busca nao
+    # pode depender dele. Cria tambem o aviso de "nenhum driver encontrado".
+    param($Painel)
+    $secao = ""
+    foreach ($c in @($Painel.Controls)) {
+        if ("$($c.Tag)" -eq 'vazio') { continue }
+        if ($c -is [System.Windows.Forms.Label]) {
+            $c.Tag = 'secao'
+            $secao = $c.Text
+        }
+        elseif ($c -is [System.Windows.Forms.Button]) {
+            $arquivo = ""
+            if ("$($c.Tag)" -match '\|([^|]*)$') { $arquivo = $matches[1] }
+            $c.AccessibleDescription = ConvertTo-TextoBusca ($secao + " " + $c.Text + " " + $arquivo)
+        }
+    }
+    if (@($Painel.Controls | Where-Object { "$($_.Tag)" -eq 'vazio' }).Count -eq 0) {
+        $aviso = New-Object System.Windows.Forms.Label
+        $aviso.Text = "Nenhum driver encontrado. Tente só a marca ou o modelo (ex.: elgin, 4200, tm-t20)."
+        $aviso.AutoSize = $true
+        $aviso.Tag = 'vazio'
+        $aviso.Visible = $false
+        $aviso.Font = New-Object System.Drawing.Font("Segoe UI", 10)
+        $aviso.ForeColor = [System.Drawing.Color]::Gray
+        $aviso.Location = New-Object System.Drawing.Point(15, 10)
+        [void]$Painel.Controls.Add($aviso)
+    }
+}
+
+function Update-FiltroDrivers {
+    # Mostra so os botoes que combinam com a busca, esconde as marcas que ficaram
+    # vazias e refaz as posicoes (a lista usa posicao fixa, sem layout automatico).
+    # Devolve hashtable: Visiveis / Total
+    param($Painel, [string]$Busca)
+    $visiveis = 0
+    $total = 0
+    $Painel.SuspendLayout()
+    try {
+        # Posicao e relativa ao que esta rolado: volta ao topo antes de reposicionar
+        $Painel.AutoScrollPosition = New-Object System.Drawing.Point(0, 0)
+        $grupos = New-Object System.Collections.Generic.List[object]
+        $aviso = $null
+        $grupo = $null
+        foreach ($c in @($Painel.Controls)) {
+            if ("$($c.Tag)" -eq 'vazio') { $aviso = $c; continue }
+            if ($c -is [System.Windows.Forms.Label]) {
+                $grupo = @{ Titulo = $c; Botoes = New-Object System.Collections.Generic.List[object] }
+                $grupos.Add($grupo)
+            }
+            elseif ($c -is [System.Windows.Forms.Button] -and $null -ne $grupo) { $grupo.Botoes.Add($c) }
+        }
+
+        $y = 10
+        $primeiro = $true
+        foreach ($g in $grupos) {
+            $mostrar = New-Object System.Collections.Generic.List[object]
+            foreach ($b in $g.Botoes) {
+                $total++
+                if (Test-CombinaBusca -Indice "$($b.AccessibleDescription)" -Busca $Busca) { $mostrar.Add($b) }
+                else { $b.Visible = $false }
+            }
+            if ($mostrar.Count -eq 0) { $g.Titulo.Visible = $false; continue }
+            # Mesmo espacamento da montagem original: 8 entre marcas, 28 do titulo, 47 por botao
+            if (-not $primeiro) { $y += 8 }
+            $primeiro = $false
+            $g.Titulo.Location = New-Object System.Drawing.Point(15, $y)
+            $g.Titulo.Visible = $true
+            $y += 28
+            foreach ($b in $mostrar) {
+                $b.Location = New-Object System.Drawing.Point(15, $y)
+                $b.Visible = $true
+                $y += 47
+                $visiveis++
+            }
+        }
+        if ($null -ne $aviso) { $aviso.Visible = ($visiveis -eq 0) }
+    }
+    finally { $Painel.ResumeLayout() }
+    return @{ Visiveis = $visiveis; Total = $total }
+}
+
+# -----------------------------------------------------------------------------
+# PORTAS LPR (PC DE DESTINO)
+# A porta LPR guarda o IP do PC que tem a impressora USB. Clientes com DHCP
+# trocam esse IP e a impressao para. O MAC da placa de rede nao muda: guardado
+# enquanto a porta funciona, ele acha o PC de novo quando o IP mudar.
+# -----------------------------------------------------------------------------
+
+function Get-PortasLpr {
+    # Portas do monitor LPR do Windows, lidas do registro (e de la que o spooler le)
+    param([string]$Hive = 'LocalMachine', [string]$Caminho = 'SYSTEM\CurrentControlSet\Control\Print\Monitors\LPR Port\Ports')
+    $lista = @()
+    $base = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::$Hive, [Microsoft.Win32.RegistryView]::Registry64)
+    try {
+        $chave = $base.OpenSubKey($Caminho)
+        if ($null -eq $chave) { return $lista }
+        try {
+            foreach ($nome in $chave.GetSubKeyNames()) {
+                $sub = $chave.OpenSubKey($nome)
+                if ($null -eq $sub) { continue }
+                $lista += [PSCustomObject]@{ Porta = $nome; Servidor = "$($sub.GetValue('Server Name'))"; Fila = "$($sub.GetValue('Printer Name'))" }
+                $sub.Close()
+            }
+        }
+        finally { $chave.Close() }
+    }
+    finally { $base.Close() }
+    return $lista
+}
+
+function Set-PortaLprServidor {
+    # Cria a porta "IP:FILA" com o servidor novo, copiando a configuracao da porta
+    # atual (SNMP, compatibilidade). -ManterNome so troca o IP da propria porta.
+    # Devolve o nome da porta que ficou com o IP novo. Nao mexe no spooler.
+    param([string]$Porta, [string]$Servidor, [switch]$ManterNome,
+        [string]$Hive = 'LocalMachine', [string]$Caminho = 'SYSTEM\CurrentControlSet\Control\Print\Monitors\LPR Port\Ports')
+    $base = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::$Hive, [Microsoft.Win32.RegistryView]::Registry64)
+    try {
+        $chave = $base.OpenSubKey($Caminho, $true)
+        if ($null -eq $chave) { throw "O monitor LPR não está instalado neste PC." }
+        try {
+            $velha = $chave.OpenSubKey($Porta, $true)
+            if ($null -eq $velha) { throw "A porta $Porta não existe mais neste PC." }
+            try {
+                $novoNome = $Servidor + ":" + "$($velha.GetValue('Printer Name'))"
+                if ($ManterNome -or $novoNome -eq $Porta) {
+                    $velha.SetValue('Server Name', $Servidor, [Microsoft.Win32.RegistryValueKind]::String)
+                    return $Porta
+                }
+                $nova = $chave.CreateSubKey($novoNome)
+                try {
+                    foreach ($v in $velha.GetValueNames()) {
+                        $valor = $velha.GetValue($v, $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+                        $nova.SetValue($v, $valor, $velha.GetValueKind($v))
+                    }
+                    $nova.SetValue('Server Name', $Servidor, [Microsoft.Win32.RegistryValueKind]::String)
+                }
+                finally { $nova.Close() }
+                return $novoNome
+            }
+            finally { $velha.Close() }
+        }
+        finally { $chave.Close() }
+    }
+    finally { $base.Close() }
+}
+
+function Remove-PortaLprRegistro {
+    param([string]$Porta, [string]$Hive = 'LocalMachine', [string]$Caminho = 'SYSTEM\CurrentControlSet\Control\Print\Monitors\LPR Port\Ports')
+    $base = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::$Hive, [Microsoft.Win32.RegistryView]::Registry64)
+    try {
+        $chave = $base.OpenSubKey($Caminho, $true)
+        if ($null -ne $chave) {
+            try { $chave.DeleteSubKeyTree($Porta, $false) }
+            finally { $chave.Close() }
+        }
+    }
+    finally { $base.Close() }
+}
+
+function Update-PortaLprCompleto {
+    # Troca o servidor de uma porta LPR de verdade: porta nova "IP:FILA", spooler
+    # reiniciado, impressoras movidas e a porta antiga removida. Se o Windows nao
+    # deixar mover alguma impressora, desfaz e so troca o IP da porta antiga, que
+    # imprime do mesmo jeito com o nome velho.
+    # Devolve hashtable: Porta / Impressoras / Aviso
+    param([string]$Porta, [string]$Servidor)
+    $impressoras = @()
+    try { $impressoras = @(Get-Printer -ErrorAction Stop | Where-Object { $_.PortName -eq $Porta } | ForEach-Object { $_.Name }) } catch {}
+    $nova = Set-PortaLprServidor -Porta $Porta -Servidor $Servidor
+    Restart-Service -Name Spooler -Force -ErrorAction Stop
+    $res = @{ Porta = $nova; Impressoras = $impressoras; Aviso = "" }
+    if ($nova -eq $Porta) { return $res }
+
+    $movidas = @()
+    $falhou = $false
+    foreach ($imp in $impressoras) {
+        try { Set-Printer -Name $imp -PortName $nova -ErrorAction Stop; $movidas += $imp }
+        catch { $falhou = $true; break }
+    }
+    if (-not $falhou) {
+        try { Remove-PrinterPort -Name $Porta -ErrorAction Stop }
+        catch { $res.Aviso = "A porta antiga $Porta ficou na lista, sem uso." }
+        return $res
+    }
+
+    foreach ($imp in $movidas) { try { Set-Printer -Name $imp -PortName $Porta -ErrorAction Stop } catch {} }
+    [void](Set-PortaLprServidor -Porta $Porta -Servidor $Servidor -ManterNome)
+    Remove-PortaLprRegistro -Porta $nova
+    Restart-Service -Name Spooler -Force -ErrorAction Stop
+    $res.Porta = $Porta
+    $res.Aviso = "O Windows não deixou renomear a porta: ela manteve o nome $Porta, mas já aponta para $Servidor."
+    return $res
+}
+
+function Get-LprMacs {
+    # MAC do PC da impressora de cada porta, guardado entre uma abertura e outra
+    param([string]$Arquivo = "C:\Arquivos Xmenu\lpr_mac_portas.json")
+    $macs = @{}
+    try {
+        if (Test-Path -LiteralPath $Arquivo) {
+            $obj = [System.IO.File]::ReadAllText($Arquivo) | ConvertFrom-Json
+            foreach ($p in $obj.PSObject.Properties) { $macs[$p.Name] = "$($p.Value)" }
+        }
+    }
+    catch {}
+    return $macs
+}
+
+function Save-LprMac {
+    # -PortaAntiga: a porta foi renomeada para o IP novo e o MAC vai junto
+    param([string]$Porta, [string]$Mac, [string]$PortaAntiga = "", [string]$Arquivo = "C:\Arquivos Xmenu\lpr_mac_portas.json")
+    $macs = Get-LprMacs -Arquivo $Arquivo
+    if ($PortaAntiga -ne "" -and $PortaAntiga -ne $Porta) { $macs.Remove($PortaAntiga) }
+    $macs[$Porta] = $Mac
+    $pasta = Split-Path $Arquivo
+    if (-not (Test-Path -LiteralPath $pasta)) { New-Item -ItemType Directory -Path $pasta -Force | Out-Null }
+    [System.IO.File]::WriteAllText($Arquivo, ($macs | ConvertTo-Json), (New-Object System.Text.UTF8Encoding($false)))
+}
+
+function ConvertFrom-TabelaArp {
+    # Linhas do "arp -a" -> IP e MAC (AA:BB:CC:DD:EE:FF). Ignora multicast e broadcast.
+    param([string[]]$Linhas)
+    $lista = @()
+    foreach ($linha in $Linhas) {
+        if ("$linha" -match '^\s*(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})\s+([0-9a-fA-F]{2}(?:[-:][0-9a-fA-F]{2}){5})\s') {
+            $ip = $matches[1]
+            $mac = $matches[2].Replace('-', ':').ToUpper()
+            if ($mac -eq 'FF:FF:FF:FF:FF:FF' -or $mac.StartsWith('01:00:5E') -or $ip -like '224.*' -or $ip -like '239.*' -or $ip -like '*.255') { continue }
+            $lista += [PSCustomObject]@{ IP = $ip; Mac = $mac }
+        }
+    }
+    return $lista
+}
+
+function Find-IpPorMac {
+    # Todos os IPs com esse MAC: a tabela ARP ainda pode lembrar o IP antigo
+    param([string]$Mac, $Tabela)
+    $alvo = ("$Mac" -replace '[^0-9a-fA-F]', '').ToUpper()
+    if ($alvo.Length -ne 12) { return @() }
+    return @($Tabela | Where-Object { ("$($_.Mac)" -replace '[^0-9A-Fa-f]', '').ToUpper() -eq $alvo } | ForEach-Object { $_.IP } | Select-Object -Unique)
+}
+
+function Test-PortaVarios {
+    # Testa uma porta TCP em varios IPs ao mesmo tempo, com a janela respondendo.
+    # Devolve os IPs (ou nomes) que aceitaram a conexao.
+    param([string[]]$Ips, [int]$Porta = 515, [int]$TimeoutMs = 700)
+    $tentativas = New-Object System.Collections.Generic.List[object]
+    foreach ($ip in @($Ips | Where-Object { "$_".Trim() -ne "" } | Select-Object -Unique)) {
+        $cli = New-Object System.Net.Sockets.TcpClient
+        try { $tentativas.Add([PSCustomObject]@{ Ip = $ip; Cliente = $cli; Tarefa = $cli.ConnectAsync($ip, $Porta) }) }
+        catch { try { $cli.Close() } catch {} }
+    }
+    $relogio = [System.Diagnostics.Stopwatch]::StartNew()
+    while ($relogio.ElapsedMilliseconds -lt $TimeoutMs) {
+        $pendentes = 0
+        foreach ($t in $tentativas) { if (-not $t.Tarefa.IsCompleted) { $pendentes++ } }
+        if ($pendentes -eq 0) { break }
+        [System.Windows.Forms.Application]::DoEvents()
+        Start-Sleep -Milliseconds 30
+    }
+    $abertos = @()
+    foreach ($t in $tentativas) {
+        try { if ($t.Tarefa.IsCompleted -and -not $t.Tarefa.IsFaulted -and $t.Cliente.Connected) { $abertos += $t.Ip } } catch {}
+        try { $t.Cliente.Close() } catch {}
+    }
+    return $abertos
+}
+
+function Get-SubredesLocais {
+    # Prefixo /24 de cada placa de rede ligada ("192.168.3"): e o que a varredura cobre
+    $subs = @()
+    try {
+        foreach ($placa in [System.Net.NetworkInformation.NetworkInterface]::GetAllNetworkInterfaces()) {
+            if ($placa.OperationalStatus -ne 'Up' -or $placa.NetworkInterfaceType -eq 'Loopback') { continue }
+            foreach ($end in $placa.GetIPProperties().UnicastAddresses) {
+                if ($end.Address.AddressFamily -ne 'InterNetwork') { continue }
+                $txt = $end.Address.ToString()
+                if ($txt -like '127.*' -or $txt -like '169.254.*') { continue }
+                if ($txt -match '^(\d{1,3}\.\d{1,3}\.\d{1,3})\.\d{1,3}$') { $subs += $matches[1] }
+            }
+        }
+    }
+    catch {}
+    return @($subs | Select-Object -Unique)
+}
+
+function Invoke-AcordarRede {
+    # Ping rapido em cada /24: mesmo PC que bloqueia ping responde ao ARP, e o
+    # Windows guarda o MAC dele na tabela
+    param([string[]]$Subredes, [int]$EsperaMs = 1500)
+    $pings = New-Object System.Collections.Generic.List[object]
+    foreach ($sub in $Subredes) {
+        for ($i = 1; $i -le 254; $i++) {
+            $pg = New-Object System.Net.NetworkInformation.Ping
+            $pings.Add($pg)
+            try { [void]$pg.SendPingAsync("$sub.$i", 500) } catch {}
+        }
+    }
+    $relogio = [System.Diagnostics.Stopwatch]::StartNew()
+    while ($relogio.ElapsedMilliseconds -lt $EsperaMs) {
+        [System.Windows.Forms.Application]::DoEvents()
+        Start-Sleep -Milliseconds 50
+    }
+    foreach ($pg in $pings) { try { $pg.Dispose() } catch {} }
+}
+
+function Get-DadosOrigemLpr {
+    # O que o tecnico anota no PC da impressora para configurar o PC de destino.
+    # Devolve hashtable: Ips / Macs / Filas / Texto
+    $ips = @()
+    $macs = @()
+    try {
+        $placas = @(Get-NetIPConfiguration -ErrorAction Stop | Where-Object { $_.IPv4Address -and $_.NetAdapter.Status -eq 'Up' })
+        # Placa com gateway primeiro: e a da rede da loja (evita adaptador virtual)
+        $comGateway = @($placas | Where-Object { $_.IPv4DefaultGateway })
+        if ($comGateway.Count -gt 0) { $placas = $comGateway }
+        foreach ($cfg in $placas) {
+            foreach ($end in @($cfg.IPv4Address)) {
+                if ($end.IPAddress -notlike '127.*' -and $end.IPAddress -notlike '169.254.*') { $ips += $end.IPAddress }
+            }
+            if ("$($cfg.NetAdapter.MacAddress)" -ne "") { $macs += $cfg.NetAdapter.MacAddress.Replace('-', ':').ToUpper() }
+        }
+    }
+    catch {}
+    $filas = @()
+    try { $filas = @(Get-Printer -ErrorAction Stop | Where-Object { $_.Shared -and "$($_.ShareName)" -ne "" } | ForEach-Object { $_.ShareName }) } catch {}
+    $ips = @($ips | Select-Object -Unique)
+    $macs = @($macs | Select-Object -Unique)
+    $textoFilas = "nenhuma impressora compartilhada"
+    if ($filas.Count -gt 0) { $textoFilas = $filas -join ", " }
+    $texto = "PC da impressora: $env:COMPUTERNAME`r`nIP: " + ($ips -join ", ") + "`r`nMAC: " + ($macs -join ", ") + "`r`nFila (compartilhamento): " + $textoFilas
+    return @{ Ips = $ips; Macs = $macs; Filas = $filas; Texto = $texto }
+}
+
+function New-ImpressoraLpr {
+    # Porta LPR "IP:FILA" e a impressora usando ela, sem passar pelo assistente do
+    # Windows. Add-PrinterPort cria a porta LPR sem reiniciar o spooler.
+    # Devolve hashtable: Porta / Impressora / PortaJaExistia
+    param([string]$Servidor, [string]$Fila, [string]$Nome, [string]$Driver)
+    if ($null -ne (Get-Printer -Name $Nome -ErrorAction SilentlyContinue)) {
+        throw "Já existe uma impressora chamada ""$Nome"" neste PC. Escolha outro nome."
+    }
+    $porta = $Servidor + ":" + $Fila
+    $jaExistia = ($null -ne (Get-PrinterPort -Name $porta -ErrorAction SilentlyContinue))
+    if (-not $jaExistia) { Add-PrinterPort -Name $porta -LprHostAddress $Servidor -LprQueueName $Fila -ErrorAction Stop }
+    Add-Printer -Name $Nome -DriverName $Driver -PortName $porta -ErrorAction Stop
+    return @{ Porta = $porta; Impressora = $Nome; PortaJaExistia = $jaExistia }
+}
+
+function Send-TesteImpressao {
+    # Folha curta em vez da pagina de teste do Windows, que gasta meio metro de bobina
+    param([string]$Impressora, [string]$Detalhe = "")
+    $linhas = @("*** TESTE XMENU ***", "", "Impressora: $Impressora")
+    if ($Detalhe -ne "") { $linhas += $Detalhe }
+    $linhas += @("Enviado de: $env:COMPUTERNAME", ("Em: " + (Get-Date).ToString("dd/MM/yyyy HH:mm:ss")), "", "Se esta folha saiu, a impressao esta OK.", "", "", "")
+    $linhas | Out-Printer -Name $Impressora
+}
+
+function Test-EnderecoIpv4 {
+    param([string]$Texto)
+    $t = "$Texto".Trim()
+    if ($t -notmatch '^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$') { return $false }
+    foreach ($i in 1..4) { if ([int]$matches[$i] -gt 255) { return $false } }
+    return $true
+}
+
+function Show-PortasLpr {
+    # Janela do PC de destino: lista as portas LPR, testa se o PC da impressora
+    # responde e corrige a porta quando o IP dele mudou.
+    # -AbrirNova: ja abre a tela de nova impressora (vindo do ATIVAR MONITOR LPR)
+    param($Dono = $null, [switch]$AbrirNova)
+    try {
+        $Script:LprOcupado = $false
+        # Porta do LPD: sempre 515 no uso real; $Script:LprPorta existe para o teste
+        $portaLpd = 515
+        if ($Script:LprPorta) { $portaLpd = [int]$Script:LprPorta }
+        $f = New-ToolForm "Portas LPR deste PC" 880 590
+        $f.MinimumSize = New-Object System.Drawing.Size(880, 590)
+
+        New-ToolLabel $f "PORTAS LPR DESTE COMPUTADOR" 20 14 12 -Negrito | Out-Null
+        New-ToolLabel $f "Quando o IP do PC com a impressora USB muda, a porta para de imprimir. Aqui você acha o PC de novo e corrige a porta, sem refazer a impressora." 20 42 9 -Cor $Script:UiSuave -W 830 | Out-Null
+
+        $lvLpr = New-Object System.Windows.Forms.ListView
+        $lvLpr.Location = New-Object System.Drawing.Point(20, 74)
+        $lvLpr.Size = New-Object System.Drawing.Size(824, 264)
+        $lvLpr.Anchor = 'Top,Left,Right,Bottom'
+        $lvLpr.MultiSelect = $false
+        Format-ToolListView $lvLpr
+        [void]$lvLpr.Columns.Add("Porta", 190)
+        [void]$lvLpr.Columns.Add("PC da impressora (IP)", 140)
+        [void]$lvLpr.Columns.Add("Fila", 110)
+        [void]$lvLpr.Columns.Add("Situação", 110)
+        [void]$lvLpr.Columns.Add("MAC do PC", 130)
+        [void]$lvLpr.Columns.Add("Impressoras", 140)
+        [void]$f.Controls.Add($lvLpr)
+
+        $btnLprMac = New-ToolButton $f "ATUALIZAR IP PELO MAC" 20 350 220 34 $Script:UiVerde $null "Procura na rede o PC da impressora pelo MAC guardado e corrige a porta para o IP atual dele"
+        $btnLprTrocar = New-ToolButton $f "TROCAR IP..." 250 350 140 34 $Script:UiAzul $null "Digitar o IP novo do PC da impressora"
+        $btnLprProcurar = New-ToolButton $f "PROCURAR NA REDE" 400 350 180 34 $Script:UiCinza $null "Lista os PCs da rede com o LPD ativo (porta 515) para escolher"
+        $btnLprRecarregar = New-ToolButton $f "RECARREGAR" 590 350 130 34 $Script:UiCinza $null "Lê as portas de novo e testa se cada PC responde"
+        $btnLprFechar = New-ToolButton $f "FECHAR" 744 350 100 34 $Script:UiCinza $null "Fecha esta janela"
+        $btnLprNova = New-ToolButton $f "NOVA IMPRESSORA LPR" 20 392 220 34 $Script:UiAzul $null "Cria a porta LPR e a impressora neste PC de uma vez, sem o assistente do Windows"
+        $btnLprTeste = New-ToolButton $f "IMPRIMIR TESTE" 250 392 140 34 $Script:UiCinza $null "Manda uma folha curta de teste pela impressora que usa a porta selecionada"
+        foreach ($b in @($btnLprMac, $btnLprTrocar, $btnLprProcurar, $btnLprRecarregar, $btnLprNova, $btnLprTeste)) { $b.Anchor = 'Bottom,Left' }
+        $btnLprFechar.Anchor = 'Bottom,Right'
+        $lblLprStatus = New-ToolLabel $f "" 20 436 9.5 -Negrito -W 824
+        $lblLprStatus.Height = 40
+        $lblLprStatus.Anchor = 'Bottom,Left,Right'
+        $lblLprAjuda = New-ToolLabel $f "Como usar: selecione a porta que parou e clique em ATUALIZAR IP PELO MAC. O MAC do PC da impressora é guardado sozinho sempre que a porta está funcionando; se ainda não tiver MAC guardado, use PROCURAR NA REDE ou TROCAR IP. A troca reinicia o spooler de impressão deste PC." 20 478 8.5 -Cor $Script:UiSuave -W 824
+        $lblLprAjuda.Height = 44
+        $lblLprAjuda.Anchor = 'Bottom,Left,Right'
+
+        # ---------------------------------------------------------------------
+        # ROTINAS
+        # ---------------------------------------------------------------------
+        $statusLpr = {
+            param([string]$Texto, $Cor = $null)
+            if ($null -ne $Cor) { $lblLprStatus.ForeColor = $Cor } else { $lblLprStatus.ForeColor = $Script:UiSuave }
+            $lblLprStatus.Text = $Texto
+            [System.Windows.Forms.Application]::DoEvents()
+        }
+
+        $atualizaBotoesLpr = {
+            $selLpr = $null
+            if ($lvLpr.SelectedItems.Count -gt 0) { $selLpr = $lvLpr.SelectedItems[0].Tag }
+            $btnLprMac.Enabled = ($null -ne $selLpr -and "$($selLpr.Mac)" -ne "" -and -not $Script:LprOcupado)
+            $btnLprTrocar.Enabled = ($null -ne $selLpr -and -not $Script:LprOcupado)
+            $btnLprTeste.Enabled = ($null -ne $selLpr -and -not $Script:LprOcupado)
+            $btnLprProcurar.Enabled = (-not $Script:LprOcupado)
+            $btnLprRecarregar.Enabled = (-not $Script:LprOcupado)
+            $btnLprNova.Enabled = (-not $Script:LprOcupado)
+        }
+
+        $travarLpr = {
+            param([bool]$Sim)
+            $Script:LprOcupado = $Sim
+            $f.UseWaitCursor = $Sim
+            & $atualizaBotoesLpr
+        }
+
+        $carregarLpr = {
+            & $travarLpr $true
+            try {
+                & $statusLpr "Lendo as portas LPR e testando se cada PC responde..." $Script:UiAmarelo
+                $portasLidas = @(Get-PortasLpr)
+                $macsGuardados = Get-LprMacs
+                $servidores = @($portasLidas | ForEach-Object { $_.Servidor } | Where-Object { "$_" -ne "" } | Select-Object -Unique)
+                $noArLista = @()
+                if ($servidores.Count -gt 0) { $noArLista = @(Test-PortaVarios -Ips $servidores -Porta $portaLpd -TimeoutMs 1200) }
+                $impressorasPc = @()
+                try { $impressorasPc = @(Get-Printer -ErrorAction Stop) } catch {}
+                $tabelaArp = @(ConvertFrom-TabelaArp -Linhas (arp -a))
+
+                $lvLpr.BeginUpdate()
+                $lvLpr.Items.Clear()
+                foreach ($pl in $portasLidas) {
+                    $noAr = ($noArLista -contains $pl.Servidor)
+                    $macPorta = ""
+                    if ($macsGuardados.ContainsKey($pl.Porta)) { $macPorta = "$($macsGuardados[$pl.Porta])" }
+                    if ($noAr) {
+                        # Porta funcionando: guarda o MAC do PC para achar ele quando o IP mudar
+                        $macVisto = @($tabelaArp | Where-Object { $_.IP -eq $pl.Servidor } | ForEach-Object { $_.Mac })
+                        if ($macVisto.Count -gt 0 -and $macVisto[0] -ne $macPorta) {
+                            $macPorta = $macVisto[0]
+                            Save-LprMac -Porta $pl.Porta -Mac $macPorta
+                        }
+                    }
+                    $nomesImp = @($impressorasPc | Where-Object { $_.PortName -eq $pl.Porta } | ForEach-Object { $_.Name })
+                    $item = New-Object System.Windows.Forms.ListViewItem($pl.Porta)
+                    [void]$item.SubItems.Add($pl.Servidor)
+                    [void]$item.SubItems.Add($pl.Fila)
+                    if ($noAr) { [void]$item.SubItems.Add("RESPONDENDO") } else { [void]$item.SubItems.Add("SEM RESPOSTA") }
+                    if ($macPorta -ne "") { [void]$item.SubItems.Add($macPorta) } else { [void]$item.SubItems.Add("ainda não guardado") }
+                    [void]$item.SubItems.Add(($nomesImp -join ", "))
+                    if ($noAr) { $item.ForeColor = $Script:UiVerde } else { $item.ForeColor = $Script:UiVermelho }
+                    $item.Tag = [PSCustomObject]@{ Porta = $pl.Porta; Servidor = $pl.Servidor; Fila = $pl.Fila; Mac = $macPorta; NoAr = $noAr }
+                    [void]$lvLpr.Items.Add($item)
+                }
+                $lvLpr.EndUpdate()
+
+                $semResposta = @($lvLpr.Items | Where-Object { -not $_.Tag.NoAr })
+                if ($lvLpr.Items.Count -eq 0) {
+                    & $statusLpr "Nenhuma porta LPR neste PC. Primeiro adicione a impressora pelo ABRIR ASSISTENTE DO WINDOWS." $Script:UiAmarelo
+                }
+                elseif ($semResposta.Count -gt 0) {
+                    $semResposta[0].Selected = $true
+                    & $statusLpr "$($semResposta.Count) porta(s) sem resposta. Selecione e clique em ATUALIZAR IP PELO MAC." $Script:UiVermelho
+                }
+                else {
+                    $lvLpr.Items[0].Selected = $true
+                    & $statusLpr "Todas as portas estão respondendo. O MAC de cada PC já ficou guardado para quando o IP mudar." $Script:UiVerde
+                }
+            }
+            catch { & $statusLpr "Erro ao ler as portas LPR: $($_.Exception.Message)" $Script:UiVermelho }
+            finally { & $travarLpr $false }
+        }
+
+        $aplicarLpr = {
+            param($SelPorta, [string]$NovoIp, [string]$MacNovo)
+            $mensagemFim = $null
+            & $travarLpr $true
+            try {
+                & $statusLpr "Trocando a porta para $NovoIp e reiniciando o spooler..." $Script:UiAmarelo
+                $resTroca = Update-PortaLprCompleto -Porta $SelPorta.Porta -Servidor $NovoIp
+                $macFica = $MacNovo
+                if ("$macFica" -eq "") { $macFica = $SelPorta.Mac }
+                if ("$macFica" -ne "") { Save-LprMac -Porta $resTroca.Porta -Mac $macFica -PortaAntiga $SelPorta.Porta }
+                Log-Message "SUCESSO" "LPR: porta $($SelPorta.Porta) agora aponta para $NovoIp ($($resTroca.Porta))"
+                $mensagemFim = "Porta corrigida: agora imprime em $NovoIp (porta $($resTroca.Porta))."
+                if ($resTroca.Aviso -ne "") { $mensagemFim = $mensagemFim + " " + $resTroca.Aviso }
+            }
+            catch {
+                Log-Message "ERRO" "LPR: falha ao trocar a porta $($SelPorta.Porta) - $($_.Exception.Message)"
+                [System.Windows.Forms.MessageBox]::Show($f, "Não foi possível trocar a porta: $($_.Exception.Message)", "Portas LPR", "OK", "Error") | Out-Null
+            }
+            finally { & $travarLpr $false }
+            & $carregarLpr
+            if ($null -ne $mensagemFim) { & $statusLpr $mensagemFim $Script:UiVerde }
+        }
+
+        $pedirIpLpr = {
+            param([string]$Atual)
+            $dlg = New-ToolForm "Trocar IP da porta" 420 210
+            $dlg.FormBorderStyle = 'FixedDialog'
+            $dlg.MaximizeBox = $false
+            $dlg.MinimizeBox = $false
+            New-ToolLabel $dlg "IP novo do PC que tem a impressora USB:" 20 20 9.5 | Out-Null
+            $txtIpNovo = New-Object System.Windows.Forms.TextBox
+            $txtIpNovo.Location = New-Object System.Drawing.Point(20, 50)
+            $txtIpNovo.Size = New-Object System.Drawing.Size(360, 26)
+            $txtIpNovo.BackColor = [System.Drawing.Color]::FromArgb(20, 24, 34)
+            $txtIpNovo.ForeColor = $Script:UiTexto
+            $txtIpNovo.BorderStyle = 'FixedSingle'
+            $txtIpNovo.Font = New-Object System.Drawing.Font("Consolas", 11)
+            $txtIpNovo.Text = $Atual
+            [void]$dlg.Controls.Add($txtIpNovo)
+            $btnOkIp = New-ToolButton $dlg "TROCAR" 170 104 110 32 $Script:UiVerde $null ""
+            $btnCancIp = New-ToolButton $dlg "CANCELAR" 290 104 90 32 $Script:UiCinza $null ""
+            $btnOkIp.Add_Click({ $dlg.Tag = $txtIpNovo.Text.Trim(); $dlg.DialogResult = 'OK'; $dlg.Close() })
+            $btnCancIp.Add_Click({ $dlg.DialogResult = 'Cancel'; $dlg.Close() })
+            $dlg.AcceptButton = $btnOkIp
+            $dlg.CancelButton = $btnCancIp
+            $dlg.Add_Shown({ $txtIpNovo.Focus(); $txtIpNovo.SelectAll() })
+            $ipDigitado = $null
+            if ($dlg.ShowDialog($f) -eq [System.Windows.Forms.DialogResult]::OK) { $ipDigitado = "$($dlg.Tag)" }
+            $dlg.Dispose()
+            return $ipDigitado
+        }
+
+        $escolherPcLpr = {
+            param($Achados, $DonoDlg = $null)
+            if ($null -eq $DonoDlg) { $DonoDlg = $f }
+            $dlg = New-ToolForm "PCs com o LPD ativo" 580 370
+            New-ToolLabel $dlg "Escolha o PC que tem a impressora USB:" 20 16 10 -Negrito | Out-Null
+            $lvPcs = New-Object System.Windows.Forms.ListView
+            $lvPcs.Location = New-Object System.Drawing.Point(20, 46)
+            $lvPcs.Size = New-Object System.Drawing.Size(524, 214)
+            $lvPcs.MultiSelect = $false
+            Format-ToolListView $lvPcs
+            [void]$lvPcs.Columns.Add("IP", 130)
+            [void]$lvPcs.Columns.Add("Nome", 230)
+            [void]$lvPcs.Columns.Add("MAC", 150)
+            foreach ($a in $Achados) {
+                $it = New-Object System.Windows.Forms.ListViewItem($a.IP)
+                [void]$it.SubItems.Add($a.Nome)
+                [void]$it.SubItems.Add($a.Mac)
+                $it.Tag = $a
+                [void]$lvPcs.Items.Add($it)
+            }
+            if ($lvPcs.Items.Count -gt 0) { $lvPcs.Items[0].Selected = $true }
+            [void]$dlg.Controls.Add($lvPcs)
+            $btnUsar = New-ToolButton $dlg "USAR ESTE PC" 314 274 130 32 $Script:UiVerde $null ""
+            $btnCancPc = New-ToolButton $dlg "CANCELAR" 454 274 90 32 $Script:UiCinza $null ""
+            $usarPc = {
+                if ($lvPcs.SelectedItems.Count -eq 0) { return }
+                $dlg.Tag = $lvPcs.SelectedItems[0].Tag
+                $dlg.DialogResult = 'OK'
+                $dlg.Close()
+            }
+            $btnUsar.Add_Click($usarPc)
+            $lvPcs.Add_DoubleClick($usarPc)
+            $btnCancPc.Add_Click({ $dlg.DialogResult = 'Cancel'; $dlg.Close() })
+            $pcEscolhido = $null
+            if ($dlg.ShowDialog($DonoDlg) -eq [System.Windows.Forms.DialogResult]::OK) { $pcEscolhido = $dlg.Tag }
+            $dlg.Dispose()
+            return $pcEscolhido
+        }
+
+        # ---------------------------------------------------------------------
+        # EVENTOS
+        # ---------------------------------------------------------------------
+        $btnLprMac.Add_Click({
+                if ($Script:LprOcupado -or $lvLpr.SelectedItems.Count -eq 0) { return }
+                $selLpr = $lvLpr.SelectedItems[0].Tag
+                if ("$($selLpr.Mac)" -eq "") { return }
+                $ipAchado = $null
+                & $travarLpr $true
+                try {
+                    & $statusLpr "Procurando na rede o PC com o MAC $($selLpr.Mac)..." $Script:UiAmarelo
+                    Invoke-AcordarRede -Subredes (Get-SubredesLocais)
+                    $candidatos = @(Find-IpPorMac -Mac $selLpr.Mac -Tabela (ConvertFrom-TabelaArp -Linhas (arp -a)))
+                    if ($candidatos.Count -gt 0) {
+                        # A tabela ARP pode lembrar o IP antigo: vale o que responde no LPD
+                        $respondem = @(Test-PortaVarios -Ips $candidatos -Porta $portaLpd -TimeoutMs 1200)
+                        $outros = @($candidatos | Where-Object { $_ -ne $selLpr.Servidor })
+                        if ($respondem.Count -gt 0) { $ipAchado = $respondem[0] }
+                        elseif ($outros.Count -gt 0) { $ipAchado = $outros[0] }
+                        else { $ipAchado = $candidatos[0] }
+                    }
+                }
+                catch { & $statusLpr "Erro ao procurar na rede: $($_.Exception.Message)" $Script:UiVermelho; return }
+                finally { & $travarLpr $false }
+
+                if ($null -eq $ipAchado) {
+                    & $statusLpr "Não encontrei o PC com o MAC $($selLpr.Mac) na rede. Confira se ele está ligado e na mesma rede, ou use PROCURAR NA REDE." $Script:UiVermelho
+                    return
+                }
+                if ($ipAchado -eq $selLpr.Servidor) {
+                    & $statusLpr "O PC da impressora continua no IP $ipAchado. Se não imprime, confira nele se o LPD está ativo (Etapa 1) e se a impressora está compartilhada como $($selLpr.Fila)." $Script:UiAmarelo
+                    return
+                }
+                $r = [System.Windows.Forms.MessageBox]::Show($f,
+                    "Encontrei o PC da impressora (MAC $($selLpr.Mac)) no IP $ipAchado.`r`n`r`nA porta $($selLpr.Porta) ainda aponta para $($selLpr.Servidor).`r`n`r`nTrocar a porta para $ipAchado agora? O spooler de impressão deste PC será reiniciado.",
+                    "Portas LPR", "YesNo", "Question")
+                if ($r -eq [System.Windows.Forms.DialogResult]::Yes) { & $aplicarLpr $selLpr $ipAchado $selLpr.Mac }
+            })
+
+        $btnLprTrocar.Add_Click({
+                if ($Script:LprOcupado -or $lvLpr.SelectedItems.Count -eq 0) { return }
+                $selLpr = $lvLpr.SelectedItems[0].Tag
+                $ipNovo = & $pedirIpLpr $selLpr.Servidor
+                if ($null -eq $ipNovo) { return }
+                if (-not (Test-EnderecoIpv4 $ipNovo)) {
+                    [System.Windows.Forms.MessageBox]::Show($f, "Digite um IP válido, por exemplo 192.168.0.25.", "Portas LPR", "OK", "Warning") | Out-Null
+                    return
+                }
+                if ($ipNovo -eq $selLpr.Servidor) { & $statusLpr "A porta já aponta para $ipNovo." $Script:UiAmarelo; return }
+                $responde = $false
+                & $travarLpr $true
+                try {
+                    & $statusLpr "Testando o LPD em $ipNovo..." $Script:UiAmarelo
+                    $responde = (@(Test-PortaVarios -Ips @($ipNovo) -Porta $portaLpd -TimeoutMs 1500).Count -gt 0)
+                }
+                finally { & $travarLpr $false }
+                if (-not $responde) {
+                    $r = [System.Windows.Forms.MessageBox]::Show($f,
+                        "O IP $ipNovo não respondeu na porta 515 (LPD).`r`n`r`nPode ser o IP errado, o PC desligado ou o LPD parado nele. Trocar a porta mesmo assim?",
+                        "Portas LPR", "YesNo", "Warning")
+                    if ($r -ne [System.Windows.Forms.DialogResult]::Yes) { return }
+                }
+                # So guarda o MAC quando o IP respondeu: senao poderia ser outro aparelho
+                $macIp = ""
+                if ($responde) { $macIp = Get-MacDeIP $ipNovo (arp -a) }
+                & $aplicarLpr $selLpr $ipNovo $macIp
+            })
+
+        # Varre a rede atras de PCs com o LPD ativo; usada pelo PROCURAR NA REDE e
+        # pela tela de nova impressora. Devolve IP / Nome / Mac de cada um.
+        $procurarPcsLpr = {
+                if ($Script:LprOcupado) { return }
+                $achados = @()
+                & $travarLpr $true
+                try {
+                    $subs = @(Get-SubredesLocais)
+                    & $statusLpr ("Varrendo a rede " + (($subs | ForEach-Object { "$_.x" }) -join ", ") + "...") $Script:UiAmarelo
+                    Invoke-AcordarRede -Subredes $subs
+                    $tabela = @(ConvertFrom-TabelaArp -Linhas (arp -a))
+                    $meusIps = @([System.Net.Dns]::GetHostAddresses([System.Net.Dns]::GetHostName()) |
+                        Where-Object { $_.AddressFamily -eq 'InterNetwork' } | ForEach-Object { $_.IPAddressToString })
+                    $todos = @(foreach ($s in $subs) { for ($i = 1; $i -le 254; $i++) { "$s.$i" } })
+                    $todos = @($todos | Where-Object { $meusIps -notcontains $_ })
+                    & $statusLpr "Procurando PCs com o LPD ativo (porta 515)..." $Script:UiAmarelo
+                    foreach ($ipAberto in @(Test-PortaVarios -Ips $todos -Porta $portaLpd -TimeoutMs 1500)) {
+                        $nomePc = ""
+                        try {
+                            $tarefaNome = [System.Net.Dns]::GetHostEntryAsync($ipAberto)
+                            if ($tarefaNome.Wait(800)) { $nomePc = $tarefaNome.Result.HostName }
+                        }
+                        catch {}
+                        $macPc = @($tabela | Where-Object { $_.IP -eq $ipAberto } | ForEach-Object { $_.Mac }) | Select-Object -First 1
+                        $achados += [PSCustomObject]@{ IP = $ipAberto; Nome = $nomePc; Mac = "$macPc" }
+                    }
+                }
+                catch { & $statusLpr "Erro ao procurar na rede: $($_.Exception.Message)" $Script:UiVermelho; return }
+                finally { & $travarLpr $false }
+
+                if ($achados.Count -eq 0) {
+                    & $statusLpr "Nenhum PC com o LPD ativo foi encontrado na rede. Confira se o PC da impressora está ligado e se o LPD foi ativado nele (Etapa 1)." $Script:UiVermelho
+                    return
+                }
+                & $statusLpr "$($achados.Count) PC(s) com o LPD ativo encontrado(s)." $Script:UiVerde
+                return $achados
+            }
+
+        $btnLprProcurar.Add_Click({
+                $achados = @(& $procurarPcsLpr)
+                if ($achados.Count -eq 0) { return }
+                $pc = & $escolherPcLpr $achados
+                if ($null -eq $pc) { return }
+                if ($lvLpr.SelectedItems.Count -eq 0) { & $statusLpr "Selecione na lista a porta que vai receber o IP $($pc.IP)." $Script:UiAmarelo; return }
+                $selLpr = $lvLpr.SelectedItems[0].Tag
+                if ($pc.IP -eq $selLpr.Servidor) { & $statusLpr "A porta $($selLpr.Porta) já aponta para $($pc.IP)." $Script:UiAmarelo; return }
+                $r = [System.Windows.Forms.MessageBox]::Show($f,
+                    "Trocar a porta $($selLpr.Porta) para o PC $($pc.IP)$(if ($pc.Nome) { " ($($pc.Nome))" })?`r`n`r`nO spooler de impressão deste PC será reiniciado.",
+                    "Portas LPR", "YesNo", "Question")
+                if ($r -eq [System.Windows.Forms.DialogResult]::Yes) { & $aplicarLpr $selLpr $pc.IP $pc.Mac }
+            })
+
+        # Formulario da nova impressora LPR. Devolve Ip / Fila / Nome / Driver ou $null.
+        $pedirNovaLpr = {
+            $dlg = New-ToolForm "Nova impressora LPR" 540 430
+            $dlg.FormBorderStyle = 'FixedDialog'
+            $dlg.MaximizeBox = $false
+            $dlg.MinimizeBox = $false
+            $campoNova = {
+                param([int]$Y, [int]$W, [string]$Valor)
+                $t = New-Object System.Windows.Forms.TextBox
+                $t.Location = New-Object System.Drawing.Point(20, $Y)
+                $t.Size = New-Object System.Drawing.Size($W, 26)
+                $t.BackColor = [System.Drawing.Color]::FromArgb(20, 24, 34)
+                $t.ForeColor = $Script:UiTexto
+                $t.BorderStyle = 'FixedSingle'
+                $t.Font = New-Object System.Drawing.Font("Segoe UI", 10)
+                $t.Text = $Valor
+                [void]$dlg.Controls.Add($t)
+                return $t
+            }
+            New-ToolLabel $dlg "IP do PC que tem a impressora USB:" 20 18 9.5 | Out-Null
+            $txtNovaIp = & $campoNova 42 320 ""
+            $btnNovaAchar = New-ToolButton $dlg "PROCURAR NA REDE" 350 40 150 30 $Script:UiCinza $null "Lista os PCs com o LPD ativo para escolher"
+            New-ToolLabel $dlg "Nome do compartilhamento no PC da impressora (fila):" 20 82 9.5 | Out-Null
+            $txtNovaFila = & $campoNova 106 320 "IMPRESSORA"
+            New-ToolLabel $dlg "Nome da impressora neste PC:" 20 146 9.5 | Out-Null
+            $txtNovaNome = & $campoNova 170 480 "LPR - IMPRESSORA"
+            New-ToolLabel $dlg "Driver (o mesmo instalado no PC da impressora):" 20 210 9.5 | Out-Null
+            $cmbNovaDriver = New-Object System.Windows.Forms.ComboBox
+            $cmbNovaDriver.Location = New-Object System.Drawing.Point(20, 234)
+            $cmbNovaDriver.Width = 480
+            $cmbNovaDriver.DropDownStyle = 'DropDownList'
+            $cmbNovaDriver.FlatStyle = 'Flat'
+            $cmbNovaDriver.BackColor = [System.Drawing.Color]::FromArgb(20, 24, 34)
+            $cmbNovaDriver.ForeColor = $Script:UiTexto
+            $driversPc = @()
+            try { $driversPc = @(Get-PrinterDriver -ErrorAction Stop | ForEach-Object { $_.Name } | Sort-Object -Unique) } catch {}
+            foreach ($d in $driversPc) { [void]$cmbNovaDriver.Items.Add($d) }
+            if ($cmbNovaDriver.Items.Count -gt 0) {
+                $cmbNovaDriver.SelectedIndex = 0
+                $iGenerico = $cmbNovaDriver.Items.IndexOf("Generic / Text Only")
+                if ($iGenerico -ge 0) { $cmbNovaDriver.SelectedIndex = $iGenerico }
+            }
+            [void]$dlg.Controls.Add($cmbNovaDriver)
+            $lblNovaDica = New-ToolLabel $dlg "Se o driver da impressora não aparece na lista, instale pela aba Drivers de Impressoras e abra esta tela de novo." 20 266 8.5 -Cor $Script:UiSuave -W 480
+            $lblNovaDica.Height = 36
+            $btnNovaCriar = New-ToolButton $dlg "CRIAR IMPRESSORA" 270 324 140 34 $Script:UiVerde $null ""
+            $btnNovaCanc = New-ToolButton $dlg "CANCELAR" 420 324 80 34 $Script:UiCinza $null ""
+
+            # O nome acompanha a fila enquanto ninguem mexeu nele
+            $Script:LprNomeEditado = $false
+            $txtNovaFila.Add_TextChanged({ if (-not $Script:LprNomeEditado) { $txtNovaNome.Text = "LPR - " + $txtNovaFila.Text.Trim() } })
+            $txtNovaNome.Add_KeyPress({ $Script:LprNomeEditado = $true })
+            $btnNovaAchar.Add_Click({
+                    $pcsRede = @(& $procurarPcsLpr)
+                    if ($pcsRede.Count -eq 0) {
+                        [System.Windows.Forms.MessageBox]::Show($dlg, "Nenhum PC com o LPD ativo foi encontrado. Confira se o LPD foi ativado no PC da impressora (Etapa 1).", "Nova impressora LPR", "OK", "Warning") | Out-Null
+                        return
+                    }
+                    $pcRede = & $escolherPcLpr $pcsRede $dlg
+                    if ($null -ne $pcRede) { $txtNovaIp.Text = $pcRede.IP }
+                })
+            $btnNovaCriar.Add_Click({
+                    $erroNova = ""
+                    if (-not (Test-EnderecoIpv4 $txtNovaIp.Text)) { $erroNova = "Digite o IP do PC da impressora, por exemplo 192.168.0.25." }
+                    elseif ($txtNovaFila.Text.Trim() -notmatch '^[A-Za-z0-9_.-]+$') { $erroNova = "A fila é o nome do compartilhamento, sem espaços (ex.: IMPRESSORA)." }
+                    elseif ($txtNovaNome.Text.Trim() -eq "") { $erroNova = "Dê um nome para a impressora neste PC." }
+                    elseif ($cmbNovaDriver.SelectedIndex -lt 0) { $erroNova = "Escolha o driver. Se a lista está vazia, instale o driver pela aba Drivers de Impressoras." }
+                    if ($erroNova -ne "") {
+                        [System.Windows.Forms.MessageBox]::Show($dlg, $erroNova, "Nova impressora LPR", "OK", "Warning") | Out-Null
+                        return
+                    }
+                    $dlg.Tag = [PSCustomObject]@{ Ip = $txtNovaIp.Text.Trim(); Fila = $txtNovaFila.Text.Trim(); Nome = $txtNovaNome.Text.Trim(); Driver = "$($cmbNovaDriver.SelectedItem)" }
+                    $dlg.DialogResult = 'OK'
+                    $dlg.Close()
+                })
+            $btnNovaCanc.Add_Click({ $dlg.DialogResult = 'Cancel'; $dlg.Close() })
+            $dlg.CancelButton = $btnNovaCanc
+            $dlg.Add_Shown({ $txtNovaIp.Focus() | Out-Null })
+            $dadosNova = $null
+            if ($dlg.ShowDialog($f) -eq [System.Windows.Forms.DialogResult]::OK) { $dadosNova = $dlg.Tag }
+            $dlg.Dispose()
+            return $dadosNova
+        }
+
+        $btnLprNova.Add_Click({
+                if ($Script:LprOcupado) { return }
+                $nova = & $pedirNovaLpr
+                if ($null -eq $nova) { return }
+                $responde = $false
+                & $travarLpr $true
+                try {
+                    & $statusLpr "Testando o LPD em $($nova.Ip)..." $Script:UiAmarelo
+                    $responde = (@(Test-PortaVarios -Ips @($nova.Ip) -Porta $portaLpd -TimeoutMs 1500).Count -gt 0)
+                }
+                finally { & $travarLpr $false }
+                if (-not $responde) {
+                    $r = [System.Windows.Forms.MessageBox]::Show($f,
+                        "O PC $($nova.Ip) não respondeu na porta 515 (LPD).`r`n`r`nPode ser o IP errado, o PC desligado ou o LPD ainda não ativado nele. Criar a impressora mesmo assim?",
+                        "Nova impressora LPR", "YesNo", "Warning")
+                    if ($r -ne [System.Windows.Forms.DialogResult]::Yes) { return }
+                }
+                $criada = $null
+                & $travarLpr $true
+                try {
+                    & $statusLpr "Criando a porta $($nova.Ip):$($nova.Fila) e a impressora $($nova.Nome)..." $Script:UiAmarelo
+                    $criada = New-ImpressoraLpr -Servidor $nova.Ip -Fila $nova.Fila -Nome $nova.Nome -Driver $nova.Driver
+                    if ($responde) {
+                        $macNova = Get-MacDeIP $nova.Ip (arp -a)
+                        if ("$macNova" -ne "") { Save-LprMac -Porta $criada.Porta -Mac $macNova }
+                    }
+                    Log-Message "SUCESSO" "LPR: impressora $($nova.Nome) criada na porta $($criada.Porta) com o driver $($nova.Driver)"
+                }
+                catch {
+                    $msgErro = $_.Exception.Message
+                    if ($msgErro -match 'LPR|monitor|porta|port') { $msgErro = $msgErro + "`r`n`r`nConfira se o Monitor LPR está ativo (botão ATIVAR MONITOR LPR) e se o Preparador está aberto como administrador." }
+                    Log-Message "ERRO" "LPR: falha ao criar a impressora $($nova.Nome) - $($_.Exception.Message)"
+                    [System.Windows.Forms.MessageBox]::Show($f, "Não foi possível criar a impressora:`r`n`r`n$msgErro", "Nova impressora LPR", "OK", "Error") | Out-Null
+                }
+                finally { & $travarLpr $false }
+                if ($null -eq $criada) { return }
+                & $carregarLpr
+                & $statusLpr "Impressora $($criada.Impressora) criada na porta $($criada.Porta)." $Script:UiVerde
+                $r = [System.Windows.Forms.MessageBox]::Show($f, "Impressora $($criada.Impressora) criada.`r`n`r`nImprimir uma folha de teste agora?", "Nova impressora LPR", "YesNo", "Question")
+                if ($r -eq [System.Windows.Forms.DialogResult]::Yes) {
+                    try {
+                        Send-TesteImpressao -Impressora $criada.Impressora -Detalhe "Porta: $($criada.Porta)"
+                        & $statusLpr "Teste enviado para $($criada.Impressora). Se não sair, confira no PC $($nova.Ip) se a impressora está ligada e compartilhada como $($nova.Fila)." $Script:UiVerde
+                    }
+                    catch { & $statusLpr "Não foi possível enviar o teste: $($_.Exception.Message)" $Script:UiVermelho }
+                }
+            })
+
+        $btnLprTeste.Add_Click({
+                if ($Script:LprOcupado -or $lvLpr.SelectedItems.Count -eq 0) { return }
+                $selLpr = $lvLpr.SelectedItems[0].Tag
+                $impsPorta = @()
+                try { $impsPorta = @(Get-Printer -ErrorAction Stop | Where-Object { $_.PortName -eq $selLpr.Porta } | ForEach-Object { $_.Name }) } catch {}
+                if ($impsPorta.Count -eq 0) {
+                    & $statusLpr "Nenhuma impressora deste PC usa a porta $($selLpr.Porta). Crie uma com NOVA IMPRESSORA LPR." $Script:UiAmarelo
+                    return
+                }
+                & $travarLpr $true
+                try {
+                    & $statusLpr "Enviando teste para $($impsPorta[0])..." $Script:UiAmarelo
+                    Send-TesteImpressao -Impressora $impsPorta[0] -Detalhe "Porta: $($selLpr.Porta)"
+                    Log-Message "INFO" "LPR: teste enviado para $($impsPorta[0]) ($($selLpr.Porta))"
+                    & $statusLpr "Teste enviado para $($impsPorta[0]). Se não sair em alguns segundos, confira no PC $($selLpr.Servidor) se a impressora está ligada, com papel e compartilhada como $($selLpr.Fila)." $Script:UiVerde
+                }
+                catch { & $statusLpr "Não foi possível enviar o teste: $($_.Exception.Message)" $Script:UiVermelho }
+                finally { & $travarLpr $false }
+            })
+
+        $btnLprRecarregar.Add_Click({ if (-not $Script:LprOcupado) { & $carregarLpr } })
+        $btnLprFechar.Add_Click({ $f.Close() })
+        $lvLpr.Add_SelectedIndexChanged($atualizaBotoesLpr)
+        $f.Add_FormClosing({
+                param($s, $e)
+                if ($Script:LprOcupado) { $e.Cancel = $true }
+            })
+        $f.Add_Shown({
+                & $carregarLpr
+                if ($AbrirNova) { $btnLprNova.PerformClick() }
+            })
+        Log-Message "INFO" "LPR: janela de portas aberta"
+        [void]$f.ShowDialog($Dono)
+    }
+    catch {
+        Log-Message "ERRO" "Falha na janela de portas LPR: $_"
+        [System.Windows.Forms.MessageBox]::Show("Falha ao abrir a janela: $($_.Exception.Message)", "Portas LPR", "OK", "Error") | Out-Null
+    }
+}
+
 function Show-PrinterManager {
     try {
         if ($null -ne $Script:PrinterManagerForm -and $Script:PrinterManagerForm.Visible) {
@@ -2161,7 +5920,7 @@ function Show-PrinterManager {
         }
 
         $Script:PrinterManagerForm = New-Object System.Windows.Forms.Form
-        $Script:PrinterManagerForm.Text = "Gerenciador de Impressoras XMenu"; $Script:PrinterManagerForm.Size = "780,650"; $Script:PrinterManagerForm.StartPosition = 'CenterParent'
+        $Script:PrinterManagerForm.Text = "Impressoras: Compartilhamento, LPR e Drivers"; $Script:PrinterManagerForm.Size = "780,650"; $Script:PrinterManagerForm.StartPosition = 'CenterParent'
         $Script:PrinterManagerForm.BackColor = [System.Drawing.Color]::FromArgb(25, 25, 30); $Script:PrinterManagerForm.ForeColor = 'White'
         $Script:PrinterManagerForm.FormBorderStyle = 'FixedDialog'; $Script:PrinterManagerForm.MaximizeBox = $false
 
@@ -2179,8 +5938,57 @@ function Show-PrinterManager {
         [void]$Script:PrinterManagerForm.Controls.Add($pnlLpr)
 
         # PAINEL 3: Drivers de Impressoras
+        # Pesquisa fixa no topo, fora do painel que rola, para nao sumir ao descer a lista
+        $pnlDrvBusca = New-Object System.Windows.Forms.Panel
+        $pnlDrvBusca.Size = New-Object System.Drawing.Size(735, 42); $pnlDrvBusca.Location = New-Object System.Drawing.Point(15, 65)
+        $pnlDrvBusca.BackColor = [System.Drawing.Color]::FromArgb(30, 30, 35)
+        $pnlDrvBusca.Visible = $false
+        [void]$Script:PrinterManagerForm.Controls.Add($pnlDrvBusca)
+
+        $lblDrvBusca = New-Object System.Windows.Forms.Label
+        $lblDrvBusca.Text = "Pesquisar driver:"; $lblDrvBusca.AutoSize = $true; $lblDrvBusca.Location = '12,12'
+        $lblDrvBusca.Font = New-Object System.Drawing.Font("Segoe UI", 9.5, [System.Drawing.FontStyle]::Bold); $lblDrvBusca.ForeColor = 'WhiteSmoke'
+        [void]$pnlDrvBusca.Controls.Add($lblDrvBusca)
+
+        $txtDrvBusca = New-Object System.Windows.Forms.TextBox
+        $txtDrvBusca.Location = '140,9'; $txtDrvBusca.Width = 380
+        $txtDrvBusca.BackColor = [System.Drawing.Color]::FromArgb(20, 20, 25); $txtDrvBusca.ForeColor = 'White'
+        $txtDrvBusca.BorderStyle = 'FixedSingle'; $txtDrvBusca.Font = New-Object System.Drawing.Font("Segoe UI", 10)
+        [void]$pnlDrvBusca.Controls.Add($txtDrvBusca)
+
+        $btnDrvLimpar = New-Object System.Windows.Forms.Button
+        $btnDrvLimpar.Text = "✕"; $btnDrvLimpar.Location = '526,8'; $btnDrvLimpar.Size = '30,27'
+        $btnDrvLimpar.FlatStyle = 'Flat'; $btnDrvLimpar.FlatAppearance.BorderSize = 0; $btnDrvLimpar.Cursor = 'Hand'
+        $btnDrvLimpar.BackColor = [System.Drawing.Color]::FromArgb(60, 60, 65); $btnDrvLimpar.ForeColor = 'White'
+        $btnDrvLimpar.Visible = $false
+        [void]$pnlDrvBusca.Controls.Add($btnDrvLimpar)
+
+        $lblDrvConta = New-Object System.Windows.Forms.Label
+        $lblDrvConta.AutoSize = $true; $lblDrvConta.Location = '566,12'
+        $lblDrvConta.Font = New-Object System.Drawing.Font("Segoe UI", 9); $lblDrvConta.ForeColor = 'Gray'
+        [void]$pnlDrvBusca.Controls.Add($lblDrvConta)
+
+        $btnDrvInstalados = New-Object System.Windows.Forms.Button
+        $btnDrvInstalados.Text = "INSTALADOS"; $btnDrvInstalados.Location = '635,7'; $btnDrvInstalados.Size = '92,28'
+        $btnDrvInstalados.FlatStyle = 'Flat'; $btnDrvInstalados.FlatAppearance.BorderSize = 0; $btnDrvInstalados.Cursor = 'Hand'
+        $btnDrvInstalados.BackColor = [System.Drawing.Color]::FromArgb(25, 90, 120); $btnDrvInstalados.ForeColor = 'White'
+        $btnDrvInstalados.Font = New-Object System.Drawing.Font("Segoe UI", 8.5, [System.Drawing.FontStyle]::Bold)
+        $btnDrvInstalados.Add_Click({
+                # Evita reinstalar o que o PC ja tem
+                $instalados = @()
+                try { $instalados = @(Get-PrinterDriver -ErrorAction Stop | Sort-Object Name | ForEach-Object { "- $($_.Name)" }) } catch {}
+                $textoInst = "Nenhum driver de impressora encontrado neste PC."
+                if ($instalados.Count -gt 0) { $textoInst = "Drivers de impressora já instalados neste PC ($($instalados.Count)):`r`n`r`n" + ($instalados -join "`r`n") }
+                [System.Windows.Forms.MessageBox]::Show($Script:PrinterManagerForm, $textoInst, "Drivers instalados", "OK", "Information") | Out-Null
+            })
+        [void]$pnlDrvBusca.Controls.Add($btnDrvInstalados)
+        if ($Script:ToolTip) {
+            $Script:ToolTip.SetToolTip($btnDrvInstalados, "Mostra os drivers de impressora que este PC já tem, para não reinstalar à toa.")
+            $Script:ToolTip.SetToolTip($txtDrvBusca, "Digite a marca, o modelo ou o tipo: elgin, bematech 4200, tm-t20, utilitario, etiqueta... Não precisa de acento nem hífen. Esc limpa.")
+        }
+
         $pnlDrivers = New-Object System.Windows.Forms.Panel
-        $pnlDrivers.Size = New-Object System.Drawing.Size(735, 520); $pnlDrivers.Location = New-Object System.Drawing.Point(15, 65)
+        $pnlDrivers.Size = New-Object System.Drawing.Size(735, 476); $pnlDrivers.Location = New-Object System.Drawing.Point(15, 109)
         $pnlDrivers.BackColor = [System.Drawing.Color]::FromArgb(30, 30, 35)
         $pnlDrivers.AutoScroll = $true
         $pnlDrivers.Visible = $false
@@ -2209,24 +6017,27 @@ function Show-PrinterManager {
         $btnTabDrivers.BackColor = $tabInactiveColor; $btnTabDrivers.ForeColor = 'LightGray'
 
         $btnTabLocal.Add_Click({
-            $pnlLocal.Visible = $true; $pnlLpr.Visible = $false; $pnlDrivers.Visible = $false
+            $pnlLocal.Visible = $true; $pnlLpr.Visible = $false; $pnlDrivers.Visible = $false; $pnlDrvBusca.Visible = $false
             $btnTabLocal.BackColor = $tabActiveColor; $btnTabLocal.ForeColor = 'White'
             $btnTabLpr.BackColor = $tabInactiveColor; $btnTabLpr.ForeColor = 'LightGray'
             $btnTabDrivers.BackColor = $tabInactiveColor; $btnTabDrivers.ForeColor = 'LightGray'
         })
 
         $btnTabLpr.Add_Click({
-            $pnlLocal.Visible = $false; $pnlLpr.Visible = $true; $pnlDrivers.Visible = $false
+            $pnlLocal.Visible = $false; $pnlLpr.Visible = $true; $pnlDrivers.Visible = $false; $pnlDrvBusca.Visible = $false
             $btnTabLocal.BackColor = $tabInactiveColor; $btnTabLocal.ForeColor = 'LightGray'
             $btnTabLpr.BackColor = $tabActiveColor; $btnTabLpr.ForeColor = 'White'
             $btnTabDrivers.BackColor = $tabInactiveColor; $btnTabDrivers.ForeColor = 'LightGray'
         })
 
         $btnTabDrivers.Add_Click({
-            $pnlLocal.Visible = $false; $pnlLpr.Visible = $false; $pnlDrivers.Visible = $true
+            $pnlLocal.Visible = $false; $pnlLpr.Visible = $false; $pnlDrivers.Visible = $true; $pnlDrvBusca.Visible = $true
             $btnTabLocal.BackColor = $tabInactiveColor; $btnTabLocal.ForeColor = 'LightGray'
             $btnTabLpr.BackColor = $tabInactiveColor; $btnTabLpr.ForeColor = 'LightGray'
             $btnTabDrivers.BackColor = $tabActiveColor; $btnTabDrivers.ForeColor = 'White'
+            # Cursor ja na pesquisa: o tecnico abre a aba e digita o modelo direto.
+            # Select (e nao Focus) vale mesmo com a janela ainda sem foco.
+            $txtDrvBusca.Select()
         })
 
         [void]$Script:PrinterManagerForm.Controls.Add($btnTabLocal)
@@ -2536,6 +6347,22 @@ function Show-PrinterManager {
         Add-DriverButton $pnlDrivers ([ref]$drvY) "  [DRIVER] Zetex Z60XT  (ZIP - Drive, ~225 MB)" "https://drive.usercontent.google.com/download?id=1wWLiTWrtHCBRP9L0P9GG2eRKGEgfo2HJ&export=download&confirm=t" "Zetex_Z60XT_Driver.zip" $colorXtag
         Add-DriverButton $pnlDrivers ([ref]$drvY) "  [UTILITÁRIO] Gerenciador Elgin L42 PRO FULL  (v1.5.1)" "$xtagBaseUrl/Elgin/L42PRO%20FULL/Utilit%C3%A1rios/GerenciadorL42PRO_Full_1.5.1.exe" "GerenciadorL42PRO_Full_1.5.1.exe" $colorXtagUtil
         Add-DriverButton $pnlDrivers ([ref]$drvY) "  [UTILITÁRIO] Gerenciador Elgin L42 DT  (v1.5.6)" "$xtagBaseUrl/Elgin/L42DT/Utilit%C3%A1rios/GerenciadorL42DT_Full_1.5.6.exe" "GerenciadorL42DT_Full_1.5.6.exe" $colorXtagUtil
+
+        # Pesquisa: indexa o texto original de cada botao e refaz a lista a cada letra
+        Initialize-IndiceDrivers -Painel $pnlDrivers
+        $aplicaFiltroDrv = {
+            $rf = Update-FiltroDrivers -Painel $pnlDrivers -Busca $txtDrvBusca.Text
+            if ("$($txtDrvBusca.Text)".Trim() -eq "") { $lblDrvConta.Text = "$($rf.Total) drivers" }
+            else { $lblDrvConta.Text = "$($rf.Visiveis) de $($rf.Total)" }
+            $btnDrvLimpar.Visible = ("$($txtDrvBusca.Text)" -ne "")
+        }
+        $txtDrvBusca.Add_TextChanged($aplicaFiltroDrv)
+        $txtDrvBusca.Add_KeyDown({
+                param($s, $e)
+                if ($e.KeyCode -eq [System.Windows.Forms.Keys]::Escape) { $e.SuppressKeyPress = $true; $txtDrvBusca.Text = "" }
+            })
+        $btnDrvLimpar.Add_Click({ $txtDrvBusca.Text = ""; $txtDrvBusca.Focus() | Out-Null })
+        & $aplicaFiltroDrv
 
         # -------------------------------------------------------------
         # CONTEÚDO DO PAINEL LOCAL (ABA 1)
@@ -2957,6 +6784,35 @@ function Show-PrinterManager {
         } catch { $txtIpSrv.Text = "IP não encontrado" }
         [void]$pnlServerCard.Controls.Add($txtIpSrv)
 
+        # MAC e fila junto do IP: e o que se digita no PC de destino, e o MAC
+        # permite achar este PC de novo quando o IP mudar
+        $lblDadosOrigem = New-Object System.Windows.Forms.Label
+        $lblDadosOrigem.Location = '15,372'; $lblDadosOrigem.Size = '315,36'
+        $lblDadosOrigem.Font = New-Object System.Drawing.Font("Consolas", 8.5); $lblDadosOrigem.ForeColor = 'LightGray'
+        [void]$pnlServerCard.Controls.Add($lblDadosOrigem)
+        $mostraDadosOrigem = {
+            $dadosPc = Get-DadosOrigemLpr
+            $filasTxt = "nenhuma compartilhada ainda"
+            if ($dadosPc.Filas.Count -gt 0) { $filasTxt = $dadosPc.Filas -join ", " }
+            $lblDadosOrigem.Text = "MAC : " + ($dadosPc.Macs -join ", ") + "`nFila: " + $filasTxt
+            return $dadosPc
+        }
+        [void](& $mostraDadosOrigem)
+
+        $btnCopiarOrigem = New-Object System.Windows.Forms.Button
+        $btnCopiarOrigem.Text = "COPIAR IP, MAC E FILA"; $btnCopiarOrigem.Location = '15,412'; $btnCopiarOrigem.Size = '315,30'
+        $btnCopiarOrigem.BackColor = [System.Drawing.Color]::FromArgb(25, 90, 120); $btnCopiarOrigem.FlatStyle = 'Flat'; $btnCopiarOrigem.FlatAppearance.BorderSize = 0
+        $btnCopiarOrigem.Font = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold); $btnCopiarOrigem.ForeColor = 'White'; $btnCopiarOrigem.Cursor = 'Hand'
+        $btnCopiarOrigem.FlatAppearance.MouseOverBackColor = [System.Drawing.Color]::FromArgb(40, 110, 145)
+        $btnCopiarOrigem.Add_Click({
+                $dadosPc = & $mostraDadosOrigem
+                try { [System.Windows.Forms.Clipboard]::SetText($dadosPc.Texto) } catch {}
+                Log-Message "INFO" "LPR: dados deste PC copiados (IP, MAC e fila)"
+                [System.Windows.Forms.MessageBox]::Show($Script:PrinterManagerForm, "Copiado para colar no outro PC ou mandar no WhatsApp:`r`n`r`n$($dadosPc.Texto)", "Dados do PC da impressora", "OK", "Information") | Out-Null
+            })
+        if ($Script:ToolTip) { $Script:ToolTip.SetToolTip($btnCopiarOrigem, "Copia IP, MAC e nome da fila deste PC, para configurar o PC de destino.") }
+        [void]$pnlServerCard.Controls.Add($btnCopiarOrigem)
+
 
         # Card Destino (Direita)
         $pnlClientCard = New-Object System.Windows.Forms.Panel
@@ -2984,6 +6840,7 @@ function Show-PrinterManager {
         $btnActClient.FlatAppearance.MouseOverBackColor = [System.Drawing.Color]::FromArgb(40, 100, 40)
         $btnActClient.FlatAppearance.MouseDownBackColor = [System.Drawing.Color]::FromArgb(20, 60, 20)
         $btnActClient.Add_Click({
+            $abrirNovaLpr = $false
             $btnActClient.Enabled = $false
             $btnActClient.Text = "Configurando LPR..."
             [System.Windows.Forms.Application]::DoEvents()
@@ -3025,12 +6882,21 @@ COLA RÁPIDA - INSTALAR VIA LPR
                 [System.Windows.Forms.Clipboard]::SetText($colinha)
                 Log-Message "INFO" "Passo a passo de instalação LPR copiado para a Área de Trabalho."
 
-                [System.Windows.Forms.MessageBox]::Show(
-                    $Script:PrinterManagerForm,
-                    "Cliente LPR Ativado com sucesso!`n`nO passo a passo foi copiado para sua Área de Transferência!$(if ($reinicioPendente) { "`n`nATENCAO: o Windows pediu REINICIO para o recurso valer.`nSe a opcao 'LPR Port' nao aparecer no assistente, reinicie o computador." })`n`nAgora clique no botao 'ABRIR ASSISTENTE' para adicionar a impressora no Windows.",
-                    "LPR Configurado", "OK", "Information") | Out-Null
-                
-                Start-Process "rundll32.exe" -ArgumentList "printui.dll,PrintUIEntry /il"
+                if ($reinicioPendente) {
+                    # Sem reiniciar, o Windows ainda nao deixa criar a porta LPR
+                    [System.Windows.Forms.MessageBox]::Show(
+                        $Script:PrinterManagerForm,
+                        "Monitor LPR instalado, mas o Windows pediu REINICIO para ele valer.`n`nReinicie o computador e depois clique em 'PORTAS LPR: CRIAR, TESTAR E TROCAR IP' para criar a porta e a impressora.",
+                        "LPR Configurado", "OK", "Warning") | Out-Null
+                }
+                else {
+                    [System.Windows.Forms.MessageBox]::Show(
+                        $Script:PrinterManagerForm,
+                        "Monitor LPR ativado!`n`nAgora é só criar a porta e a impressora: a tela de nova impressora LPR abre em seguida.",
+                        "LPR Configurado", "OK", "Information") | Out-Null
+                    # Abre depois do finally, com o botao ja liberado
+                    $abrirNovaLpr = $true
+                }
             }
             catch {
                 Log-Message "ERRO" "Falha ao configurar Cliente LPR: $_"
@@ -3040,6 +6906,8 @@ COLA RÁPIDA - INSTALAR VIA LPR
                 $btnActClient.Enabled = $true
                 $btnActClient.Text = "ATIVAR MONITOR LPR"
             }
+            # Proximo passo natural: criar a porta e a impressora, sem o assistente do Windows
+            if ($abrirNovaLpr) { Show-PortasLpr -Dono $Script:PrinterManagerForm -AbrirNova }
         })
         [void]$pnlClientCard.Controls.Add($btnActClient)
 
@@ -3055,11 +6923,22 @@ COLA RÁPIDA - INSTALAR VIA LPR
         })
         [void]$pnlClientCard.Controls.Add($btnWizard)
 
+        # IP do PC da impressora mudou: lista as portas LPR e corrige sem refazer a impressora
+        $btnPortasLpr = New-Object System.Windows.Forms.Button
+        $btnPortasLpr.Text = "PORTAS LPR: CRIAR, TESTAR E TROCAR IP"; $btnPortasLpr.Location = '15,235'; $btnPortasLpr.Size = '315,45'
+        $btnPortasLpr.BackColor = [System.Drawing.Color]::FromArgb(25, 90, 120); $btnPortasLpr.FlatStyle = 'Flat'; $btnPortasLpr.Font = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold)
+        $btnPortasLpr.Cursor = 'Hand'; $btnPortasLpr.ForeColor = 'White'; $btnPortasLpr.FlatAppearance.BorderSize = 0
+        $btnPortasLpr.FlatAppearance.MouseOverBackColor = [System.Drawing.Color]::FromArgb(40, 110, 145)
+        $btnPortasLpr.FlatAppearance.MouseDownBackColor = [System.Drawing.Color]::FromArgb(15, 70, 95)
+        $btnPortasLpr.Add_Click({ Show-PortasLpr -Dono $Script:PrinterManagerForm })
+        if ($Script:ToolTip) { $Script:ToolTip.SetToolTip($btnPortasLpr, "Lista as portas LPR deste PC, mostra quais pararam de responder e corrige a porta para o IP novo do PC da impressora (pelo MAC, varrendo a rede ou digitando o IP).") }
+        [void]$pnlClientCard.Controls.Add($btnPortasLpr)
+
         $txtInstLpr = New-Object System.Windows.Forms.RichTextBox
-        $txtInstLpr.Location = '15,240'; $txtInstLpr.Size = '315,195'
+        $txtInstLpr.Location = '15,292'; $txtInstLpr.Size = '315,143'
         $txtInstLpr.ReadOnly = $true; $txtInstLpr.BackColor = [System.Drawing.Color]::FromArgb(25, 25, 30); $txtInstLpr.ForeColor = 'LightYellow'
         $txtInstLpr.BorderStyle = 'None'; $txtInstLpr.Font = New-Object System.Drawing.Font("Segoe UI", 8.5)
-        $txtInstLpr.Text = "AJUDA DE INSTALAÇÃO (LPR):`n1. Criar nova porta -> LPR Port`n2. Servidor: [IP do PC com o cabo USB]`n3. Nome da fila: [Nome Compartilhado] (ex: IMPRESSORA)`n4. Escolha o driver correspondente."
+        $txtInstLpr.Text = "AJUDA DE INSTALAÇÃO (LPR):`n1. Criar nova porta -> LPR Port`n2. Servidor: [IP do PC com o cabo USB]`n3. Nome da fila: [Nome Compartilhado] (ex: IMPRESSORA)`n4. Escolha o driver correspondente.`n`nMAIS RÁPIDO: PORTAS LPR > NOVA IMPRESSORA LPR`n(cria a porta e a impressora de uma vez).`n`nSE O IP DO PC DA IMPRESSORA MUDAR:`nPORTAS LPR > ATUALIZAR IP PELO MAC."
         [void]$pnlClientCard.Controls.Add($txtInstLpr)
 
         $Script:PrinterManagerForm.Add_FormClosing({ $Script:PrinterManagerForm = $null })
@@ -4791,7 +8670,7 @@ $formWidth = if ($screen.Width -lt 1200) { $screen.Width - 50 } else { 1200 }
 $formHeight = if ($screen.Height -lt 900) { $screen.Height - 50 } else { 900 }
 
 $form = New-Object System.Windows.Forms.Form
-$form.Text = "XMenu System Manager v17.59"
+$form.Text = "XMenu System Manager v5.0"
 $form.Size = New-Object System.Drawing.Size($formWidth, $formHeight)
 $form.StartPosition = "CenterScreen"
 $form.BackColor = [System.Drawing.Color]::FromArgb(25, 25, 30); $form.ForeColor = 'White'
@@ -5118,13 +8997,35 @@ $colorGray = [System.Drawing.Color]::FromArgb(50, 55, 60)
 $colorCyan = [System.Drawing.Color]::FromArgb(25, 75, 95)
 
 $bPrintMgr = New-Object System.Windows.Forms.Button; $bPrintMgr.Height = 50; $bPrintMgr.Dock = 'Top'
-$bPrintMgr.Text = "Gerenciador de Impressoras (LPR/LPD)"; $bPrintMgr.Font = New-Object System.Drawing.Font("Segoe UI", 11, [System.Drawing.FontStyle]::Bold)
+$bPrintMgr.Text = "Impressoras: Compartilhamento, LPR e Drivers"; $bPrintMgr.Font = New-Object System.Drawing.Font("Segoe UI", 11, [System.Drawing.FontStyle]::Bold)
 $bPrintMgr.Cursor = 'Hand'
 Format-SupportBtn $bPrintMgr $colorCyan
 $Script:ToolTip.SetToolTip($bPrintMgr, "Gerencia impressoras locais, compartilhamentos e configura rede via protocolo LPR/LPD para corrigir erros no Windows 11.")
 $bPrintMgr.Add_Click({ Show-PrinterManager })
 [void]$tbl.Controls.Add($bPrintMgr)
 Add-SupportSpacer   # fecha a linha do grupo azul
+
+# --- BANCO DE DADOS (AMARELO) ---
+# Mostarda no mesmo tom fechado do verde e do vermelho, para o texto branco seguir legivel
+$colorSql = [System.Drawing.Color]::FromArgb(125, 95, 15)
+
+$bXml = New-Object System.Windows.Forms.Button; $bXml.Height = 50; $bXml.Dock = 'Top'
+$bXml.Text = "Baixar XMLs NFC-e"
+$bXml.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
+$bXml.Cursor = 'Hand'
+Format-SupportBtn $bXml $colorSql
+$Script:ToolTip.SetToolTip($bXml, "Conecta no banco netwebpdv e baixa em lote os XMLs das NFC-e por série e sequência, por período ou por chave de acesso. Já monta a pasta organizada e o .zip pronto para enviar ao cliente, e avisa quais notas não estão no banco.")
+$bXml.Add_Click({ Show-XmlDownloader })
+[void]$tbl.Controls.Add($bXml)
+
+$bBkp = New-Object System.Windows.Forms.Button; $bBkp.Height = 50; $bBkp.Dock = 'Top'
+$bBkp.Text = "Backup do Banco NetWebPDV"
+$bBkp.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
+$bBkp.Cursor = 'Hand'
+Format-SupportBtn $bBkp $colorSql
+$Script:ToolTip.SetToolTip($bBkp, "Faz o backup completo do banco pelo próprio SQL Server, com o banco online: sem parar o serviço e sem desanexar. Confere o arquivo, pode compactar em .zip e salva em Arquivos Xmenu\Backup NetWebPDV. Rode no servidor.")
+$bBkp.Add_Click({ Show-BackupBanco })
+[void]$tbl.Controls.Add($bBkp)
 
 # --- DIAGNÓSTICOS (VERDE) ---
 $bInfo = New-Object System.Windows.Forms.Button; $bInfo.Height = 50; $bInfo.Dock = 'Top'
@@ -5240,7 +9141,7 @@ $Script:ToolTip.SetToolTip($bClock, "Liga o serviço de horário, aponta para o 
 $bClock.Add_Click({ Invoke-ClockSync })
 [void]$tbl.Controls.Add($bClock)
 
-Log-Message "INFO" "XMenu System Manager v17.59 - Central de Preparo e Suporte"
+Log-Message "INFO" "XMenu System Manager v5.0 - Central de Preparo e Suporte"
 Log-Message "LOG" "==============================================================="
 Log-Message "SUCESSO" "[NOVIDADE] Nova aba 'Drivers de Impressoras' no Gerenciador!"
 Log-Message "SUCESSO" "           - Download direto de drivers e utilitários de configuração."
