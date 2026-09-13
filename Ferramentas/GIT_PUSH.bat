@@ -2,8 +2,8 @@
 setlocal
 :: XMenu - Automação de Git Push
 
-:: Muda para o diretório onde o script está
-cd /d "%~dp0"
+:: Muda para a raiz do projeto (o BAT fica em Ferramentas\)
+cd /d "%~dp0.."
 
 echo.
 echo ===========================================

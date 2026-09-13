@@ -32,7 +32,8 @@ echo.
 
 :: CORRECAO CRITICA: Usando %~dp0 (diretorio do BAT) para garantir que o Powershell
 :: encontre o script PS1, resolvendo o erro "arquivo nao existe".
-PowerShell.exe -ExecutionPolicy Bypass -File "%~dp0Preparar Ambiente Xmenu.ps1"
+:: O BAT fica em Ferramentas\ e o script na raiz do projeto (..\).
+PowerShell.exe -ExecutionPolicy Bypass -File "%~dp0..\Preparar Ambiente Xmenu.ps1"
 
 :END
 echo.
