@@ -26,10 +26,17 @@ if (-not (Test-Path $Script:DownloadFolder)) {
 # Evita falsos positivos que bloqueiam instaladores de driver legitimos
 # (comum em auto-extraiveis WinRAR SFX e drivers antigos).
 # ATENCAO: essa pasta deixa de ser escaneada pelo antivirus.
+# Roda em segundo plano: o Add-MpPreference leva quase 1 s e atrasava a abertura da
+# janela. A pasta so e usada quando o tecnico clica para baixar alguma coisa.
 try {
-    if (Get-Command Add-MpPreference -ErrorAction SilentlyContinue) {
-        Add-MpPreference -ExclusionPath $Script:DownloadFolder -ErrorAction SilentlyContinue
-    }
+    $Script:ExclusaoDefender = [PowerShell]::Create()
+    [void]$Script:ExclusaoDefender.AddScript({
+            param($Pasta)
+            if (Get-Command Add-MpPreference -ErrorAction SilentlyContinue) {
+                Add-MpPreference -ExclusionPath $Pasta -ErrorAction SilentlyContinue
+            }
+        }).AddArgument($Script:DownloadFolder)
+    [void]$Script:ExclusaoDefender.BeginInvoke()
 }
 catch {}
 
@@ -74,9 +81,8 @@ if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administra
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 
-# API Wallpaper
-$code = '[DllImport("user32.dll", CharSet=CharSet.Auto)] public static extern int SystemParametersInfo (UInt32 uiAction, UInt32 uiParam, string pvParam, UInt32 fWinIni);'
-Add-Type -MemberDefinition $code -Name "WinAPI" -Namespace "XMenuTools"
+# A API do papel de parede (XMenuTools.WinAPI) e compilada no Run-Config, na hora de
+# aplicar o fundo: compilar aqui atrasava a abertura de todo mundo.
 
 # -----------------------------------------------------------------------------
 # 3. FUNCOES UTILITARIAS E LOGS
@@ -10476,6 +10482,9 @@ function Run-Config {
         Set-ItemProperty -Path "HKCU:\Control Panel\Desktop" -Name "WallpaperStyle" -Value "10" -Force
         Set-ItemProperty -Path "HKCU:\Control Panel\Desktop" -Name "TileWallPaper" -Value "0" -Force
         Set-ItemProperty -Path "HKCU:\Control Panel\Desktop" -Name "WallPaper" -Value $wallPath -Force
+        if (-not ('XMenuTools.WinAPI' -as [type])) {
+            Add-Type -MemberDefinition '[DllImport("user32.dll", CharSet=CharSet.Auto)] public static extern int SystemParametersInfo (UInt32 uiAction, UInt32 uiParam, string pvParam, UInt32 fWinIni);' -Name "WinAPI" -Namespace "XMenuTools"
+        }
         [XMenuTools.WinAPI]::SystemParametersInfo(0x0014, 0, $wallPath, 3) | Out-Null
     }
     catch { Log-Message "ERRO" "Falha no Wallpaper: $($_.Exception.Message)" }
@@ -10662,40 +10671,71 @@ $lS.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontSt
 $lS.Location = '5,60'
 [void]$hLeft.Controls.Add($lS)
 
-$os = Get-CimInstance Win32_OperatingSystem
-$cpu = Get-CimInstance Win32_Processor | Select-Object -First 1
-$ram = Get-CimInstance Win32_ComputerSystem
-$disk = Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='C:'"
-$gpu = Get-CimInstance Win32_VideoController | Select-Object -First 1
-$gpuName = if ($gpu) { $gpu.Name } else { "N/A" }
+# Os dados de hardware sao lidos logo depois que a janela aparece (no Shown, la no fim):
+# a janela abre com "..." e o cabecalho se completa em uns 0,3 s.
+# Pede so os campos usados no cabecalho. O Win32_Processor inteiro levava 1 s (ele mede
+# a carga de cada nucleo), o Get-PhysicalDisk mais 1 a 2 s (carrega o modulo Storage) e o
+# Get-NetIPAddress meio segundo: a janela demorava uns 3 s a mais para aparecer.
+$preencheHardware = {
+    $os = Get-CimInstance Win32_OperatingSystem -Property Caption
+    $cpu = Get-CimInstance Win32_Processor -Property Name | Select-Object -First 1
+    $ram = Get-CimInstance Win32_ComputerSystem -Property TotalPhysicalMemory
+    $disk = Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='C:'" -Property Size
+    $gpu = Get-CimInstance Win32_VideoController -Property Name | Select-Object -First 1
+    $gpuName = if ($gpu) { $gpu.Name } else { "N/A" }
 
-$localIP = (Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object { $_.IPAddress -notmatch '^127\.|^169\.254\.' } | Select-Object -First 1).IPAddress
-if (-not $localIP) { $localIP = "Offline" }
+    # IPv4 pela API do .NET, preferindo a placa com gateway (a da rede da loja)
+    $localIP = $null
+    try {
+        $ipsSemGateway = @()
+        foreach ($ni in [System.Net.NetworkInformation.NetworkInterface]::GetAllNetworkInterfaces()) {
+            if ($ni.OperationalStatus -ne [System.Net.NetworkInformation.OperationalStatus]::Up) { continue }
+            $props = $ni.GetIPProperties()
+            $temGateway = @($props.GatewayAddresses | Where-Object { $_.Address.AddressFamily -eq [System.Net.Sockets.AddressFamily]::InterNetwork -and $_.Address.ToString() -ne '0.0.0.0' }).Count -gt 0
+            foreach ($u in $props.UnicastAddresses) {
+                if ($u.Address.AddressFamily -ne [System.Net.Sockets.AddressFamily]::InterNetwork) { continue }
+                $ip = $u.Address.ToString()
+                if ($ip -match '^127\.|^169\.254\.') { continue }
+                if ($temGateway) { if (-not $localIP) { $localIP = $ip } }
+                else { $ipsSemGateway += $ip }
+            }
+        }
+        if (-not $localIP -and $ipsSemGateway.Count -gt 0) { $localIP = $ipsSemGateway[0] }
+    }
+    catch {}
+    if (-not $localIP) { $localIP = "Offline" }
 
-$diskType = "Disco"
-try {
-    $physDisk = Get-PhysicalDisk -ErrorAction SilentlyContinue | Select-Object -First 1
-    if ($physDisk.MediaType -match 'SSD') { $diskType = "SSD" }
-    elseif ($physDisk.MediaType -match 'HDD') { $diskType = "HD" }
+    # SSD ou HD direto no WMI de armazenamento (MediaType 3 = HD, 4 = SSD): mesmo disco
+    # que o Get-PhysicalDisk mostrava, sem carregar o modulo Storage
+    $diskType = "Disco"
+    try {
+        $physDisk = Get-CimInstance -Namespace root\Microsoft\Windows\Storage -ClassName MSFT_PhysicalDisk -Property MediaType -ErrorAction Stop | Select-Object -First 1
+        if ("$($physDisk.MediaType)" -eq '4') { $diskType = "SSD" }
+        elseif ("$($physDisk.MediaType)" -eq '3') { $diskType = "HD" }
+    }
+    catch {}
+
+    $lHw1.Text = "[ Host: $env:COMPUTERNAME   |   IP Local: $localIP   |   Usuario: $env:USERNAME ]"
+    $lHw2.Text = "Sistema: $($os.Caption -replace 'Microsoft ','')   |   CPU: $($cpu.Name.Trim())"
+    $lHw3.Text = "RAM: $([Math]::Round($ram.TotalPhysicalMemory / 1GB)) GB   |   $diskType (C:): $([Math]::Round($disk.Size / 1GB)) GB   |   Video: $gpuName"
 }
-catch {}
 
 $lHw1 = New-Object System.Windows.Forms.Label
-$lHw1.Text = "[ Host: $env:COMPUTERNAME   |   IP Local: $localIP   |   Usuario: $env:USERNAME ]"
+$lHw1.Text = "[ Host: $env:COMPUTERNAME   |   IP Local: ...   |   Usuario: $env:USERNAME ]"
 $lHw1.AutoSize = $true; $lHw1.ForeColor = [System.Drawing.Color]::WhiteSmoke
 $lHw1.Font = New-Object System.Drawing.Font("Consolas", 10.5, [System.Drawing.FontStyle]::Bold)
 $lHw1.Location = '5,105'
 [void]$hLeft.Controls.Add($lHw1)
 
 $lHw2 = New-Object System.Windows.Forms.Label
-$lHw2.Text = "Sistema: $($os.Caption -replace 'Microsoft ','')   |   CPU: $($cpu.Name.Trim())"
+$lHw2.Text = "Sistema: ...   |   CPU: ..."
 $lHw2.AutoSize = $true; $lHw2.ForeColor = [System.Drawing.Color]::WhiteSmoke
 $lHw2.Font = New-Object System.Drawing.Font("Consolas", 10.5, [System.Drawing.FontStyle]::Bold)
 $lHw2.Location = '5,125'
 [void]$hLeft.Controls.Add($lHw2)
 
 $lHw3 = New-Object System.Windows.Forms.Label
-$lHw3.Text = "RAM: $([Math]::Round($ram.TotalPhysicalMemory / 1GB)) GB   |   $diskType (C:): $([Math]::Round($disk.Size / 1GB)) GB   |   Video: $gpuName"
+$lHw3.Text = "RAM: ...   |   Disco (C:): ...   |   Video: ..."
 $lHw3.AutoSize = $true; $lHw3.ForeColor = [System.Drawing.Color]::WhiteSmoke
 $lHw3.Font = New-Object System.Drawing.Font("Consolas", 10.5, [System.Drawing.FontStyle]::Bold)
 $lHw3.Location = '5,145'
@@ -11118,5 +11158,10 @@ else {
     Log-Message "ERRO" "Feche e abra de novo com o botão direito > Executar como administrador."
 }
 
-$form.Add_Shown({ $this.ActiveControl = $null })
+$form.Add_Shown({
+        $this.ActiveControl = $null
+        # Desenha a janela primeiro e so depois le o hardware do cabecalho
+        $this.Refresh()
+        try { & $preencheHardware } catch {}
+    })
 [void]$form.ShowDialog()
