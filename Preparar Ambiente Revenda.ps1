@@ -7096,6 +7096,73 @@ function Remove-PortaLprRegistro {
     finally { $base.Close() }
 }
 
+function Get-NomesPortasMonitor {
+    # Nomes das portas de um monitor do spooler ("LPR Port", "Standard TCP/IP Port"), pelo registro
+    param([string]$Monitor, [string]$Hive = 'LocalMachine')
+    $nomes = @()
+    try {
+        $base = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::$Hive, [Microsoft.Win32.RegistryView]::Registry64)
+        try {
+            $chave = $base.OpenSubKey("SYSTEM\CurrentControlSet\Control\Print\Monitors\$Monitor\Ports")
+            if ($null -ne $chave) { $nomes = @($chave.GetSubKeyNames()); $chave.Close() }
+        }
+        finally { $base.Close() }
+    }
+    catch {}
+    return $nomes
+}
+
+function Get-TipoPortaImpressora {
+    # Tipo da porta para a lista de impressoras locais
+    param([string]$Porta, [string[]]$PortasLpr = @(), [string[]]$PortasTcp = @())
+    $p = "$Porta".Trim()
+    if ($p -eq "") { return "" }
+    if ($PortasLpr -contains $p) { return "LPR" }
+    if ($PortasTcp -contains $p) { return "Rede (IP)" }
+    if ($p.StartsWith('\\')) { return "Compartilhada" }
+    if ($p -match '^USB\d+$') { return "USB" }
+    if ($p -match '^WSD-') { return "WSD" }
+    if ($p -match '^(COM|LPT)\d+:?$') { return "Serial" }
+    if ($p -match '^(PORTPROMPT|nul|FILE|SHRFAX|XPSPort):$') { return "Virtual" }
+    return "Outra"
+}
+
+function Remove-PortasLpr {
+    # Remove portas LPR que nenhuma impressora usa, pelo spooler (sem reiniciar nada).
+    # A que o Windows recusar volta em Recusadas: o chamador decide se apaga pelo
+    # registro com Remove-PortasLprRegistro, que reinicia o spooler.
+    # Devolve hashtable: Removidas / EmUso / Recusadas
+    param([string[]]$Portas)
+    $res = @{ Removidas = @(); EmUso = @(); Recusadas = @() }
+    # Sem a lista de impressoras nao da para saber o que esta em uso: melhor nao apagar nada
+    $usadas = @(Get-Printer -ErrorAction Stop | ForEach-Object { $_.PortName })
+    foreach ($p in @($Portas | Where-Object { "$_" -ne "" } | Select-Object -Unique)) {
+        if ($usadas -contains $p) { $res.EmUso += $p; continue }
+        try { Remove-PrinterPort -Name $p -ErrorAction Stop; $res.Removidas += $p }
+        catch { $res.Recusadas += $p }
+    }
+    if ($res.Removidas.Count -gt 0) { Remove-LprMac -Portas $res.Removidas }
+    return $res
+}
+
+function Remove-PortasLprRegistro {
+    # Apaga as portas pelo registro e reinicia o spooler. Confere de novo se nenhuma
+    # impressora passou a usar a porta. Devolve as portas apagadas.
+    param([string[]]$Portas)
+    $usadas = @(Get-Printer -ErrorAction Stop | ForEach-Object { $_.PortName })
+    $apagadas = @()
+    foreach ($p in $Portas) {
+        if ("$p" -eq "" -or $usadas -contains $p) { continue }
+        Remove-PortaLprRegistro -Porta $p
+        $apagadas += $p
+    }
+    if ($apagadas.Count -gt 0) {
+        Restart-Service -Name Spooler -Force -ErrorAction Stop
+        Remove-LprMac -Portas $apagadas
+    }
+    return $apagadas
+}
+
 function Update-PortaLprCompleto {
     # Troca o servidor de uma porta LPR de verdade: porta nova "IP:FILA", spooler
     # reiniciado, impressoras movidas e a porta antiga removida. Se o Windows nao
@@ -7154,6 +7221,16 @@ function Save-LprMac {
     $pasta = Split-Path $Arquivo
     if (-not (Test-Path -LiteralPath $pasta)) { New-Item -ItemType Directory -Path $pasta -Force | Out-Null }
     [System.IO.File]::WriteAllText($Arquivo, ($macs | ConvertTo-Json), (New-Object System.Text.UTF8Encoding($false)))
+}
+
+function Remove-LprMac {
+    # Esquece o MAC das portas apagadas
+    param([string[]]$Portas, [string]$Arquivo = "C:\Arquivos Xmenu\lpr_mac_portas.json")
+    if (-not (Test-Path -LiteralPath $Arquivo)) { return }
+    $macs = Get-LprMacs -Arquivo $Arquivo
+    $mudou = $false
+    foreach ($p in $Portas) { if ($macs.ContainsKey($p)) { $macs.Remove($p); $mudou = $true } }
+    if ($mudou) { [System.IO.File]::WriteAllText($Arquivo, ($macs | ConvertTo-Json), (New-Object System.Text.UTF8Encoding($false))) }
 }
 
 function ConvertFrom-TabelaArp {
@@ -7397,7 +7474,8 @@ function Show-PortasLpr {
     # Janela do PC de destino: lista as portas LPR, testa se o PC da impressora
     # responde e corrige a porta quando o IP dele mudou.
     # -AbrirNova: ja abre a tela de nova impressora (vindo do ATIVAR MONITOR LPR)
-    param($Dono = $null, [switch]$AbrirNova)
+    # -SelecionarPorta: abre com essa porta selecionada (vindo da lista de impressoras locais)
+    param($Dono = $null, [switch]$AbrirNova, [string]$SelecionarPorta = "")
     try {
         $Script:LprOcupado = $false
         # Porta do LPD: sempre 515 no uso real; $Script:LprPorta existe para o teste
@@ -7430,12 +7508,15 @@ function Show-PortasLpr {
         $btnLprFechar = New-ToolButton $f "FECHAR" 744 350 100 34 $Script:UiCinza $null "Fecha esta janela"
         $btnLprNova = New-ToolButton $f "NOVA IMPRESSORA LPR" 20 392 220 34 $Script:UiAzul $null "Cria a porta LPR e a impressora neste PC de uma vez, sem o assistente do Windows"
         $btnLprTeste = New-ToolButton $f "IMPRIMIR TESTE" 250 392 140 34 $Script:UiCinza $null "Manda uma folha curta de teste pela impressora que usa a porta selecionada"
-        foreach ($b in @($btnLprMac, $btnLprTrocar, $btnLprProcurar, $btnLprRecarregar, $btnLprNova, $btnLprTeste)) { $b.Anchor = 'Bottom,Left' }
+        $corRemoverLpr = [System.Drawing.Color]::FromArgb(150, 40, 40)
+        $btnLprRemover = New-ToolButton $f "REMOVER PORTA" 400 392 180 34 $corRemoverLpr $null "Apaga a porta selecionada. Só vale para porta que nenhuma impressora usa"
+        $btnLprLimpar = New-ToolButton $f "LIMPAR SEM USO" 590 392 130 34 $corRemoverLpr $null "Apaga de uma vez as portas LPR que nenhuma impressora usa (as que sobraram das trocas de IP)"
+        foreach ($b in @($btnLprMac, $btnLprTrocar, $btnLprProcurar, $btnLprRecarregar, $btnLprNova, $btnLprTeste, $btnLprRemover, $btnLprLimpar)) { $b.Anchor = 'Bottom,Left' }
         $btnLprFechar.Anchor = 'Bottom,Right'
         $lblLprStatus = New-ToolLabel $f "" 20 436 9.5 -Negrito -W 824
         $lblLprStatus.Height = 40
         $lblLprStatus.Anchor = 'Bottom,Left,Right'
-        $lblLprAjuda = New-ToolLabel $f "Como usar: selecione a porta que parou e clique em ATUALIZAR IP PELO MAC. O MAC do PC da impressora é guardado sozinho sempre que a porta está funcionando; se ainda não tiver MAC guardado, use PROCURAR NA REDE ou TROCAR IP. A troca reinicia o spooler de impressão deste PC." 20 478 8.5 -Cor $Script:UiSuave -W 824
+        $lblLprAjuda = New-ToolLabel $f "Como usar: selecione a porta que parou e clique em ATUALIZAR IP PELO MAC. O MAC do PC da impressora é guardado sozinho sempre que a porta está funcionando; se ainda não tiver MAC guardado, use PROCURAR NA REDE ou TROCAR IP. A troca reinicia o spooler de impressão deste PC. Portas que sobraram de trocas antigas (sem impressora) saem com LIMPAR SEM USO." 20 478 8.5 -Cor $Script:UiSuave -W 824
         $lblLprAjuda.Height = 44
         $lblLprAjuda.Anchor = 'Bottom,Left,Right'
 
@@ -7455,6 +7536,8 @@ function Show-PortasLpr {
             $btnLprMac.Enabled = ($null -ne $selLpr -and "$($selLpr.Mac)" -ne "" -and -not $Script:LprOcupado)
             $btnLprTrocar.Enabled = ($null -ne $selLpr -and -not $Script:LprOcupado)
             $btnLprTeste.Enabled = ($null -ne $selLpr -and -not $Script:LprOcupado)
+            $btnLprRemover.Enabled = ($null -ne $selLpr -and -not $Script:LprOcupado)
+            $btnLprLimpar.Enabled = ($lvLpr.Items.Count -gt 0 -and -not $Script:LprOcupado)
             $btnLprProcurar.Enabled = (-not $Script:LprOcupado)
             $btnLprRecarregar.Enabled = (-not $Script:LprOcupado)
             $btnLprNova.Enabled = (-not $Script:LprOcupado)
@@ -7467,7 +7550,9 @@ function Show-PortasLpr {
             & $atualizaBotoesLpr
         }
 
+        # -Selecionar: porta que fica selecionada depois de carregar, se ainda existir
         $carregarLpr = {
+            param([string]$Selecionar = "")
             & $travarLpr $true
             try {
                 & $statusLpr "Lendo as portas LPR e testando se cada PC responde..." $Script:UiAmarelo
@@ -7500,24 +7585,36 @@ function Show-PortasLpr {
                     [void]$item.SubItems.Add($pl.Fila)
                     if ($noAr) { [void]$item.SubItems.Add("RESPONDENDO") } else { [void]$item.SubItems.Add("SEM RESPOSTA") }
                     if ($macPorta -ne "") { [void]$item.SubItems.Add($macPorta) } else { [void]$item.SubItems.Add("ainda não guardado") }
-                    [void]$item.SubItems.Add(($nomesImp -join ", "))
+                    if ($nomesImp.Count -gt 0) { [void]$item.SubItems.Add(($nomesImp -join ", ")) } else { [void]$item.SubItems.Add("nenhuma (sem uso)") }
                     if ($noAr) { $item.ForeColor = $Script:UiVerde } else { $item.ForeColor = $Script:UiVermelho }
-                    $item.Tag = [PSCustomObject]@{ Porta = $pl.Porta; Servidor = $pl.Servidor; Fila = $pl.Fila; Mac = $macPorta; NoAr = $noAr }
+                    # Porta sem impressora nao imprime nada: apagada para nao parecer impressora parada
+                    if ($nomesImp.Count -eq 0) { $item.ForeColor = $Script:UiSuave }
+                    $item.Tag = [PSCustomObject]@{ Porta = $pl.Porta; Servidor = $pl.Servidor; Fila = $pl.Fila; Mac = $macPorta; NoAr = $noAr; Impressoras = $nomesImp }
                     [void]$lvLpr.Items.Add($item)
                 }
                 $lvLpr.EndUpdate()
 
-                $semResposta = @($lvLpr.Items | Where-Object { -not $_.Tag.NoAr })
+                # So conta como parada a porta que tem impressora; a sem uso tem aviso proprio
+                $semResposta = @($lvLpr.Items | Where-Object { -not $_.Tag.NoAr -and @($_.Tag.Impressoras).Count -gt 0 })
+                $semUso = @($lvLpr.Items | Where-Object { @($_.Tag.Impressoras).Count -eq 0 })
+                $avisoSemUso = ""
+                if ($semUso.Count -gt 0) { $avisoSemUso = " $($semUso.Count) porta(s) sem impressora: LIMPAR SEM USO apaga." }
+                $pedida = @($lvLpr.Items | Where-Object { $Selecionar -ne "" -and $_.Tag.Porta -eq $Selecionar })
                 if ($lvLpr.Items.Count -eq 0) {
                     & $statusLpr "Nenhuma porta LPR neste PC. Primeiro adicione a impressora pelo ABRIR ASSISTENTE DO WINDOWS." $Script:UiAmarelo
                 }
                 elseif ($semResposta.Count -gt 0) {
                     $semResposta[0].Selected = $true
-                    & $statusLpr "$($semResposta.Count) porta(s) sem resposta. Selecione e clique em ATUALIZAR IP PELO MAC." $Script:UiVermelho
+                    & $statusLpr ("$($semResposta.Count) porta(s) com impressora sem resposta. Selecione e clique em ATUALIZAR IP PELO MAC." + $avisoSemUso) $Script:UiVermelho
                 }
                 else {
                     $lvLpr.Items[0].Selected = $true
-                    & $statusLpr "Todas as portas estão respondendo. O MAC de cada PC já ficou guardado para quando o IP mudar." $Script:UiVerde
+                    & $statusLpr ("Todas as portas com impressora estão respondendo. O MAC de cada PC já ficou guardado para quando o IP mudar." + $avisoSemUso) $Script:UiVerde
+                }
+                if ($pedida.Count -gt 0) {
+                    $lvLpr.SelectedItems.Clear()
+                    $pedida[0].Selected = $true
+                    $pedida[0].EnsureVisible()
                 }
             }
             catch { & $statusLpr "Erro ao ler as portas LPR: $($_.Exception.Message)" $Script:UiVermelho }
@@ -7527,10 +7624,12 @@ function Show-PortasLpr {
         $aplicarLpr = {
             param($SelPorta, [string]$NovoIp, [string]$MacNovo)
             $mensagemFim = $null
+            $portaFinal = $SelPorta.Porta
             & $travarLpr $true
             try {
                 & $statusLpr "Trocando a porta para $NovoIp e reiniciando o spooler..." $Script:UiAmarelo
                 $resTroca = Update-PortaLprCompleto -Porta $SelPorta.Porta -Servidor $NovoIp
+                $portaFinal = $resTroca.Porta
                 $macFica = $MacNovo
                 if ("$macFica" -eq "") { $macFica = $SelPorta.Mac }
                 if ("$macFica" -ne "") { Save-LprMac -Porta $resTroca.Porta -Mac $macFica -PortaAntiga $SelPorta.Porta }
@@ -7543,8 +7642,55 @@ function Show-PortasLpr {
                 [System.Windows.Forms.MessageBox]::Show($f, "Não foi possível trocar a porta: $($_.Exception.Message)", "Portas LPR", "OK", "Error") | Out-Null
             }
             finally { & $travarLpr $false }
-            & $carregarLpr
+            & $carregarLpr $portaFinal
             if ($null -ne $mensagemFim) { & $statusLpr $mensagemFim $Script:UiVerde }
+        }
+
+        # Remove as portas pelo spooler; a que o Windows recusar pode sair pelo registro
+        $removerPortasLpr = {
+            param([string[]]$Portas)
+            $resRem = $null
+            & $travarLpr $true
+            try {
+                & $statusLpr "Removendo $($Portas.Count) porta(s)..." $Script:UiAmarelo
+                $resRem = Remove-PortasLpr -Portas $Portas
+            }
+            catch {
+                Log-Message "ERRO" "LPR: falha ao remover portas - $($_.Exception.Message)"
+                [System.Windows.Forms.MessageBox]::Show($f, "Não foi possível remover: $($_.Exception.Message)", "Portas LPR", "OK", "Error") | Out-Null
+            }
+            finally { & $travarLpr $false }
+            if ($null -eq $resRem) { return }
+
+            if ($resRem.Recusadas.Count -gt 0) {
+                $r = [System.Windows.Forms.MessageBox]::Show($f,
+                    "O Windows não deixou remover com o spooler ligado:`r`n`r`n" + (($resRem.Recusadas | ForEach-Object { "  - $_" }) -join "`r`n") + "`r`n`r`nRemover pelo registro? O spooler de impressão deste PC será reiniciado.",
+                    "Portas LPR", "YesNo", "Warning")
+                if ($r -eq [System.Windows.Forms.DialogResult]::Yes) {
+                    & $travarLpr $true
+                    try {
+                        & $statusLpr "Removendo pelo registro e reiniciando o spooler..." $Script:UiAmarelo
+                        $apagadas = @(Remove-PortasLprRegistro -Portas $resRem.Recusadas)
+                        $resRem.Removidas += $apagadas
+                        $resRem.Recusadas = @($resRem.Recusadas | Where-Object { $apagadas -notcontains $_ })
+                    }
+                    catch {
+                        Log-Message "ERRO" "LPR: falha ao remover portas pelo registro - $($_.Exception.Message)"
+                        [System.Windows.Forms.MessageBox]::Show($f, "Não foi possível remover pelo registro: $($_.Exception.Message)", "Portas LPR", "OK", "Error") | Out-Null
+                    }
+                    finally { & $travarLpr $false }
+                }
+            }
+
+            if ($resRem.Removidas.Count -gt 0) { Log-Message "SUCESSO" ("LPR: porta(s) removida(s): " + ($resRem.Removidas -join ", ")) }
+            & $carregarLpr
+            $partes = @()
+            if ($resRem.Removidas.Count -gt 0) { $partes += "$($resRem.Removidas.Count) porta(s) removida(s)." }
+            if ($resRem.EmUso.Count -gt 0) { $partes += "Ficaram as que uma impressora passou a usar: $($resRem.EmUso -join ', ')." }
+            if ($resRem.Recusadas.Count -gt 0) { $partes += "Não removidas: $($resRem.Recusadas -join ', ')." }
+            $corRem = $Script:UiVerde
+            if ($resRem.Removidas.Count -eq 0) { $corRem = $Script:UiAmarelo }
+            if ($partes.Count -gt 0) { & $statusLpr ($partes -join " ") $corRem }
         }
 
         $pedirIpLpr = {
@@ -7865,7 +8011,7 @@ function Show-PortasLpr {
                 }
                 finally { & $travarLpr $false }
                 if ($null -eq $criada) { return }
-                & $carregarLpr
+                & $carregarLpr $criada.Porta
                 & $statusLpr "Impressora $($criada.Impressora) criada na porta $($criada.Porta)." $Script:UiVerde
                 $r = [System.Windows.Forms.MessageBox]::Show($f, "Impressora $($criada.Impressora) criada.`r`n`r`nImprimir uma folha de teste agora?", "Nova impressora LPR", "YesNo", "Question")
                 if ($r -eq [System.Windows.Forms.DialogResult]::Yes) {
@@ -7899,6 +8045,34 @@ function Show-PortasLpr {
                 finally { & $travarLpr $false }
             })
 
+        $btnLprRemover.Add_Click({
+                if ($Script:LprOcupado -or $lvLpr.SelectedItems.Count -eq 0) { return }
+                $selLpr = $lvLpr.SelectedItems[0].Tag
+                if (@($selLpr.Impressoras).Count -gt 0) {
+                    & $statusLpr "A porta $($selLpr.Porta) é usada pela impressora $(@($selLpr.Impressoras) -join ', '). Para corrigir o IP use ATUALIZAR IP PELO MAC ou TROCAR IP." $Script:UiAmarelo
+                    return
+                }
+                $r = [System.Windows.Forms.MessageBox]::Show($f,
+                    "Remover a porta $($selLpr.Porta)?`r`n`r`nNenhuma impressora deste PC usa essa porta.",
+                    "Portas LPR", "YesNo", "Question")
+                if ($r -eq [System.Windows.Forms.DialogResult]::Yes) { & $removerPortasLpr @($selLpr.Porta) }
+            })
+
+        $btnLprLimpar.Add_Click({
+                if ($Script:LprOcupado) { return }
+                $portasSemUso = @($lvLpr.Items | Where-Object { @($_.Tag.Impressoras).Count -eq 0 } | ForEach-Object { $_.Tag.Porta })
+                if ($portasSemUso.Count -eq 0) {
+                    & $statusLpr "Nenhuma porta sem uso: todas as portas LPR deste PC têm impressora." $Script:UiVerde
+                    return
+                }
+                $listaSemUso = ($portasSemUso | Select-Object -First 15 | ForEach-Object { "  - $_" }) -join "`r`n"
+                if ($portasSemUso.Count -gt 15) { $listaSemUso += "`r`n  ... e mais $($portasSemUso.Count - 15)" }
+                $r = [System.Windows.Forms.MessageBox]::Show($f,
+                    "Remover $($portasSemUso.Count) porta(s) LPR que nenhuma impressora usa?`r`n`r`n$listaSemUso`r`n`r`nAs portas com impressora não são mexidas.",
+                    "Portas LPR", "YesNo", "Question")
+                if ($r -eq [System.Windows.Forms.DialogResult]::Yes) { & $removerPortasLpr $portasSemUso }
+            })
+
         $btnLprRecarregar.Add_Click({ if (-not $Script:LprOcupado) { & $carregarLpr } })
         $btnLprFechar.Add_Click({ $f.Close() })
         $lvLpr.Add_SelectedIndexChanged($atualizaBotoesLpr)
@@ -7907,7 +8081,7 @@ function Show-PortasLpr {
                 if ($Script:LprOcupado) { $e.Cancel = $true }
             })
         $f.Add_Shown({
-                & $carregarLpr
+                & $carregarLpr $SelecionarPorta
                 if ($AbrirNova) { $btnLprNova.PerformClick() }
             })
         Log-Message "INFO" "LPR: janela de portas aberta"
@@ -8395,29 +8569,38 @@ function Show-PrinterManager {
         $lv.BackColor = [System.Drawing.Color]::FromArgb(20, 20, 25); $lv.ForeColor = 'WhiteSmoke'
         $lv.BorderStyle = 'None'; $lv.Font = New-Object System.Drawing.Font("Segoe UI", 9.5)
         
-        $lv.Columns.Add("Impressora", 260) | Out-Null
-        $lv.Columns.Add("Porta", 130) | Out-Null
-        $lv.Columns.Add("Compartilhada?", 120) | Out-Null
-        $lv.Columns.Add("Nome Compart.", 190) | Out-Null
+        $lv.Columns.Add("Impressora", 210) | Out-Null
+        $lv.Columns.Add("Tipo", 95) | Out-Null
+        $lv.Columns.Add("Porta", 150) | Out-Null
+        $lv.Columns.Add("Compartilhada?", 110) | Out-Null
+        $lv.Columns.Add("Nome Compart.", 135) | Out-Null
         [void]$pnlLocal.Controls.Add($lv)
 
         $LoadPrinters = {
             $lv.Items.Clear()
             try {
                 $printers = Get-WmiObject Win32_Printer
+                $portasLprPc = @(Get-NomesPortasMonitor -Monitor "LPR Port")
+                $portasTcpPc = @(Get-NomesPortasMonitor -Monitor "Standard TCP/IP Port")
                 foreach ($p in $printers) {
                     $pName = if ($p.Name) { $p.Name } else { "Sem Nome" }
                     $pPort = if ($p.PortName) { $p.PortName } else { "" }
                     $pShareName = if ($p.ShareName) { $p.ShareName } else { "" }
                     $isShared = if ($p.Shared) { "Sim" } else { "Não" }
+                    $pTipo = Get-TipoPortaImpressora -Porta $pPort -PortasLpr $portasLprPc -PortasTcp $portasTcpPc
 
                     $item = New-Object System.Windows.Forms.ListViewItem($pName)
+                    $item.SubItems.Add($pTipo) | Out-Null
                     $item.SubItems.Add($pPort) | Out-Null
                     $item.SubItems.Add($isShared) | Out-Null
                     $item.SubItems.Add($pShareName) | Out-Null
-                    
+                    $item.Tag = [PSCustomObject]@{ Nome = $pName; Porta = $pPort; Tipo = $pTipo }
+
                     if ($p.Shared) {
                         $item.ForeColor = [System.Drawing.Color]::PaleGreen
+                    }
+                    elseif ($pTipo -eq "LPR") {
+                        $item.ForeColor = [System.Drawing.Color]::LightSkyBlue
                     }
                     [void]$lv.Items.Add($item)
                 }
@@ -8622,8 +8805,29 @@ function Show-PrinterManager {
         $lblSep.Location = '15,390'; $lblSep.Size = '705,20'; $lblSep.ForeColor = 'Gray'
         [void]$pnlLocal.Controls.Add($lblSep)
 
+        # Atalho para a janela das portas LPR, ja com a impressora selecionada
+        $abrirPortasLprLocal = {
+            $portaLocal = ""
+            if ($lv.SelectedItems.Count -gt 0 -and "$($lv.SelectedItems[0].Tag.Tipo)" -eq "LPR") { $portaLocal = $lv.SelectedItems[0].Tag.Porta }
+            Show-PortasLpr -Dono $Script:PrinterManagerForm -SelecionarPorta $portaLocal
+            # A troca de IP pode renomear a porta
+            &$LoadPrinters
+        }
+        $btnLprLocal = New-Object System.Windows.Forms.Button
+        $btnLprLocal.Text = "PORTAS LPR (TROCAR IP)"; $btnLprLocal.Location = '15,420'; $btnLprLocal.Size = '345,45'
+        $btnLprLocal.BackColor = [System.Drawing.Color]::FromArgb(25, 90, 120); $btnLprLocal.FlatStyle = 'Flat'; $btnLprLocal.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
+        $btnLprLocal.Cursor = 'Hand'; $btnLprLocal.ForeColor = 'White'; $btnLprLocal.FlatAppearance.BorderSize = 0
+        $btnLprLocal.FlatAppearance.MouseOverBackColor = [System.Drawing.Color]::FromArgb(40, 110, 145)
+        $btnLprLocal.FlatAppearance.MouseDownBackColor = [System.Drawing.Color]::FromArgb(15, 70, 95)
+        $btnLprLocal.Add_Click($abrirPortasLprLocal)
+        $lv.Add_DoubleClick({
+            if ($lv.SelectedItems.Count -gt 0 -and "$($lv.SelectedItems[0].Tag.Tipo)" -eq "LPR") { & $abrirPortasLprLocal }
+        })
+        if ($Script:ToolTip) { $Script:ToolTip.SetToolTip($btnLprLocal, "Abre as portas LPR já com a impressora LPR selecionada: troca o IP, acha o PC pelo MAC, imprime teste e remove portas sem uso. Dois cliques numa impressora LPR fazem o mesmo.") }
+        [void]$pnlLocal.Controls.Add($btnLprLocal)
+
         $btnSpool = New-Object System.Windows.Forms.Button
-        $btnSpool.Text = "REINICIAR SPOOLER DE IMPRESSÃO"; $btnSpool.Location = '15,420'; $btnSpool.Size = '705,45'
+        $btnSpool.Text = "REINICIAR SPOOLER DE IMPRESSÃO"; $btnSpool.Location = '375,420'; $btnSpool.Size = '345,45'
         $btnSpool.BackColor = [System.Drawing.Color]::FromArgb(50, 55, 60); $btnSpool.FlatStyle = 'Flat'; $btnSpool.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
         $btnSpool.Cursor = 'Hand'; $btnSpool.ForeColor = 'White'; $btnSpool.FlatAppearance.BorderSize = 0
         $btnSpool.FlatAppearance.MouseOverBackColor = [System.Drawing.Color]::FromArgb(70, 75, 80)
