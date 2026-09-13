@@ -154,6 +154,36 @@ function Test-DownloadIntegrity {
     return $true
 }
 
+function Save-DownloadExtras {
+    # Arquivos que vao junto dentro da pasta extraida de uma versao especifica
+    # (ex.: AjustesInstalacao.exe do Concentrador 1.3.68.0).
+    # Devolve a lista de falhas; vazia quando tudo foi baixado.
+    param([string]$Pasta, $Extras)
+    $falhas = @()
+    foreach ($extra in @($Extras)) {
+        if ($null -eq $extra) { continue }
+        $destino = Join-Path $Pasta $extra.File
+        try {
+            [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+            Log-Message "INFO" "Baixando $($extra.File) para a pasta $(Split-Path $Pasta -Leaf)..."
+            $wc = New-Object System.Net.WebClient
+            try { $wc.DownloadFile($extra.Url, $destino) }
+            finally { $wc.Dispose() }
+            if (-not (Test-DownloadIntegrity -Path $destino)) {
+                Remove-Item -LiteralPath $destino -Force -ErrorAction SilentlyContinue
+                throw "o arquivo baixado veio corrompido ou inválido"
+            }
+            Unblock-File -LiteralPath $destino -ErrorAction SilentlyContinue
+            Log-Message "SUCESSO" "$($extra.File) colocado na pasta $(Split-Path $Pasta -Leaf)"
+        }
+        catch {
+            $falhas += "$($extra.File): $($_.Exception.Message)"
+            Log-Message "ERRO" "Falha ao baixar $($extra.File): $($_.Exception.Message)"
+        }
+    }
+    return $falhas
+}
+
 function ConvertTo-Mascara {
     param([int]$Prefixo)
     try {
@@ -8000,7 +8030,19 @@ function Start-Download {
                     else {
                         Rename-Item -Path $tempPath -NewName $folderName
                     }
-                    
+
+                    # Arquivos que vao junto na pasta extraida (so algumas versoes, como a
+                    # Concentrador 1.3.68.0 com o AjustesInstalacao.exe), antes de abrir a pasta
+                    if ($null -ne $Script:DownloadExtras) {
+                        $Button.Text = "Baixando ajustes..."
+                        [System.Windows.Forms.Application]::DoEvents()
+                        $falhasExtras = @(Save-DownloadExtras -Pasta $finalPath -Extras $Script:DownloadExtras)
+                        if ($falhasExtras.Count -gt 0) {
+                            $linksExtras = (@($Script:DownloadExtras) | ForEach-Object { $_.Url }) -join "`n"
+                            [System.Windows.Forms.MessageBox]::Show("A pasta foi extraída, mas não deu para baixar o arquivo de ajuste:`n`n$($falhasExtras -join "`n")`n`nBaixe manualmente e coloque na pasta $folderName :`n$linksExtras", "Arquivo de ajuste", "OK", "Warning") | Out-Null
+                        }
+                    }
+
                     if (-not $Script:DeployMode) {
                         Invoke-Item $finalPath
                         $Button.Text = "Pasta Aberta"
@@ -8175,6 +8217,10 @@ function Open-Selector {
         $versions += @{Name = "Totem 1.0.88.44"; Url = "https://github.com/VMazza10/Preparador-de-Ambiente-XMenu/releases/download/Tablet_totem/Totem.1.0.88.44.zip"; File = "Totem_1.0.88.44.zip" }
     }
     else {
+        # A 1.3.68.0 precisa do AjustesInstalacao.exe dentro da pasta extraida
+        $versions += @{Name = "Concentrador v1.3.68.0"; Url = "https://netcontroll.com.br/util/instaladores/Concentrador/1.3.68.0/Concentrador.zip"; File = "Concentrador.1.3.68.0.zip"
+            Extras = @(@{ Url = "https://netcontroll.com.br/util/instaladores/Concentrador/1.3.68.0/AjustesInstalacao.exe"; File = "AjustesInstalacao.exe" })
+        }
         $versions += @{Name = "Concentrador v1.3.63.0"; Url = "https://github.com/VMazza10/Preparador-de-Ambiente-XMenu/releases/download/Concentrador_files/Concentrador.1.3.63.0.zip"; File = "Concentrador.1.3.63.0.zip" }
         $versions += @{Name = "Concentrador v1.3.59.0"; Url = "https://github.com/VMazza10/Preparador-de-Ambiente-XMenu/releases/download/Concentrador_files/Concentrador.1.3.59.0.zip"; File = "Concentrador.1.3.59.0.zip" }
         $versions += @{Name = "Concentrador v1.3.55.0"; Url = "https://github.com/VMazza10/Preparador-de-Ambiente-XMenu/releases/download/Concentrador_files/Concentrador.1.3.55.0.zip"; File = "Concentrador.1.3.55.0.zip" }
@@ -8194,7 +8240,7 @@ function Open-Selector {
     $btn.Add_Click({
             $selected = $versions[$cb.SelectedIndex]
             $deployFlag = if ($null -ne $chkDeploy) { $chkDeploy.Checked } else { $false }
-            $fSel.Tag = @{ Url = $selected.Url; File = $selected.File; Name = $selected.Name; Deploy = $deployFlag }
+            $fSel.Tag = @{ Url = $selected.Url; File = $selected.File; Name = $selected.Name; Deploy = $deployFlag; Extras = $selected.Extras }
             $fSel.DialogResult = 'OK'
             $fSel.Close()
         })
@@ -8269,8 +8315,11 @@ function Open-Selector {
         # Ativa modo deploy para nao abrir pasta automaticamente
         $Script:DeployMode = $fSel.Tag.Deploy -and ($Type -eq "PDV" -or $Type -eq "LinkXMenu")
         
-        Start-Download $fSel.Tag.Url $fSel.Tag.File $Button
-        
+        # Extras da versao escolhida (so algumas tem): o Start-Download coloca na pasta extraida
+        $Script:DownloadExtras = $fSel.Tag.Extras
+        try { Start-Download $fSel.Tag.Url $fSel.Tag.File $Button }
+        finally { $Script:DownloadExtras = $null }
+
         # Deploy automatico com backup se checkbox marcado
         if ($Script:DeployMode) {
             if ($Button.Text -ne "Erro" -and $Button.Text -ne "Erro Fatal" -and $Button.Text -ne "Cancelado" -and $Button.Text -ne "Erro ZIP") {
@@ -9081,20 +9130,32 @@ $Script:ToolTip.SetToolTip($bClock, "Liga o serviço de horário, aponta para o 
 $bClock.Add_Click({ Invoke-ClockSync })
 [void]$tbl.Controls.Add($bClock)
 
-Log-Message "INFO" "XMenu System Manager v5.0 - REVENDA"
+# Mensagem de abertura: explica o programa para quem abre pela primeira vez
+Log-Message "INFO" "XMenu System Manager v5.0 - REVENDA - preparo e suporte de computadores com XMenu e NetPDV"
 Log-Message "LOG" "==============================================================="
-Log-Message "SUCESSO" "[NOVIDADE] Nova aba 'Drivers de Impressoras' no Gerenciador!"
-Log-Message "SUCESSO" "           - Download direto de drivers e utilitários de configuração."
+Log-Message "LOG" "COMO USAR"
+Log-Message "LOG" "  PREPARAR AMBIENTE WINDOWS .. ajusta energia, UAC e desempenho do PC num clique"
+Log-Message "LOG" "  BANCO DE DADOS ............. instaladores do SQL Server"
+Log-Message "LOG" "  PROGRAMAS NETCONTROLL ...... NetPDV, Concentrador, Link XMenu, XBot, XTag, Tablet e Totem"
+Log-Message "LOG" "  EXTERNOS ................... acesso remoto, Chrome, TEF HUB, balança e ferramentas de rede"
+Log-Message "LOG" "  SUPORTE E DIAGNÓSTICO ...... impressoras, rede, SQL, backup, XMLs e reparos do Windows"
+Log-Message "LOG" "  Passe o mouse sobre um botão para ver o que ele faz antes de clicar."
 Log-Message "LOG" "---------------------------------------------------------------"
-Log-Message "LOG" "Este utilitário automatiza a configuração de ambientes XMenu,"
-Log-Message "LOG" "garantindo que o Windows esteja otimizado para máxima performance."
-Log-Message "LOG" ""
-Log-Message "INFO" "[1] PREPARO: Otimização de UAC, Energia e Performance em um clique."
-Log-Message "INFO" "[2] DOWNLOADS: Acesso rápido a instaladores (SQL, PDV, XBot, etc)."
-Log-Message "INFO" "[3] DIAGNÓSTICO: Auditoria de Hardware e Scanner de Rede Profissional."
-Log-Message "INFO" "[4] MANUTENÇÃO: Reparos de Rede, Spooler e do Sistema Windows."
-Log-Message "LOG" "==============================================================="
-Log-Message "SUCESSO" "Sistema pronto para suporte técnico."
+Log-Message "LOG" "NOVO NA v5.0"
+Log-Message "SUCESSO" "  Baixar XMLs NFC-e: por série, período ou chave, em .zip pronto para o contador"
+Log-Message "SUCESSO" "  Backup do Banco NetWebPDV: backup completo com o banco no ar, sem parar o serviço"
+Log-Message "SUCESSO" "  Impressoras LPR: cria a impressora, imprime teste e corrige a porta quando o IP muda"
+Log-Message "SUCESSO" "  Drivers de impressora: pesquisa por marca ou modelo"
+Log-Message "LOG" "---------------------------------------------------------------"
+Log-Message "LOG" "Downloads, XMLs e backups ficam em: Área de Trabalho > Arquivos Xmenu"
+Log-Message "LOG" "O registro de cada sessão fica em: C:\Arquivos Xmenu\Logs"
+$ehAdmin = $false
+try { $ehAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator) } catch {}
+if ($ehAdmin) { Log-Message "SUCESSO" "Pronto para usar (aberto como administrador)." }
+else {
+    Log-Message "ERRO" "Aberto SEM permissão de administrador: o preparo, os reparos e as impressoras podem falhar."
+    Log-Message "ERRO" "Feche e abra de novo com o botão direito > Executar como administrador."
+}
 
 $form.Add_Shown({ $this.ActiveControl = $null })
 [void]$form.ShowDialog()
