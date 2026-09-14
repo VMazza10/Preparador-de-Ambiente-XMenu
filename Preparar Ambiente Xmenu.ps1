@@ -6908,6 +6908,228 @@ function Show-PrinterScanner {
 }
 
 # -----------------------------------------------------------------------------
+# CATALOGO DE DRIVERS
+# Uma lista so para a aba Drivers e para o BAIXAR DRIVER da nova impressora LPR
+# -----------------------------------------------------------------------------
+
+function Get-CatalogoDrivers {
+    # Devolve Secao / CorSecao / Tipo (Download ou Site) / Texto / Url / Arquivo / Cor, na ordem da aba
+    $baseUrl = "https://raw.githubusercontent.com/Delutto/thermal_printers/main"
+    $xtagBaseUrl = "https://raw.githubusercontent.com/ElginDeveloperCommunity/Impressoras/master/Impressoras%20de%20Etiqueta"
+    $lista = New-Object System.Collections.Generic.List[object]
+    $secao = ""; $corSecao = $null
+    $baixar = { param([string]$Texto, [string]$Url, [string]$Arquivo, $Cor) $lista.Add([PSCustomObject]@{ Secao = $secao; CorSecao = $corSecao; Tipo = 'Download'; Texto = $Texto; Url = $Url; Arquivo = $Arquivo; Cor = $Cor }) }
+    $site = { param([string]$Texto, [string]$Url, $Cor) $lista.Add([PSCustomObject]@{ Secao = $secao; CorSecao = $corSecao; Tipo = 'Site'; Texto = $Texto; Url = $Url; Arquivo = ""; Cor = $Cor }) }
+    $rgb = { param($R, $G, $B) [System.Drawing.Color]::FromArgb($R, $G, $B) }
+
+    $colorElgin = & $rgb 25 80 140; $colorBema = & $rgb 30 100 60; $colorEpson = & $rgb 80 40 120; $colorTanca = & $rgb 140 70 20
+    $colorElginUtil = & $rgb 15 60 110; $colorBemaUtil = & $rgb 20 80 45; $colorEpsonUtil = & $rgb 60 25 95; $colorTancaUtil = & $rgb 110 50 15
+
+    $secao = "ELGIN"; $corSecao = & $rgb 80 160 255
+    & $baixar "  [DRIVER] Elgin i9 / i7  (v1.7.3)" "$baseUrl/Elgin/Elgin_i7_i9_v1.7.3.exe" "Elgin_i7_i9_v1.7.3.exe" $colorElgin
+    & $baixar "  [DRIVER] Elgin i8  (v7.1.7)" "$baseUrl/Elgin/Elgin_i8_v7.1.7.exe" "Elgin_i8_v7.1.7.exe" $colorElgin
+    & $baixar "  [UTILITÁRIO] Elgin i9 Utility  (v1.2.2.24)" "https://github.com/VMazza10/Preparador-de-Ambiente-XMenu/releases/download/Chrome/UTILITY.ELGIN.I9.E.I7.1.exe" "UTILITY.ELGIN.I9.E.I7.1.exe" $colorElginUtil
+    & $baixar "  [UTILITÁRIO] Elgin i7 / i8 Utility  (v3.2)" "$baseUrl/Utilities/Elgin_i7-i8_Utility_v3.2.exe" "Elgin_i7-i8_Utility_v3.2.exe" $colorElginUtil
+
+    $secao = "BEMATECH"; $corSecao = & $rgb 80 200 120
+    & $baixar "  [DRIVER] Bematech MP-4200 TH / MP-2500 / MP-4000  (Spooler x64 v4.4.0.3)" "$baseUrl/Bematech/BematechSpoolerDrivers_x64_v4.4.0.3.exe" "BematechSpoolerDrivers_x64_v4.4.0.3.exe" $colorBema
+    & $baixar "  [DRIVER] Bematech MP-4200 HS  (v1.7.7)" "$baseUrl/Bematech/Bematech%20MP-4200-HS_Driver_v1.7.7.exe" "Bematech_MP-4200-HS_Driver_v1.7.7.exe" $colorBema
+    & $baixar "  [DRIVER] Bematech MP-2800 TH  (Spooler v1.3)" "$baseUrl/Bematech/Bematech_MP_2800_SpoolerDrivers_v1.3.exe" "Bematech_MP_2800_SpoolerDrivers_v1.3.exe" $colorBema
+    & $baixar "  [UTILITÁRIO] Bematech Utility  (v2.10.04 x64)" "$baseUrl/Utilities/Bematech_Utility_v2.10.04_x64.exe" "Bematech_Utility_v2.10.04_x64.exe" $colorBemaUtil
+    & $baixar "  [UTILITÁRIO] Bematech MP-2800 TH Utility  (v1.4)" "$baseUrl/Utilities/Bematech_MP-2800_TH_Utility_v1.4.exe" "Bematech_MP-2800_TH_Utility_v1.4.exe" $colorBemaUtil
+
+    $secao = "EPSON"; $corSecao = & $rgb 180 120 255
+    & $baixar "  [DRIVER] Epson TM-T20  (APD v5.6.0.0)" "$baseUrl/Epson/Epson_TM-T20_v5.6.0.0.exe" "Epson_TM-T20_v5.6.0.0.exe" $colorEpson
+    & $baixar "  [DRIVER] Epson TM-T20X  (APD v6.1.0.0)" "$baseUrl/Epson/Epson_TM-T20X_v6.1.0.0.exe" "Epson_TM-T20X_v6.1.0.0.exe" $colorEpson
+    & $baixar "  [DRIVER] Epson TM-T20X II  (APD v6.9.1.0)" "$baseUrl/Epson/Epson_TM-20X-II_Driver_v6.9.1.0.exe" "Epson_TM-20X-II_Driver_v6.9.1.0.exe" $colorEpson
+    & $baixar "  [UTILITÁRIO] Epson NetConfig  (v4.9.5)" "$baseUrl/Utilities/Epson_NetConfig_v4_9_5.exe" "Epson_NetConfig_v4_9_5.exe" $colorEpsonUtil
+
+    $secao = "TANCA"; $corSecao = & $rgb 255 160 60
+    & $baixar "  [DRIVER] Tanca TP-620  (v6.1.0)" "$baseUrl/Tanca/Tanca_TP-620_Driver_v6.1.0.exe" "Tanca_TP-620_Driver_v6.1.0.exe" $colorTanca
+    & $baixar "  [DRIVER] Tanca TP-650  (v2.11)" "$baseUrl/Tanca/Tanca_TP-650_DriverInstall_v2.11.exe" "Tanca_TP-650_DriverInstall_v2.11.exe" $colorTanca
+    & $baixar "  [UTILITÁRIO] Tanca TP-620 Utility  (v3.2.0.1)" "$baseUrl/Utilities/Tanca_TP-620_Utility_v3.2.0.1.exe" "Tanca_TP-620_Utility_v3.2.0.1.exe" $colorTancaUtil
+    & $baixar "  [UTILITÁRIO] Tanca TP-650 Printer Tool  (v1.48E)" "$baseUrl/Utilities/Tanca_TP-650_PrinterTool_1.48E.exe" "Tanca_TP-650_PrinterTool_1.48E.exe" $colorTancaUtil
+
+    $colorDaruma = & $rgb 130 20 50; $colorSweda = & $rgb 100 100 30; $colorCtrlID = & $rgb 60 60 80
+    $secao = "DARUMA / SWEDA / CONTROL ID"; $corSecao = & $rgb 220 220 220
+    & $baixar "  [DRIVER] Daruma DR800  (Spooler v2.0.1.7)" "$baseUrl/Daruma/Daruma_800_Spooler_Driver_v2.0.1.7.exe" "Daruma_800_Spooler_Driver_v2.0.1.7.exe" $colorDaruma
+    & $baixar "  [DRIVER] Sweda SI-300 / SI-300E / SI-300W  (v1.2.0)" "$baseUrl/Sweda/Sweda_SI-300_SI-300E_SI-300W_v1.2.0.exe" "Sweda_SI-300_SI-300E_SI-300W_v1.2.0.exe" $colorSweda
+    & $baixar "  [DRIVER] Control iD Print iD / Print iD Touch  (v1.1.10.2)" "$baseUrl/PrintID/Print_iD_%26_Print_iD_Touch_v1.1.10.2.exe" "Print_iD_v1.1.10.2.exe" $colorCtrlID
+    & $baixar "  [UTILITÁRIO] Daruma Utility  (v2.20.9)" "$baseUrl/Utilities/Daruma_Utility_v2.20.9.exe" "Daruma_Utility_v2.20.9.exe" $colorDaruma
+    & $baixar "  [UTILITÁRIO] Sweda Utility  (v2.03)" "$baseUrl/Utilities/Sweda_Utility_v2.03.exe" "Sweda_Utility_v2.03.exe" $colorSweda
+    & $baixar "  [UTILITÁRIO] Control iD Utility  (v1.0)" "$baseUrl/Utilities/PrintID_Utility_v1.0.exe" "PrintID_Utility_v1.0.exe" $colorCtrlID
+
+    # Tomate MDK, Knup, Kmex, Evadin e a maioria das 80mm chinesas usam
+    # o mesmo "POS Printer Driver" generico.
+    $colorPos = & $rgb 150 45 30; $colorPosUtil = & $rgb 115 30 20; $colorC3 = & $rgb 20 85 115
+    $secao = "TOMATE / C3TECH / GENÉRICAS 80mm"; $corSecao = & $rgb 255 130 100
+    & $baixar "  [DRIVER] Tomate MDK-006 / 007 / 008 / 080 / 081  (POS-80 genérico v11.3)" "$baseUrl/POS/POS_Printer_Driver_Setup_v11.3.0.0.exe" "POS_Printer_Driver_Setup_v11.3.0.0.exe" $colorPos
+    & $baixar "  [DRIVER] Knup / Kmex / Evadin / demais POS-58 e POS-80  (mesmo driver v11.3)" "$baseUrl/POS/POS_Printer_Driver_Setup_v11.3.0.0.exe" "POS_Printer_Driver_Setup_v11.3.0.0.exe" $colorPos
+    & $baixar "  [UTILITÁRIO] POS Utilities  (teste, autoteste e configuração POS-80)" "$baseUrl/Utilities/POS_Utilities.exe" "POS_Utilities.exe" $colorPosUtil
+    & $baixar "  [DRIVER] C3Tech IT-100  (pacote oficial C3Tech - RAR, ~87 MB)" "https://c3technology.com.br/download/DRIVES%20IT-100.rar" "C3Tech_IT-100_Drivers.rar" $colorC3
+    & $baixar "  [DRIVER] C3Tech IT-110  (drivers + utilitários oficiais - ZIP, ~103 MB)" "https://c3technology.com.br/download/DRIVES%20E%20UTILITARIOS%20IT-110.zip" "C3Tech_IT-110_Drivers_Utilitarios.zip" $colorC3
+    & $site "  [SITE] Tomate - suporte oficial (tutoriais e drivers por modelo)" "https://tomate.tv/support" $colorPosUtil
+
+    $colorFeasso = & $rgb 120 60 130; $colorJetway = & $rgb 35 95 105
+    $secao = "FEASSO / JETWAY"; $corSecao = & $rgb 200 150 255
+    & $baixar "  [DRIVER] Feasso F-IMTER-01  (v1.7)" "$baseUrl/Feasso/Feasso_F-IMTER-01_Driver_v1.7.exe" "Feasso_F-IMTER-01_Driver_v1.7.exe" $colorFeasso
+    & $baixar "  [DRIVER] Feasso F-IMTER-02  (v2.0)" "$baseUrl/Feasso/Feasso_F-IMTER-02_Driver_v2.0.exe" "Feasso_F-IMTER-02_Driver_v2.0.exe" $colorFeasso
+    & $baixar "  [DRIVER] Feasso F-IMTER-03  (v1.5)" "$baseUrl/Feasso/Feasso_F-IMTER-03_Driver_v1.5.exe" "Feasso_F-IMTER-03_Driver_v1.5.exe" $colorFeasso
+    & $baixar "  [DRIVER] Jetway JP-500  (v7.17)" "$baseUrl/Jetway/Jetway_JP-500_Printer_Driver_v7.17.exe" "Jetway_JP-500_Printer_Driver_v7.17.exe" $colorJetway
+    & $baixar "  [DRIVER] Jetway JP-800  (v2.38E)" "$baseUrl/Jetway/Jetway_JP-800_PrinterDriver_v2.38E.exe" "Jetway_JP-800_PrinterDriver_v2.38E.exe" $colorJetway
+    & $baixar "  [DRIVER] Jetway JMP-100  (v2.61J)" "$baseUrl/Jetway/Jetway_JMP-100_Driver_v2.61J.exe" "Jetway_JMP-100_Driver_v2.61J.exe" $colorJetway
+
+    $colorGertec = & $rgb 150 100 20; $colorDiebold = & $rgb 45 70 130; $colorPerto = & $rgb 90 45 60
+    $secao = "GERTEC / DIEBOLD / DIMEP / PERTO"; $corSecao = & $rgb 255 200 90
+    & $baixar "  [DRIVER] Gertec G250  (v1.0)" "$baseUrl/Gertec/Gertec_G250_Driver_v1.0.exe" "Gertec_G250_Driver_v1.0.exe" $colorGertec
+    & $baixar "  [UTILITÁRIO] Gertec G250 Utility  (v2.57)" "$baseUrl/Utilities/Gertec_G250_Utility_v2.57.exe" "Gertec_G250_Utility_v2.57.exe" $colorGertec
+    & $baixar "  [DRIVER] Diebold Mecaf / Perfecta  (v1.34 drv 1.9)" "$baseUrl/Diebold/Diebold_Printers_v1.34_drv_1.9.exe" "Diebold_Printers_v1.34_drv_1.9.exe" $colorDiebold
+    & $baixar "  [DRIVER] Diebold IM113ID  (v1.2.0.10 x64)" "$baseUrl/Diebold/Diebold_IM113ID_v1.2.0.10_x64.exe" "Diebold_IM113ID_v1.2.0.10_x64.exe" $colorDiebold
+    & $baixar "  [DRIVER] Dimep D-PRINT DUAL  (v2.1.4.4)" "$baseUrl/Dimep/Dimep_D-PRINT_DUAL_v2.1.4.4.exe" "Dimep_D-PRINT_DUAL_v2.1.4.4.exe" $colorPerto
+    & $baixar "  [DRIVER] Perto PertoPrinter  (v2.5)" "$baseUrl/PertoPrinter/PertoPrinter_Driver_2.5.exe" "PertoPrinter_Driver_2.5.exe" $colorPerto
+
+    $colorStar = & $rgb 25 70 95; $colorWaytec = & $rgb 70 90 40; $colorMenno = & $rgb 100 55 25
+    $secao = "STAR / WAYTEC / MENNO / DASCOM"; $corSecao = & $rgb 140 210 255
+    & $baixar "  [DRIVER] Star (todos os modelos)  (x64 v3.7.2)" "$baseUrl/Star/Star_PrinterDrivers_x64_v3.7.2.exe" "Star_PrinterDrivers_x64_v3.7.2.exe" $colorStar
+    & $baixar "  [DRIVER] Waytec WP-100  (v7.17)" "$baseUrl/Waytec/Waytec_WP-100_Driver_v7.17.exe" "Waytec_WP-100_Driver_v7.17.exe" $colorWaytec
+    & $baixar "  [DRIVER] Waytec WP-50  (v7.17.50)" "$baseUrl/Waytec/WayTec_WP-50_Driver_v7.17.50.exe" "WayTec_WP-50_Driver_v7.17.50.exe" $colorWaytec
+    & $baixar "  [UTILITÁRIO] Waytec Utility  (v3.2.0.1)" "$baseUrl/Utilities/Waytec_Utility_v3.2.0.1.exe" "Waytec_Utility_v3.2.0.1.exe" $colorWaytec
+    & $baixar "  [DRIVER] Menno  (v2.52)" "$baseUrl/Menno/Menno_Printer_Driver_v2.52.exe" "Menno_Printer_Driver_v2.52.exe" $colorMenno
+    & $baixar "  [UTILITÁRIO] Menno Printer Tool  (v1.56)" "$baseUrl/Utilities/Menno_PrinterTool_v1.56.exe" "Menno_PrinterTool_v1.56.exe" $colorMenno
+    & $baixar "  [DRIVER] Dascom DT-210 / DT-230  (v1.0.0.7)" "$baseUrl/Dascom/Dascom_DT-210_DT-230_Driver_v1.0.0.7.exe" "Dascom_DT-210_DT-230_Driver_v1.0.0.7.exe" $colorStar
+
+    $colorXtag = & $rgb 0 140 130; $colorXtagUtil = & $rgb 0 95 90
+    $secao = "IMPRESSORAS XTAG (ETIQUETA)"; $corSecao = & $rgb 100 220 210
+    & $baixar "  [DRIVER] Elgin L42 PRO  (ZIP - contem instalador, v2020.4)" "$xtagBaseUrl/Elgin/L42PRO/Drivers/Windows_DriverL42PRO_V2020.4.zip" "Windows_DriverL42PRO_V2020.4.zip" $colorXtag
+    & $baixar "  [DRIVER] Elgin L42 PRO FULL  (v2022.1)" "$xtagBaseUrl/Elgin/L42PRO%20FULL/Drivers/L42PRO%20FULL_Windows_driver_2022.1.exe" "Elgin_L42PRO_FULL_Windows_driver_2022.1.exe" $colorXtag
+    & $baixar "  [DRIVER] Elgin L42 DT  (v7.4.3)" "$xtagBaseUrl/Elgin/L42DT/Drivers/Windows_DriverL42DT_7.4.3_M-5.exe" "Elgin_L42DT_Windows_driver_7.4.3.exe" $colorXtag
+    & $baixar "  [DRIVER] Zebra ZD220 / ZD230  (ZIP - contem instalador)" "https://www.zebra.com/content/dam/support-dam/en/driver/unrestricted/0002/zddriver-v1062628275-certified.zip" "Zebra_ZD220_ZD230_Driver.zip" $colorXtag
+    & $baixar "  [DRIVER] Argox  (Todos os modelos, v2022.1)" "$baseUrl/Argox/Argox_PrinterDrivers_v2022.1.exe" "Argox_PrinterDrivers_v2022.1.exe" $colorXtag
+    & $baixar "  [DRIVER] Gainscha  (Todos os modelos, v2020.1)" "$baseUrl/Gainscha/Gainscha_GPrinterDrivers_v2020.1.exe" "Gainscha_GPrinterDrivers_v2020.1.exe" $colorXtag
+    & $baixar "  [DRIVER] Zetex Z60XT  (ZIP - Drive, ~225 MB)" "https://drive.usercontent.google.com/download?id=1wWLiTWrtHCBRP9L0P9GG2eRKGEgfo2HJ&export=download&confirm=t" "Zetex_Z60XT_Driver.zip" $colorXtag
+    & $baixar "  [UTILITÁRIO] Gerenciador Elgin L42 PRO FULL  (v1.5.1)" "$xtagBaseUrl/Elgin/L42PRO%20FULL/Utilit%C3%A1rios/GerenciadorL42PRO_Full_1.5.1.exe" "GerenciadorL42PRO_Full_1.5.1.exe" $colorXtagUtil
+    & $baixar "  [UTILITÁRIO] Gerenciador Elgin L42 DT  (v1.5.6)" "$xtagBaseUrl/Elgin/L42DT/Utilit%C3%A1rios/GerenciadorL42DT_Full_1.5.6.exe" "GerenciadorL42DT_Full_1.5.6.exe" $colorXtagUtil
+
+    return $lista.ToArray()
+}
+
+function Invoke-BaixarDriver {
+    # Baixa um driver do catalogo com o progresso no texto de $Progresso (botao ou
+    # label), confere o arquivo e abre: instalador roda, ZIP extrai e abre a pasta,
+    # RAR abre no programa associado. Erro sobe para quem chamou.
+    # Devolve hashtable: Caminho / Acao (instalador, pasta ou rar)
+    param([string]$Url, [string]$Arquivo, $Progresso = $null, [string]$Prefixo = "")
+    $dest = Join-Path $Script:DownloadFolder $Arquivo
+    if (-not (Test-Path -LiteralPath $Script:DownloadFolder)) { New-Item -ItemType Directory -Path $Script:DownloadFolder -Force | Out-Null }
+    Log-Message "INFO" "Baixando driver: $Arquivo"
+    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+    if ($null -ne $Progresso) { $Progresso.Text = "$Prefixo  Iniciando download..." }
+
+    # Download assincrono com a barra de progresso no texto do controle
+    $Script:DrvProgresso = $Progresso
+    $Script:DrvPrefixo = $Prefixo
+    $Script:DrvComplete = $false
+    $Script:DrvError = $null
+    $wc = New-Object System.Net.WebClient
+    $wc.Add_DownloadProgressChanged({
+            param($s, $e)
+            if ($null -eq $Script:DrvProgresso) { return }
+            $pct = $e.ProgressPercentage
+            $barSize = 14
+            $filled = [Math]::Floor($pct / (100 / $barSize))
+            $bar = ("|" * $filled) + ("." * ($barSize - $filled))
+            $mb = [Math]::Round($e.BytesReceived / 1MB, 1)
+            $totMb = [Math]::Round($e.TotalBytesToReceive / 1MB, 1)
+            $Script:DrvProgresso.Text = "$($Script:DrvPrefixo)  [$bar] $pct%   ($mb / $totMb MB)"
+        })
+    $wc.Add_DownloadFileCompleted({
+            param($s, $e)
+            if ($e.Error) { $Script:DrvError = $e.Error }
+            $Script:DrvComplete = $true
+        })
+    try {
+        $wc.DownloadFileAsync((New-Object Uri($Url.Replace(" ", "%20"))), $dest)
+        while (-not $Script:DrvComplete) {
+            [System.Windows.Forms.Application]::DoEvents()
+            Start-Sleep -Milliseconds 15
+        }
+    }
+    finally { $wc.Dispose() }
+    if ($Script:DrvError) { throw $Script:DrvError }
+
+    if (-not (Test-DownloadIntegrity -Path $dest)) {
+        Remove-Item $dest -Force -ErrorAction SilentlyContinue
+        throw "Arquivo baixado esta corrompido ou invalido (link quebrado ou pagina de erro)."
+    }
+    Log-Message "SUCESSO" "Download concluido: $Arquivo"
+    Unblock-File -Path $dest -ErrorAction SilentlyContinue
+
+    if ($Arquivo.EndsWith(".zip")) {
+        # ZIP nao e instalador: extrai e abre a pasta com o conteudo.
+        Log-Message "ZIP" "Extraindo arquivo: $Arquivo"
+        if ($null -ne $Progresso) { $Progresso.Text = "$Prefixo  Extraindo $Arquivo ..." }
+        [System.Windows.Forms.Application]::DoEvents()
+
+        Add-Type -AssemblyName System.IO.Compression.FileSystem
+        $folderName = [System.IO.Path]::GetFileNameWithoutExtension($Arquivo)
+        $finalPath = Join-Path $Script:DownloadFolder $folderName
+        $tempPath = Join-Path $Script:DownloadFolder "temp_$folderName"
+
+        if (Test-Path $tempPath) { Remove-Item $tempPath -Recurse -Force | Out-Null }
+        if (Test-Path $finalPath) { Remove-Item $finalPath -Recurse -Force | Out-Null }
+        [System.Windows.Forms.Application]::DoEvents()
+
+        [System.IO.Compression.ZipFile]::ExtractToDirectory($dest, $tempPath)
+        [System.Windows.Forms.Application]::DoEvents()
+
+        # Se o ZIP tem uma pasta raiz unica, sobe um nivel
+        $items = Get-ChildItem -Path $tempPath
+        if ($items.Count -eq 1 -and $items[0].PSIsContainer) {
+            Move-Item -Path $items[0].FullName -Destination $finalPath
+            Remove-Item $tempPath -Recurse -Force -ErrorAction SilentlyContinue | Out-Null
+        }
+        else {
+            Rename-Item -Path $tempPath -NewName $folderName
+        }
+
+        Invoke-Item $finalPath
+        Log-Message "SUCESSO" "Extraido com sucesso para: $folderName"
+        return @{ Caminho = $finalPath; Acao = 'pasta' }
+    }
+    if ($Arquivo.EndsWith(".rar")) {
+        # RAR nao tem suporte nativo no Windows: abre com o programa associado.
+        if ($null -ne $Progresso) { $Progresso.Text = "$Prefixo  Abrindo $Arquivo ..." }
+        Invoke-Item $dest
+        Log-Message "SUCESSO" "Arquivo RAR aberto: $Arquivo"
+        return @{ Caminho = $dest; Acao = 'rar' }
+    }
+    if ($null -ne $Progresso) { $Progresso.Text = "$Prefixo  Instalando $Arquivo ..." }
+    # WorkingDirectory na pasta de downloads: instaladores auto-extraiveis (WinRAR SFX)
+    # passam a sugerir essa pasta em vez de C:\WINDOWS\system32.
+    Start-Process -FilePath $dest -WorkingDirectory $Script:DownloadFolder
+    Log-Message "SUCESSO" "Instalador iniciado: $Arquivo"
+    return @{ Caminho = $dest; Acao = 'instalador' }
+}
+
+function Show-ErroDownloadDriver {
+    param($Erro, [string]$Arquivo, $Dono = $null)
+    $errMsg = "$($Erro.Exception.Message)"
+    if ($errMsg -match 'v[ií]rus|software.*indesejado|potentially unwanted|unwanted software') {
+        Log-Message "ERRO" "Windows Defender bloqueou o arquivo (provavel falso positivo): $Arquivo"
+        [System.Windows.Forms.MessageBox]::Show($Dono,
+            "O Windows Defender bloqueou este driver.`n`n" +
+            "Isso costuma ser um FALSO POSITIVO em instaladores de driver (o arquivo vem de fonte oficial).`n`n" +
+            "A pasta 'Arquivos Xmenu' ja foi adicionada as excecoes do Defender - tente baixar novamente.`n`n" +
+            "Se ainda assim bloquear, restaure o arquivo em: Seguranca do Windows > Protecao contra virus > Historico de protecao (Quarentena).",
+            "Bloqueado pelo Windows Defender", "OK", "Warning") | Out-Null
+    }
+    else {
+        Log-Message "ERRO" "Falha ao baixar driver: $Erro"
+        [System.Windows.Forms.MessageBox]::Show($Dono, "Erro ao baixar o driver: $Erro", "Erro", "OK", "Error") | Out-Null
+    }
+}
+
+# -----------------------------------------------------------------------------
 # FILTRO DA ABA DE DRIVERS
 # -----------------------------------------------------------------------------
 
@@ -7443,16 +7665,37 @@ function Get-DadosOrigemLpr {
 function New-ImpressoraLpr {
     # Porta LPR "IP:FILA" e a impressora usando ela, sem passar pelo assistente do
     # Windows. Add-PrinterPort cria a porta LPR sem reiniciar o spooler.
-    # Devolve hashtable: Porta / Impressora / PortaJaExistia
+    # Devolve hashtable: Porta / Impressora / PortaJaExistia / DriverInstalado
     param([string]$Servidor, [string]$Fila, [string]$Nome, [string]$Driver)
     if ($null -ne (Get-Printer -Name $Nome -ErrorAction SilentlyContinue)) {
         throw "Já existe uma impressora chamada ""$Nome"" neste PC. Escolha outro nome."
     }
+    # Driver antes da porta: se nao instalar, nao sobra porta sem impressora
+    $driverInstalado = Install-DriverWindows -Driver $Driver
     $porta = $Servidor + ":" + $Fila
     $jaExistia = ($null -ne (Get-PrinterPort -Name $porta -ErrorAction SilentlyContinue))
     if (-not $jaExistia) { Add-PrinterPort -Name $porta -LprHostAddress $Servidor -LprQueueName $Fila -ErrorAction Stop }
     Add-Printer -Name $Nome -DriverName $Driver -PortName $porta -ErrorAction Stop
-    return @{ Porta = $porta; Impressora = $Nome; PortaJaExistia = $jaExistia }
+    return @{ Porta = $porta; Impressora = $Nome; PortaJaExistia = $jaExistia; DriverInstalado = $driverInstalado }
+}
+
+function Install-DriverWindows {
+    # Driver que vem com o Windows mas nao fica instalado ("Generic / Text Only"):
+    # instala do repositorio de drivers do proprio Windows. Devolve $true se instalou.
+    param([string]$Driver)
+    if ($null -ne (Get-PrinterDriver -Name $Driver -ErrorAction SilentlyContinue)) { return $false }
+    try { Add-PrinterDriver -Name $Driver -ErrorAction Stop }
+    catch {
+        $erroDriver = $_.Exception.Message
+        # O Generic / Text Only fica no prnge001.inf; pelo nome sozinho alguns Windows nao acham
+        $infGenerico = Join-Path $env:windir "INF\prnge001.inf"
+        if ($Driver -ne "Generic / Text Only" -or -not (Test-Path -LiteralPath $infGenerico)) {
+            throw "Não foi possível instalar o driver ""$Driver"": $erroDriver"
+        }
+        try { Add-PrinterDriver -Name $Driver -InfPath $infGenerico -ErrorAction Stop }
+        catch { throw "Não foi possível instalar o driver ""$Driver"": $($_.Exception.Message)" }
+    }
+    return $true
 }
 
 function Send-TesteImpressao {
@@ -7886,6 +8129,78 @@ function Show-PortasLpr {
                 if ($r -eq [System.Windows.Forms.DialogResult]::Yes) { & $aplicarLpr $selLpr $pc.IP $pc.Mac }
             })
 
+        # Drivers do catalogo (os mesmos da aba Drivers) para baixar. Devolve o item escolhido ou $null.
+        $escolherDriverBaixar = {
+            param($DonoDlg)
+            $dlgDrv = New-ToolForm "Baixar driver" 640 480
+            $dlgDrv.MinimumSize = New-Object System.Drawing.Size(640, 480)
+            New-ToolLabel $dlgDrv "Pesquise a marca ou o modelo da impressora:" 20 16 10 -Negrito | Out-Null
+            $txtBuscaDrv = New-Object System.Windows.Forms.TextBox
+            $txtBuscaDrv.Location = New-Object System.Drawing.Point(20, 46)
+            $txtBuscaDrv.Size = New-Object System.Drawing.Size(584, 26)
+            $txtBuscaDrv.Anchor = 'Top,Left,Right'
+            $txtBuscaDrv.BackColor = [System.Drawing.Color]::FromArgb(20, 24, 34)
+            $txtBuscaDrv.ForeColor = $Script:UiTexto
+            $txtBuscaDrv.BorderStyle = 'FixedSingle'
+            $txtBuscaDrv.Font = New-Object System.Drawing.Font("Segoe UI", 10)
+            [void]$dlgDrv.Controls.Add($txtBuscaDrv)
+            $lvDrv = New-Object System.Windows.Forms.ListView
+            $lvDrv.Location = New-Object System.Drawing.Point(20, 82)
+            $lvDrv.Size = New-Object System.Drawing.Size(584, 290)
+            $lvDrv.Anchor = 'Top,Left,Right,Bottom'
+            $lvDrv.MultiSelect = $false
+            Format-ToolListView $lvDrv
+            [void]$lvDrv.Columns.Add("Marca", 190)
+            [void]$lvDrv.Columns.Add("Driver", 370)
+            [void]$dlgDrv.Controls.Add($lvDrv)
+            $lblContaDrv = New-ToolLabel $dlgDrv "" 20 392 9 -Cor $Script:UiSuave -W 290
+            $lblContaDrv.Anchor = 'Bottom,Left'
+            $btnDrvOk = New-ToolButton $dlgDrv "BAIXAR E INSTALAR" 334 386 170 32 $Script:UiVerde $null ""
+            $btnDrvCanc = New-ToolButton $dlgDrv "CANCELAR" 514 386 90 32 $Script:UiCinza $null ""
+            $btnDrvOk.Anchor = 'Bottom,Right'; $btnDrvCanc.Anchor = 'Bottom,Right'
+
+            $catalogoDrv = @(Get-CatalogoDrivers | Where-Object { $_.Tipo -eq 'Download' -and $_.Texto -match '\[DRIVER\]' })
+            $mostrarDrv = {
+                $lvDrv.BeginUpdate()
+                $lvDrv.Items.Clear()
+                foreach ($drvCat in $catalogoDrv) {
+                    $indiceDrv = ConvertTo-TextoBusca ($drvCat.Secao + " " + $drvCat.Texto + " " + $drvCat.Arquivo)
+                    if (-not (Test-CombinaBusca -Indice $indiceDrv -Busca $txtBuscaDrv.Text)) { continue }
+                    $itDrv = New-Object System.Windows.Forms.ListViewItem($drvCat.Secao)
+                    [void]$itDrv.SubItems.Add(($drvCat.Texto.Trim() -replace '^\[DRIVER\]\s*', ''))
+                    $itDrv.Tag = $drvCat
+                    [void]$lvDrv.Items.Add($itDrv)
+                }
+                $lvDrv.EndUpdate()
+                if ($lvDrv.Items.Count -gt 0) { $lvDrv.Items[0].Selected = $true }
+                $lblContaDrv.Text = "$($lvDrv.Items.Count) de $($catalogoDrv.Count) drivers"
+                $btnDrvOk.Enabled = ($lvDrv.Items.Count -gt 0)
+            }
+            $usarDrv = {
+                if ($lvDrv.SelectedItems.Count -eq 0) { return }
+                $dlgDrv.Tag = $lvDrv.SelectedItems[0].Tag
+                $dlgDrv.DialogResult = 'OK'
+                $dlgDrv.Close()
+            }
+            $btnDrvOk.Add_Click($usarDrv)
+            $lvDrv.Add_DoubleClick($usarDrv)
+            $btnDrvCanc.Add_Click({ $dlgDrv.DialogResult = 'Cancel'; $dlgDrv.Close() })
+            $txtBuscaDrv.Add_TextChanged($mostrarDrv)
+            # Seta para baixo sai da pesquisa e vai para a lista
+            $txtBuscaDrv.Add_KeyDown({
+                    param($s, $e)
+                    if ($e.KeyCode -eq [System.Windows.Forms.Keys]::Down -and $lvDrv.Items.Count -gt 0) { $e.SuppressKeyPress = $true; $lvDrv.Focus() | Out-Null }
+                })
+            $dlgDrv.AcceptButton = $btnDrvOk
+            $dlgDrv.CancelButton = $btnDrvCanc
+            & $mostrarDrv
+            $dlgDrv.Add_Shown({ $txtBuscaDrv.Focus() | Out-Null })
+            $drvEscolhido = $null
+            if ($dlgDrv.ShowDialog($DonoDlg) -eq [System.Windows.Forms.DialogResult]::OK) { $drvEscolhido = $dlgDrv.Tag }
+            $dlgDrv.Dispose()
+            return $drvEscolhido
+        }
+
         # Formulario da nova impressora LPR. Devolve Ip / Fila / Nome / Driver ou $null.
         $pedirNovaLpr = {
             param([string]$IpInicial = "")
@@ -7916,24 +8231,77 @@ function Show-PortasLpr {
             New-ToolLabel $dlg "Driver (o mesmo instalado no PC da impressora):" 20 210 9.5 | Out-Null
             $cmbNovaDriver = New-Object System.Windows.Forms.ComboBox
             $cmbNovaDriver.Location = New-Object System.Drawing.Point(20, 234)
-            $cmbNovaDriver.Width = 480
+            $cmbNovaDriver.Width = 320
             $cmbNovaDriver.DropDownStyle = 'DropDownList'
             $cmbNovaDriver.FlatStyle = 'Flat'
             $cmbNovaDriver.BackColor = [System.Drawing.Color]::FromArgb(20, 24, 34)
             $cmbNovaDriver.ForeColor = $Script:UiTexto
             $driversPc = @()
-            try { $driversPc = @(Get-PrinterDriver -ErrorAction Stop | ForEach-Object { $_.Name } | Sort-Object -Unique) } catch {}
+            try { $driversPc = @(Get-PrinterDriver -ErrorAction Stop | ForEach-Object { $_.Name }) } catch {}
+            # O Generic / Text Only vem com o Windows mas so fica instalado quando alguem usa:
+            # aparece sempre e e instalado na hora de criar a impressora
+            $driversPc = @(@($driversPc) + "Generic / Text Only" | Sort-Object -Unique)
             foreach ($d in $driversPc) { [void]$cmbNovaDriver.Items.Add($d) }
-            if ($cmbNovaDriver.Items.Count -gt 0) {
-                $cmbNovaDriver.SelectedIndex = 0
-                $iGenerico = $cmbNovaDriver.Items.IndexOf("Generic / Text Only")
-                if ($iGenerico -ge 0) { $cmbNovaDriver.SelectedIndex = $iGenerico }
-            }
+            $cmbNovaDriver.SelectedIndex = $cmbNovaDriver.Items.IndexOf("Generic / Text Only")
             [void]$dlg.Controls.Add($cmbNovaDriver)
-            $lblNovaDica = New-ToolLabel $dlg "Se o driver da impressora não aparece na lista, instale pela aba Drivers de Impressoras e abra esta tela de novo." 20 266 8.5 -Cor $Script:UiSuave -W 480
-            $lblNovaDica.Height = 36
+            $btnNovaBaixar = New-ToolButton $dlg "BAIXAR DRIVER..." 350 232 150 30 $Script:UiCinza $null "Baixa o instalador do driver pela mesma lista da aba Drivers. Quando a instalação terminar e você voltar para esta tela, o driver novo já fica selecionado"
+            $textoDicaNova = "Generic / Text Only vem com o Windows e é instalado na hora, se precisar. Para outro modelo use BAIXAR DRIVER: ao terminar a instalação e voltar para esta tela, o driver novo já aparece selecionado."
+            $lblNovaDica = New-ToolLabel $dlg $textoDicaNova 20 266 8.5 -Cor $Script:UiSuave -W 480
+            $lblNovaDica.Height = 50
             $btnNovaCriar = New-ToolButton $dlg "CRIAR IMPRESSORA" 270 324 140 34 $Script:UiVerde $null ""
             $btnNovaCanc = New-ToolButton $dlg "CANCELAR" 420 324 80 34 $Script:UiCinza $null ""
+
+            # Ao voltar para a tela (depois do instalador do fabricante), o driver que apareceu fica selecionado
+            $Script:LprBaixandoDriver = $false
+            $recarregarDriversNova = {
+                if ($Script:LprBaixandoDriver) { return }
+                $atuaisDrv = @()
+                try { $atuaisDrv = @(Get-PrinterDriver -ErrorAction Stop | ForEach-Object { $_.Name }) } catch { return }
+                $novosDrv = @($atuaisDrv | Where-Object { -not $cmbNovaDriver.Items.Contains($_) } | Sort-Object -Unique)
+                if ($novosDrv.Count -eq 0) { return }
+                $todosDrv = @(@($cmbNovaDriver.Items) + $novosDrv | Sort-Object -Unique)
+                $cmbNovaDriver.BeginUpdate()
+                $cmbNovaDriver.Items.Clear()
+                foreach ($nomeDrv in $todosDrv) { [void]$cmbNovaDriver.Items.Add($nomeDrv) }
+                $cmbNovaDriver.EndUpdate()
+                $cmbNovaDriver.SelectedItem = $novosDrv[0]
+                $lblNovaDica.ForeColor = $Script:UiVerde
+                if ($novosDrv.Count -eq 1) { $lblNovaDica.Text = "Driver novo instalado e já selecionado: $($novosDrv[0])." }
+                else { $lblNovaDica.Text = "$($novosDrv.Count) drivers novos instalados ($($novosDrv -join ', ')). O primeiro já está selecionado: confira na lista se é o do modelo." }
+                Log-Message "INFO" ("LPR: driver(s) novo(s) na lista: " + ($novosDrv -join ", "))
+            }
+            $dlg.Add_Activated($recarregarDriversNova)
+            $dlg.Add_FormClosing({
+                    param($s, $e)
+                    if ($Script:LprBaixandoDriver) { $e.Cancel = $true }
+                })
+            $btnNovaBaixar.Add_Click({
+                    if ($Script:LprBaixandoDriver) { return }
+                    $drvBaixar = & $escolherDriverBaixar $dlg
+                    if ($null -eq $drvBaixar) { return }
+                    $nomeBaixar = ($drvBaixar.Texto.Trim() -replace '^\[DRIVER\]\s*', '')
+                    $Script:LprBaixandoDriver = $true
+                    foreach ($b in @($btnNovaBaixar, $btnNovaAchar, $btnNovaCriar, $btnNovaCanc)) { $b.Enabled = $false }
+                    $lblNovaDica.ForeColor = $Script:UiAmarelo
+                    try {
+                        $baixado = Invoke-BaixarDriver -Url $drvBaixar.Url -Arquivo $drvBaixar.Arquivo -Progresso $lblNovaDica -Prefixo "Baixando $($nomeBaixar):"
+                        $lblNovaDica.ForeColor = $Script:UiAmarelo
+                        switch ($baixado.Acao) {
+                            'pasta' { $lblNovaDica.Text = "O driver $nomeBaixar veio em ZIP e a pasta foi aberta. Instale o driver por ela e volte para esta tela: ele aparece selecionado." }
+                            'rar' { $lblNovaDica.Text = "O driver $nomeBaixar veio em RAR e o arquivo foi aberto. Extraia, instale o driver e volte para esta tela: ele aparece selecionado." }
+                            default { $lblNovaDica.Text = "Instalador do $nomeBaixar aberto. Conclua a instalação e volte para esta tela: o driver novo aparece selecionado." }
+                        }
+                    }
+                    catch {
+                        Show-ErroDownloadDriver -Erro $_ -Arquivo $drvBaixar.Arquivo -Dono $dlg
+                        $lblNovaDica.ForeColor = $Script:UiSuave
+                        $lblNovaDica.Text = $textoDicaNova
+                    }
+                    finally {
+                        $Script:LprBaixandoDriver = $false
+                        foreach ($b in @($btnNovaBaixar, $btnNovaAchar, $btnNovaCriar, $btnNovaCanc)) { $b.Enabled = $true }
+                    }
+                })
 
             # O nome acompanha a fila enquanto ninguem mexeu nele
             $Script:LprNomeEditado = $false
@@ -8003,6 +8371,7 @@ function Show-PortasLpr {
                         $macNova = Get-MacDeIP $nova.Ip (arp -a)
                         if ("$macNova" -ne "") { Save-LprMac -Porta $criada.Porta -Mac $macNova }
                     }
+                    if ($criada.DriverInstalado) { Log-Message "INFO" "LPR: driver $($nova.Driver) instalado do repositório do Windows" }
                     Log-Message "SUCESSO" "LPR: impressora $($nova.Nome) criada na porta $($criada.Porta) com o driver $($nova.Driver)"
                 }
                 catch {
@@ -8244,7 +8613,6 @@ function Show-PrinterManager {
         # -------------------------------------------------------------
         # CONTEÚDO DO PAINEL DRIVERS (ABA 3)
         # -------------------------------------------------------------
-        $baseUrl = "https://raw.githubusercontent.com/Delutto/thermal_printers/main"
         $drvY = 10
 
         # Função auxiliar para criar label de seção (marca)
@@ -8274,113 +8642,13 @@ function Show-PrinterManager {
             $btn.Tag = "$Url|$FileName"
             $btn.Add_Click({
                 $parts = $this.Tag.Split('|')
-                $dlUrl = $parts[0]; $dlFile = $parts[1]
-                $dest = Join-Path $Script:DownloadFolder $dlFile
                 $origText = $this.Text
                 try {
-                    $this.Enabled = $false; $this.Text = "  Iniciando download..."
-                    Log-Message "INFO" "Baixando driver: $dlFile"
-                    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-
-                    # Download assincrono com barra de progresso no proprio botao
-                    $Script:DrvBtn = $this
-                    $Script:DrvFile = $dlFile
-                    $Script:DrvComplete = $false
-                    $Script:DrvError = $null
-                    $wc = New-Object System.Net.WebClient
-
-                    $wc.Add_DownloadProgressChanged({
-                        param($s, $e)
-                        $pct = $e.ProgressPercentage
-                        $barSize = 14
-                        $filled = [Math]::Floor($pct / (100 / $barSize))
-                        $bar = ("|" * $filled) + ("." * ($barSize - $filled))
-                        $mb = [Math]::Round($e.BytesReceived / 1MB, 1)
-                        $totMb = [Math]::Round($e.TotalBytesToReceive / 1MB, 1)
-                        $Script:DrvBtn.Text = "  [$bar] $pct%   ($mb / $totMb MB)"
-                    })
-                    $wc.Add_DownloadFileCompleted({
-                        param($s, $e)
-                        if ($e.Error) { $Script:DrvError = $e.Error }
-                        $Script:DrvComplete = $true
-                    })
-
-                    $cleanUrl = $dlUrl.Replace(" ", "%20")
-                    $wc.DownloadFileAsync((New-Object Uri($cleanUrl)), $dest)
-                    while (-not $Script:DrvComplete) {
-                        [System.Windows.Forms.Application]::DoEvents()
-                        Start-Sleep -Milliseconds 15
-                    }
-                    $wc.Dispose()
-                    if ($Script:DrvError) { throw $Script:DrvError }
-
-                    if (-not (Test-DownloadIntegrity -Path $dest)) {
-                        Remove-Item $dest -Force -ErrorAction SilentlyContinue
-                        throw "Arquivo baixado esta corrompido ou invalido (link quebrado ou pagina de erro)."
-                    }
-                    Log-Message "SUCESSO" "Download concluido: $dlFile"
-                    Unblock-File -Path $dest -ErrorAction SilentlyContinue
-
-                    if ($dlFile.EndsWith(".zip")) {
-                        # ZIP nao e instalador: extrai e abre a pasta com o conteudo.
-                        Log-Message "ZIP" "Extraindo arquivo: $dlFile"
-                        $this.Text = "  Extraindo $dlFile ..."
-                        [System.Windows.Forms.Application]::DoEvents()
-
-                        Add-Type -AssemblyName System.IO.Compression.FileSystem
-                        $folderName = [System.IO.Path]::GetFileNameWithoutExtension($dlFile)
-                        $finalPath  = Join-Path $Script:DownloadFolder $folderName
-                        $tempPath   = Join-Path $Script:DownloadFolder "temp_$folderName"
-
-                        if (Test-Path $tempPath)  { Remove-Item $tempPath  -Recurse -Force | Out-Null }
-                        if (Test-Path $finalPath) { Remove-Item $finalPath -Recurse -Force | Out-Null }
-                        [System.Windows.Forms.Application]::DoEvents()
-
-                        [System.IO.Compression.ZipFile]::ExtractToDirectory($dest, $tempPath)
-                        [System.Windows.Forms.Application]::DoEvents()
-
-                        # Se o ZIP tem uma pasta raiz unica, sobe um nivel
-                        $items = Get-ChildItem -Path $tempPath
-                        if ($items.Count -eq 1 -and $items[0].PSIsContainer) {
-                            Move-Item -Path $items[0].FullName -Destination $finalPath
-                            Remove-Item $tempPath -Recurse -Force -ErrorAction SilentlyContinue | Out-Null
-                        }
-                        else {
-                            Rename-Item -Path $tempPath -NewName $folderName
-                        }
-
-                        Invoke-Item $finalPath
-                        Log-Message "SUCESSO" "Extraido com sucesso para: $folderName"
-                    }
-                    elseif ($dlFile.EndsWith(".rar")) {
-                        # RAR nao tem suporte nativo no Windows: abre com o programa associado.
-                        $this.Text = "  Abrindo $dlFile ..."
-                        Invoke-Item $dest
-                        Log-Message "SUCESSO" "Arquivo RAR aberto: $dlFile"
-                    }
-                    else {
-                        $this.Text = "  Instalando $dlFile ..."
-                        # WorkingDirectory na pasta de downloads: instaladores auto-extraiveis (WinRAR SFX)
-                        # passam a sugerir essa pasta em vez de C:\WINDOWS\system32.
-                        Start-Process -FilePath $dest -WorkingDirectory $Script:DownloadFolder
-                        Log-Message "SUCESSO" "Instalador iniciado: $dlFile"
-                    }
+                    $this.Enabled = $false
+                    [void](Invoke-BaixarDriver -Url $parts[0] -Arquivo $parts[1] -Progresso $this)
                     $this.Text = "✔ $origText"
                 } catch {
-                    $errMsg = $_.Exception.Message
-                    if ($errMsg -match 'v[ií]rus|software.*indesejado|potentially unwanted|unwanted software') {
-                        Log-Message "ERRO" "Windows Defender bloqueou o arquivo (provavel falso positivo): $dlFile"
-                        [System.Windows.Forms.MessageBox]::Show(
-                            "O Windows Defender bloqueou este driver.`n`n" +
-                            "Isso costuma ser um FALSO POSITIVO em instaladores de driver (o arquivo vem de fonte oficial).`n`n" +
-                            "A pasta 'Arquivos Xmenu' ja foi adicionada as excecoes do Defender - tente baixar novamente.`n`n" +
-                            "Se ainda assim bloquear, restaure o arquivo em: Seguranca do Windows > Protecao contra virus > Historico de protecao (Quarentena).",
-                            "Bloqueado pelo Windows Defender", "OK", "Warning") | Out-Null
-                    }
-                    else {
-                        Log-Message "ERRO" "Falha ao baixar driver: $_"
-                        [System.Windows.Forms.MessageBox]::Show("Erro ao baixar o driver: $_", "Erro", "OK", "Error") | Out-Null
-                    }
+                    Show-ErroDownloadDriver -Erro $_ -Arquivo $parts[1]
                     $this.Text = $origText
                 } finally {
                     $this.Enabled = $true
@@ -8416,134 +8684,17 @@ function Show-PrinterManager {
             $Y.Value += 47
         }
 
-        $colorElgin   = [System.Drawing.Color]::FromArgb(25, 80, 140)
-        $colorBema    = [System.Drawing.Color]::FromArgb(30, 100, 60)
-        $colorEpson   = [System.Drawing.Color]::FromArgb(80, 40, 120)
-        $colorTanca   = [System.Drawing.Color]::FromArgb(140, 70, 20)
-
-        $colorElginUtil   = [System.Drawing.Color]::FromArgb(15, 60, 110)
-        $colorBemaUtil    = [System.Drawing.Color]::FromArgb(20, 80, 45)
-        $colorEpsonUtil   = [System.Drawing.Color]::FromArgb(60, 25, 95)
-        $colorTancaUtil   = [System.Drawing.Color]::FromArgb(110, 50, 15)
-
-        # --- ELGIN ---
-        Add-DriverSection $pnlDrivers ([ref]$drvY) "ELGIN" ([System.Drawing.Color]::FromArgb(80, 160, 255))
-        Add-DriverButton $pnlDrivers ([ref]$drvY) "  [DRIVER] Elgin i9 / i7  (v1.7.3)" "$baseUrl/Elgin/Elgin_i7_i9_v1.7.3.exe" "Elgin_i7_i9_v1.7.3.exe" $colorElgin
-        Add-DriverButton $pnlDrivers ([ref]$drvY) "  [DRIVER] Elgin i8  (v7.1.7)" "$baseUrl/Elgin/Elgin_i8_v7.1.7.exe" "Elgin_i8_v7.1.7.exe" $colorElgin
-        Add-DriverButton $pnlDrivers ([ref]$drvY) "  [UTILITÁRIO] Elgin i9 Utility  (v1.2.2.24)" "https://github.com/VMazza10/Preparador-de-Ambiente-XMenu/releases/download/Chrome/UTILITY.ELGIN.I9.E.I7.1.exe" "UTILITY.ELGIN.I9.E.I7.1.exe" $colorElginUtil
-        Add-DriverButton $pnlDrivers ([ref]$drvY) "  [UTILITÁRIO] Elgin i7 / i8 Utility  (v3.2)" "$baseUrl/Utilities/Elgin_i7-i8_Utility_v3.2.exe" "Elgin_i7-i8_Utility_v3.2.exe" $colorElginUtil
-        $drvY += 8
-
-        # --- BEMATECH ---
-        Add-DriverSection $pnlDrivers ([ref]$drvY) "BEMATECH" ([System.Drawing.Color]::FromArgb(80, 200, 120))
-        Add-DriverButton $pnlDrivers ([ref]$drvY) "  [DRIVER] Bematech MP-4200 TH / MP-2500 / MP-4000  (Spooler x64 v4.4.0.3)" "$baseUrl/Bematech/BematechSpoolerDrivers_x64_v4.4.0.3.exe" "BematechSpoolerDrivers_x64_v4.4.0.3.exe" $colorBema
-        Add-DriverButton $pnlDrivers ([ref]$drvY) "  [DRIVER] Bematech MP-4200 HS  (v1.7.7)" "$baseUrl/Bematech/Bematech%20MP-4200-HS_Driver_v1.7.7.exe" "Bematech_MP-4200-HS_Driver_v1.7.7.exe" $colorBema
-        Add-DriverButton $pnlDrivers ([ref]$drvY) "  [DRIVER] Bematech MP-2800 TH  (Spooler v1.3)" "$baseUrl/Bematech/Bematech_MP_2800_SpoolerDrivers_v1.3.exe" "Bematech_MP_2800_SpoolerDrivers_v1.3.exe" $colorBema
-        Add-DriverButton $pnlDrivers ([ref]$drvY) "  [UTILITÁRIO] Bematech Utility  (v2.10.04 x64)" "$baseUrl/Utilities/Bematech_Utility_v2.10.04_x64.exe" "Bematech_Utility_v2.10.04_x64.exe" $colorBemaUtil
-        Add-DriverButton $pnlDrivers ([ref]$drvY) "  [UTILITÁRIO] Bematech MP-2800 TH Utility  (v1.4)" "$baseUrl/Utilities/Bematech_MP-2800_TH_Utility_v1.4.exe" "Bematech_MP-2800_TH_Utility_v1.4.exe" $colorBemaUtil
-        $drvY += 8
-
-        # --- EPSON ---
-        Add-DriverSection $pnlDrivers ([ref]$drvY) "EPSON" ([System.Drawing.Color]::FromArgb(180, 120, 255))
-        Add-DriverButton $pnlDrivers ([ref]$drvY) "  [DRIVER] Epson TM-T20  (APD v5.6.0.0)" "$baseUrl/Epson/Epson_TM-T20_v5.6.0.0.exe" "Epson_TM-T20_v5.6.0.0.exe" $colorEpson
-        Add-DriverButton $pnlDrivers ([ref]$drvY) "  [DRIVER] Epson TM-T20X  (APD v6.1.0.0)" "$baseUrl/Epson/Epson_TM-T20X_v6.1.0.0.exe" "Epson_TM-T20X_v6.1.0.0.exe" $colorEpson
-        Add-DriverButton $pnlDrivers ([ref]$drvY) "  [DRIVER] Epson TM-T20X II  (APD v6.9.1.0)" "$baseUrl/Epson/Epson_TM-20X-II_Driver_v6.9.1.0.exe" "Epson_TM-20X-II_Driver_v6.9.1.0.exe" $colorEpson
-        Add-DriverButton $pnlDrivers ([ref]$drvY) "  [UTILITÁRIO] Epson NetConfig  (v4.9.5)" "$baseUrl/Utilities/Epson_NetConfig_v4_9_5.exe" "Epson_NetConfig_v4_9_5.exe" $colorEpsonUtil
-        $drvY += 8
-
-        # --- TANCA ---
-        Add-DriverSection $pnlDrivers ([ref]$drvY) "TANCA" ([System.Drawing.Color]::FromArgb(255, 160, 60))
-        Add-DriverButton $pnlDrivers ([ref]$drvY) "  [DRIVER] Tanca TP-620  (v6.1.0)" "$baseUrl/Tanca/Tanca_TP-620_Driver_v6.1.0.exe" "Tanca_TP-620_Driver_v6.1.0.exe" $colorTanca
-        Add-DriverButton $pnlDrivers ([ref]$drvY) "  [DRIVER] Tanca TP-650  (v2.11)" "$baseUrl/Tanca/Tanca_TP-650_DriverInstall_v2.11.exe" "Tanca_TP-650_DriverInstall_v2.11.exe" $colorTanca
-        Add-DriverButton $pnlDrivers ([ref]$drvY) "  [UTILITÁRIO] Tanca TP-620 Utility  (v3.2.0.1)" "$baseUrl/Utilities/Tanca_TP-620_Utility_v3.2.0.1.exe" "Tanca_TP-620_Utility_v3.2.0.1.exe" $colorTancaUtil
-        Add-DriverButton $pnlDrivers ([ref]$drvY) "  [UTILITÁRIO] Tanca TP-650 Printer Tool  (v1.48E)" "$baseUrl/Utilities/Tanca_TP-650_PrinterTool_1.48E.exe" "Tanca_TP-650_PrinterTool_1.48E.exe" $colorTancaUtil
-        $drvY += 8
-
-        # --- OUTRAS MARCAS ---
-        $colorDaruma  = [System.Drawing.Color]::FromArgb(130, 20, 50)
-        $colorSweda   = [System.Drawing.Color]::FromArgb(100, 100, 30)
-        $colorCtrlID  = [System.Drawing.Color]::FromArgb(60, 60, 80)
-        $colorOtherUtil = [System.Drawing.Color]::FromArgb(40, 40, 45)
-
-        Add-DriverSection $pnlDrivers ([ref]$drvY) "DARUMA / SWEDA / CONTROL ID" ([System.Drawing.Color]::FromArgb(220, 220, 220))
-        Add-DriverButton $pnlDrivers ([ref]$drvY) "  [DRIVER] Daruma DR800  (Spooler v2.0.1.7)" "$baseUrl/Daruma/Daruma_800_Spooler_Driver_v2.0.1.7.exe" "Daruma_800_Spooler_Driver_v2.0.1.7.exe" $colorDaruma
-        Add-DriverButton $pnlDrivers ([ref]$drvY) "  [DRIVER] Sweda SI-300 / SI-300E / SI-300W  (v1.2.0)" "$baseUrl/Sweda/Sweda_SI-300_SI-300E_SI-300W_v1.2.0.exe" "Sweda_SI-300_SI-300E_SI-300W_v1.2.0.exe" $colorSweda
-        Add-DriverButton $pnlDrivers ([ref]$drvY) "  [DRIVER] Control iD Print iD / Print iD Touch  (v1.1.10.2)" "$baseUrl/PrintID/Print_iD_%26_Print_iD_Touch_v1.1.10.2.exe" "Print_iD_v1.1.10.2.exe" $colorCtrlID
-        Add-DriverButton $pnlDrivers ([ref]$drvY) "  [UTILITÁRIO] Daruma Utility  (v2.20.9)" "$baseUrl/Utilities/Daruma_Utility_v2.20.9.exe" "Daruma_Utility_v2.20.9.exe" $colorDaruma
-        Add-DriverButton $pnlDrivers ([ref]$drvY) "  [UTILITÁRIO] Sweda Utility  (v2.03)" "$baseUrl/Utilities/Sweda_Utility_v2.03.exe" "Sweda_Utility_v2.03.exe" $colorSweda
-        Add-DriverButton $pnlDrivers ([ref]$drvY) "  [UTILITÁRIO] Control iD Utility  (v1.0)" "$baseUrl/Utilities/PrintID_Utility_v1.0.exe" "PrintID_Utility_v1.0.exe" $colorCtrlID
-
-        $drvY += 8
-
-        # --- TOMATE / C3TECH / GENERICAS POS-80 ---
-        # Tomate MDK, Knup, Kmex, Evadin e a maioria das 80mm chinesas usam
-        # o mesmo "POS Printer Driver" generico.
-        $colorPos     = [System.Drawing.Color]::FromArgb(150, 45, 30)
-        $colorPosUtil = [System.Drawing.Color]::FromArgb(115, 30, 20)
-        $colorC3      = [System.Drawing.Color]::FromArgb(20, 85, 115)
-
-        Add-DriverSection $pnlDrivers ([ref]$drvY) "TOMATE / C3TECH / GENÉRICAS 80mm" ([System.Drawing.Color]::FromArgb(255, 130, 100))
-        Add-DriverButton $pnlDrivers ([ref]$drvY) "  [DRIVER] Tomate MDK-006 / 007 / 008 / 080 / 081  (POS-80 genérico v11.3)" "$baseUrl/POS/POS_Printer_Driver_Setup_v11.3.0.0.exe" "POS_Printer_Driver_Setup_v11.3.0.0.exe" $colorPos
-        Add-DriverButton $pnlDrivers ([ref]$drvY) "  [DRIVER] Knup / Kmex / Evadin / demais POS-58 e POS-80  (mesmo driver v11.3)" "$baseUrl/POS/POS_Printer_Driver_Setup_v11.3.0.0.exe" "POS_Printer_Driver_Setup_v11.3.0.0.exe" $colorPos
-        Add-DriverButton $pnlDrivers ([ref]$drvY) "  [UTILITÁRIO] POS Utilities  (teste, autoteste e configuração POS-80)" "$baseUrl/Utilities/POS_Utilities.exe" "POS_Utilities.exe" $colorPosUtil
-        Add-DriverButton $pnlDrivers ([ref]$drvY) "  [DRIVER] C3Tech IT-100  (pacote oficial C3Tech - RAR, ~87 MB)" "https://c3technology.com.br/download/DRIVES%20IT-100.rar" "C3Tech_IT-100_Drivers.rar" $colorC3
-        Add-DriverButton $pnlDrivers ([ref]$drvY) "  [DRIVER] C3Tech IT-110  (drivers + utilitários oficiais - ZIP, ~103 MB)" "https://c3technology.com.br/download/DRIVES%20E%20UTILITARIOS%20IT-110.zip" "C3Tech_IT-110_Drivers_Utilitarios.zip" $colorC3
-        Add-DriverLinkButton $pnlDrivers ([ref]$drvY) "  [SITE] Tomate - suporte oficial (tutoriais e drivers por modelo)" "https://tomate.tv/support" $colorPosUtil
-        $drvY += 8
-
-        # --- FEASSO / JETWAY ---
-        $colorFeasso = [System.Drawing.Color]::FromArgb(120, 60, 130)
-        $colorJetway = [System.Drawing.Color]::FromArgb(35, 95, 105)
-        Add-DriverSection $pnlDrivers ([ref]$drvY) "FEASSO / JETWAY" ([System.Drawing.Color]::FromArgb(200, 150, 255))
-        Add-DriverButton $pnlDrivers ([ref]$drvY) "  [DRIVER] Feasso F-IMTER-01  (v1.7)" "$baseUrl/Feasso/Feasso_F-IMTER-01_Driver_v1.7.exe" "Feasso_F-IMTER-01_Driver_v1.7.exe" $colorFeasso
-        Add-DriverButton $pnlDrivers ([ref]$drvY) "  [DRIVER] Feasso F-IMTER-02  (v2.0)" "$baseUrl/Feasso/Feasso_F-IMTER-02_Driver_v2.0.exe" "Feasso_F-IMTER-02_Driver_v2.0.exe" $colorFeasso
-        Add-DriverButton $pnlDrivers ([ref]$drvY) "  [DRIVER] Feasso F-IMTER-03  (v1.5)" "$baseUrl/Feasso/Feasso_F-IMTER-03_Driver_v1.5.exe" "Feasso_F-IMTER-03_Driver_v1.5.exe" $colorFeasso
-        Add-DriverButton $pnlDrivers ([ref]$drvY) "  [DRIVER] Jetway JP-500  (v7.17)" "$baseUrl/Jetway/Jetway_JP-500_Printer_Driver_v7.17.exe" "Jetway_JP-500_Printer_Driver_v7.17.exe" $colorJetway
-        Add-DriverButton $pnlDrivers ([ref]$drvY) "  [DRIVER] Jetway JP-800  (v2.38E)" "$baseUrl/Jetway/Jetway_JP-800_PrinterDriver_v2.38E.exe" "Jetway_JP-800_PrinterDriver_v2.38E.exe" $colorJetway
-        Add-DriverButton $pnlDrivers ([ref]$drvY) "  [DRIVER] Jetway JMP-100  (v2.61J)" "$baseUrl/Jetway/Jetway_JMP-100_Driver_v2.61J.exe" "Jetway_JMP-100_Driver_v2.61J.exe" $colorJetway
-        $drvY += 8
-
-        # --- GERTEC / DIEBOLD / DIMEP / PERTO ---
-        $colorGertec  = [System.Drawing.Color]::FromArgb(150, 100, 20)
-        $colorDiebold = [System.Drawing.Color]::FromArgb(45, 70, 130)
-        $colorPerto   = [System.Drawing.Color]::FromArgb(90, 45, 60)
-        Add-DriverSection $pnlDrivers ([ref]$drvY) "GERTEC / DIEBOLD / DIMEP / PERTO" ([System.Drawing.Color]::FromArgb(255, 200, 90))
-        Add-DriverButton $pnlDrivers ([ref]$drvY) "  [DRIVER] Gertec G250  (v1.0)" "$baseUrl/Gertec/Gertec_G250_Driver_v1.0.exe" "Gertec_G250_Driver_v1.0.exe" $colorGertec
-        Add-DriverButton $pnlDrivers ([ref]$drvY) "  [UTILITÁRIO] Gertec G250 Utility  (v2.57)" "$baseUrl/Utilities/Gertec_G250_Utility_v2.57.exe" "Gertec_G250_Utility_v2.57.exe" $colorGertec
-        Add-DriverButton $pnlDrivers ([ref]$drvY) "  [DRIVER] Diebold Mecaf / Perfecta  (v1.34 drv 1.9)" "$baseUrl/Diebold/Diebold_Printers_v1.34_drv_1.9.exe" "Diebold_Printers_v1.34_drv_1.9.exe" $colorDiebold
-        Add-DriverButton $pnlDrivers ([ref]$drvY) "  [DRIVER] Diebold IM113ID  (v1.2.0.10 x64)" "$baseUrl/Diebold/Diebold_IM113ID_v1.2.0.10_x64.exe" "Diebold_IM113ID_v1.2.0.10_x64.exe" $colorDiebold
-        Add-DriverButton $pnlDrivers ([ref]$drvY) "  [DRIVER] Dimep D-PRINT DUAL  (v2.1.4.4)" "$baseUrl/Dimep/Dimep_D-PRINT_DUAL_v2.1.4.4.exe" "Dimep_D-PRINT_DUAL_v2.1.4.4.exe" $colorPerto
-        Add-DriverButton $pnlDrivers ([ref]$drvY) "  [DRIVER] Perto PertoPrinter  (v2.5)" "$baseUrl/PertoPrinter/PertoPrinter_Driver_2.5.exe" "PertoPrinter_Driver_2.5.exe" $colorPerto
-        $drvY += 8
-
-        # --- STAR / WAYTEC / MENNO / DASCOM ---
-        $colorStar   = [System.Drawing.Color]::FromArgb(25, 70, 95)
-        $colorWaytec = [System.Drawing.Color]::FromArgb(70, 90, 40)
-        $colorMenno  = [System.Drawing.Color]::FromArgb(100, 55, 25)
-        Add-DriverSection $pnlDrivers ([ref]$drvY) "STAR / WAYTEC / MENNO / DASCOM" ([System.Drawing.Color]::FromArgb(140, 210, 255))
-        Add-DriverButton $pnlDrivers ([ref]$drvY) "  [DRIVER] Star (todos os modelos)  (x64 v3.7.2)" "$baseUrl/Star/Star_PrinterDrivers_x64_v3.7.2.exe" "Star_PrinterDrivers_x64_v3.7.2.exe" $colorStar
-        Add-DriverButton $pnlDrivers ([ref]$drvY) "  [DRIVER] Waytec WP-100  (v7.17)" "$baseUrl/Waytec/Waytec_WP-100_Driver_v7.17.exe" "Waytec_WP-100_Driver_v7.17.exe" $colorWaytec
-        Add-DriverButton $pnlDrivers ([ref]$drvY) "  [DRIVER] Waytec WP-50  (v7.17.50)" "$baseUrl/Waytec/WayTec_WP-50_Driver_v7.17.50.exe" "WayTec_WP-50_Driver_v7.17.50.exe" $colorWaytec
-        Add-DriverButton $pnlDrivers ([ref]$drvY) "  [UTILITÁRIO] Waytec Utility  (v3.2.0.1)" "$baseUrl/Utilities/Waytec_Utility_v3.2.0.1.exe" "Waytec_Utility_v3.2.0.1.exe" $colorWaytec
-        Add-DriverButton $pnlDrivers ([ref]$drvY) "  [DRIVER] Menno  (v2.52)" "$baseUrl/Menno/Menno_Printer_Driver_v2.52.exe" "Menno_Printer_Driver_v2.52.exe" $colorMenno
-        Add-DriverButton $pnlDrivers ([ref]$drvY) "  [UTILITÁRIO] Menno Printer Tool  (v1.56)" "$baseUrl/Utilities/Menno_PrinterTool_v1.56.exe" "Menno_PrinterTool_v1.56.exe" $colorMenno
-        Add-DriverButton $pnlDrivers ([ref]$drvY) "  [DRIVER] Dascom DT-210 / DT-230  (v1.0.0.7)" "$baseUrl/Dascom/Dascom_DT-210_DT-230_Driver_v1.0.0.7.exe" "Dascom_DT-210_DT-230_Driver_v1.0.0.7.exe" $colorStar
-        $drvY += 8
-
-        # --- IMPRESSORAS XTAG (ETIQUETA) ---
-        $colorXtag = [System.Drawing.Color]::FromArgb(0, 140, 130)
-        $colorXtagUtil = [System.Drawing.Color]::FromArgb(0, 95, 90)
-        $xtagBaseUrl = "https://raw.githubusercontent.com/ElginDeveloperCommunity/Impressoras/master/Impressoras%20de%20Etiqueta"
-        Add-DriverSection $pnlDrivers ([ref]$drvY) "IMPRESSORAS XTAG (ETIQUETA)" ([System.Drawing.Color]::FromArgb(100, 220, 210))
-        Add-DriverButton $pnlDrivers ([ref]$drvY) "  [DRIVER] Elgin L42 PRO  (ZIP - contem instalador, v2020.4)" "$xtagBaseUrl/Elgin/L42PRO/Drivers/Windows_DriverL42PRO_V2020.4.zip" "Windows_DriverL42PRO_V2020.4.zip" $colorXtag
-        Add-DriverButton $pnlDrivers ([ref]$drvY) "  [DRIVER] Elgin L42 PRO FULL  (v2022.1)" "$xtagBaseUrl/Elgin/L42PRO%20FULL/Drivers/L42PRO%20FULL_Windows_driver_2022.1.exe" "Elgin_L42PRO_FULL_Windows_driver_2022.1.exe" $colorXtag
-        Add-DriverButton $pnlDrivers ([ref]$drvY) "  [DRIVER] Elgin L42 DT  (v7.4.3)" "$xtagBaseUrl/Elgin/L42DT/Drivers/Windows_DriverL42DT_7.4.3_M-5.exe" "Elgin_L42DT_Windows_driver_7.4.3.exe" $colorXtag
-        Add-DriverButton $pnlDrivers ([ref]$drvY) "  [DRIVER] Zebra ZD220 / ZD230  (ZIP - contem instalador)" "https://www.zebra.com/content/dam/support-dam/en/driver/unrestricted/0002/zddriver-v1062628275-certified.zip" "Zebra_ZD220_ZD230_Driver.zip" $colorXtag
-        Add-DriverButton $pnlDrivers ([ref]$drvY) "  [DRIVER] Argox  (Todos os modelos, v2022.1)" "$baseUrl/Argox/Argox_PrinterDrivers_v2022.1.exe" "Argox_PrinterDrivers_v2022.1.exe" $colorXtag
-        Add-DriverButton $pnlDrivers ([ref]$drvY) "  [DRIVER] Gainscha  (Todos os modelos, v2020.1)" "$baseUrl/Gainscha/Gainscha_GPrinterDrivers_v2020.1.exe" "Gainscha_GPrinterDrivers_v2020.1.exe" $colorXtag
-        Add-DriverButton $pnlDrivers ([ref]$drvY) "  [DRIVER] Zetex Z60XT  (ZIP - Drive, ~225 MB)" "https://drive.usercontent.google.com/download?id=1wWLiTWrtHCBRP9L0P9GG2eRKGEgfo2HJ&export=download&confirm=t" "Zetex_Z60XT_Driver.zip" $colorXtag
-        Add-DriverButton $pnlDrivers ([ref]$drvY) "  [UTILITÁRIO] Gerenciador Elgin L42 PRO FULL  (v1.5.1)" "$xtagBaseUrl/Elgin/L42PRO%20FULL/Utilit%C3%A1rios/GerenciadorL42PRO_Full_1.5.1.exe" "GerenciadorL42PRO_Full_1.5.1.exe" $colorXtagUtil
-        Add-DriverButton $pnlDrivers ([ref]$drvY) "  [UTILITÁRIO] Gerenciador Elgin L42 DT  (v1.5.6)" "$xtagBaseUrl/Elgin/L42DT/Utilit%C3%A1rios/GerenciadorL42DT_Full_1.5.6.exe" "GerenciadorL42DT_Full_1.5.6.exe" $colorXtagUtil
+        # A lista vem do catalogo (Get-CatalogoDrivers), a mesma do BAIXAR DRIVER da nova impressora LPR
+        $secaoDrv = $null
+        foreach ($drv in @(Get-CatalogoDrivers)) {
+            if ($drv.Secao -ne $secaoDrv) {
+                if ($null -ne $secaoDrv) { $drvY += 8 }
+                Add-DriverSection $pnlDrivers ([ref]$drvY) $drv.Secao $drv.CorSecao
+                $secaoDrv = $drv.Secao
+            }
+            if ($drv.Tipo -eq 'Site') { Add-DriverLinkButton $pnlDrivers ([ref]$drvY) $drv.Texto $drv.Url $drv.Cor }
+            else { Add-DriverButton $pnlDrivers ([ref]$drvY) $drv.Texto $drv.Url $drv.Arquivo $drv.Cor }
+        }
 
         # Pesquisa: indexa o texto original de cada botao e refaz a lista a cada letra
         Initialize-IndiceDrivers -Painel $pnlDrivers
