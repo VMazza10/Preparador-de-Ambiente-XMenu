@@ -2738,9 +2738,10 @@ function Show-XmlDownloader {
         $lblConn = New-ToolLabel $cardConn "Informe o servidor e clique em TESTAR CONEXÃO." 14 60 9 -Cor $Script:UiSuave -W 930
         # Certificado: so aparece quando o banco emite com mais de um (IDServidorFiscal).
         # Raro, mas nesses clientes as duas empresas usam a mesma serie e os numeros se repetem.
-        $lblCert = New-ToolLabel $cardConn "Certificado:" 548 60 9 -Cor $Script:UiSuave
-        $cmbCert = & $novaCombo $cardConn 630 56 316
-        $cmbCert.DropDownWidth = 460
+        # Ganha uma linha propria no cartao ($mostrarLinhaCert abre o espaco).
+        $lblCert = New-ToolLabel $cardConn "Certificado:" 14 90 9 -Cor $Script:UiSuave
+        $cmbCert = & $novaCombo $cardConn 98 86 480
+        $cmbCert.DropDownWidth = 520
         $lblCert.Visible = $false
         $cmbCert.Visible = $false
         $Script:XmlTemServidor = $false
@@ -2802,10 +2803,10 @@ function Show-XmlDownloader {
         [void]$cmbTipo.Items.Add("Somente canceladas")
         $cmbTipo.SelectedIndex = 0
 
-        # A busca ja vem com tudo marcado, que e o caso comum. Para baixar so
-        # algumas de um periodo, este botao limpa tudo de uma vez e o contador
-        # ao lado mostra quantas ficaram marcadas.
-        $btnMarcar = New-ToolButton $f "DESMARCAR TODAS" 300 288 140 26 $Script:UiCinza $null "Desmarca todas as notas da lista, para marcar só as que quer baixar. Sem nenhuma marcada, vira MARCAR TODAS."
+        # A busca vem com tudo desmarcado: o comum e pegar uma ou outra nota do
+        # periodo, e para levar tudo existe o BAIXAR TUDO. Este botao marca ou
+        # limpa a lista de uma vez e o contador ao lado mostra quantas estao marcadas.
+        $btnMarcar = New-ToolButton $f "MARCAR TODAS" 300 288 140 26 $Script:UiCinza $null "Marca todas as notas com XML da lista. Com alguma marcada, vira DESMARCAR TODAS."
         $btnMarcar.Enabled = $false
         $lblMarcadas = New-ToolLabel $f "" 450 293 9 -Cor $Script:UiSuave -W 150
 
@@ -2845,6 +2846,22 @@ function Show-XmlDownloader {
         $colCert = $lv.Columns.Add("Certificado", 0)
         [void]$f.Controls.Add($lv)
 
+        # Colunas arrastaveis pelo cabecalho. So muda a posicao na tela: o indice de
+        # cada coluna (SubItems e ordenacao) continua o mesmo. A ordem fica guardada
+        # para a proxima vez que a janela abrir.
+        $lv.AllowColumnReorder = $true
+        $Script:XmlArqColunas = Join-Path $Script:DownloadFolder "xml_ordem_colunas.txt"
+        try {
+            if (Test-Path $Script:XmlArqColunas) {
+                $ordemSalva = @(("$(Get-Content -Path $Script:XmlArqColunas -TotalCount 1 -ErrorAction Stop)".Trim()) -split ',' | ForEach-Object { [int]$_ })
+                # Lista de outra versao (com outro numero de colunas) e ignorada
+                if ($ordemSalva.Count -eq $lv.Columns.Count -and (@($ordemSalva | Sort-Object) -join ',') -eq ((0..($lv.Columns.Count - 1)) -join ',')) {
+                    for ($i = 0; $i -lt $ordemSalva.Count; $i++) { $lv.Columns[$i].DisplayIndex = $ordemSalva[$i] }
+                }
+            }
+        }
+        catch {}
+
         # Aviso sobreposto a lista: no rodape ficava discreto demais para uma
         # consulta que pode levar alguns segundos.
         $lblCarregando = New-Object System.Windows.Forms.Label
@@ -2883,7 +2900,7 @@ function Show-XmlDownloader {
             $Script:ToolTip.SetToolTip($txtPedidos, "Um pedido, uma lista ou intervalo:  73432  |  73430,73432  |  73400-73432. Pedido sem NFC-e (venda não fiscal) aparece no aviso depois da busca. Número que se repete (zera por dia) traz uma nota por dia, a mais recente primeiro; marque No dia para trazer só a do dia certo. Enter já faz a busca.")
             $Script:ToolTip.SetToolTip($chkDiaPedido, "Busca o pedido só nesse dia de caixa. Venda depois da meia-noite conta no dia em que o caixa foi aberto.")
             $Script:ToolTip.SetToolTip($cmbTipo, "Serve como filtro da lista também: depois de buscar, troque a opção e a tela mostra só o que interessa, sem consultar o banco de novo. Em 'Todas', cada número traz a nota autorizada e, se aquele número tiver sido inutilizado, traz a inutilizada no lugar — nunca as duas para o mesmo número.")
-            $Script:ToolTip.SetToolTip($lv, "A coluna Situação diz o que é cada nota. Verde = autorizada, vale. Vermelho = cancelada, não vale. Amarelo = inutilizada ou sem protocolo. Cinza = não existe no banco. Passe o mouse na linha para o detalhe, clique no cabeçalho para ordenar e use o botão direito para marcar ou desmarcar tudo.")
+            $Script:ToolTip.SetToolTip($lv, "A coluna Situação diz o que é cada nota. Verde = autorizada, vale. Vermelho = cancelada, não vale. Amarelo = inutilizada ou sem protocolo. Cinza = não existe no banco. Passe o mouse na linha para o detalhe, clique no cabeçalho para ordenar, arraste o cabeçalho para mudar a coluna de lugar e use o botão direito para marcar ou desmarcar tudo.")
         }
 
         # ---------------------------------------------------------------------
@@ -3169,9 +3186,56 @@ function Show-XmlDownloader {
                 $cmbCert.SelectedIndex = 0
                 Log-Message "INFO" ("XMLs: banco com $(@($Script:XmlServidores).Count) certificados - " + (($Script:XmlServidores | ForEach-Object { $_.Rotulo }) -join " | "))
             }
-            $lblCert.Visible = $multi
-            $cmbCert.Visible = $multi
-            if ($multi) { $lblConn.Width = 526; $colCert.Width = 170 } else { $lblConn.Width = 930; $colCert.Width = 0 }
+            & $mostrarLinhaCert $multi
+            if ($multi) { $colCert.Width = 170 } else { $colCert.Width = 0 }
+        }
+
+        # Abre (ou fecha) a linha do Certificado embaixo do status da conexao: o cartao
+        # cresce e o resto da janela desce junto. A lista perde essa altura, e a janela
+        # cresce o mesmo tanto quando cabe na tela, para a lista nao ficar menor.
+        $Script:XmlLinhaCert = $false
+        $mostrarLinhaCert = {
+            param([bool]$Mostrar)
+            $lblCert.Visible = $Mostrar
+            $cmbCert.Visible = $Mostrar
+            if ($Script:XmlLinhaCert -eq $Mostrar) { return }
+            $Script:XmlLinhaCert = $Mostrar
+            $extra = 36
+            if (-not $Mostrar) { $extra = -36 }
+            $limite = $cardConn.Bottom
+            $f.SuspendLayout()
+            try {
+                $cardConn.Height = $cardConn.Height + $extra
+                foreach ($ctl in @($f.Controls)) {
+                    if ($ctl -eq $cardConn -or $ctl.Top -lt $limite) { continue }
+                    $ancora = "$($ctl.Anchor)"
+                    # O que esta preso embaixo (botoes, barra, status) fica onde esta
+                    if ($ancora -notmatch 'Top') { continue }
+                    $ctl.Top = $ctl.Top + $extra
+                    if ($ancora -match 'Bottom') { $ctl.Height = $ctl.Height - $extra }
+                }
+                $minimo = New-Object System.Drawing.Size($f.MinimumSize.Width, ($f.MinimumSize.Height + $extra))
+                # Crescendo, a altura vai antes do minimo (senao o minimo ja esticaria a
+                # janela sozinho); diminuindo, o minimo baixa antes. Na volta tira so o
+                # que foi acrescentado, mesmo que a tela nao tenha deixado crescer tudo.
+                $area = [System.Windows.Forms.Screen]::FromControl($f).WorkingArea
+                if ($Mostrar) {
+                    $Script:XmlLinhaCertCresceu = 0
+                    if ($f.WindowState -eq 'Normal') {
+                        $novaAltura = [Math]::Min($f.Height + $extra, $area.Height)
+                        $Script:XmlLinhaCertCresceu = [Math]::Max(0, $novaAltura - $f.Height)
+                        $f.Height = $novaAltura
+                    }
+                    $f.MinimumSize = $minimo
+                }
+                else {
+                    $f.MinimumSize = $minimo
+                    if ($f.WindowState -eq 'Normal' -and $Script:XmlLinhaCertCresceu -gt 0) { $f.Height = $f.Height - $Script:XmlLinhaCertCresceu }
+                    $Script:XmlLinhaCertCresceu = 0
+                }
+                if ($f.WindowState -eq 'Normal' -and $f.Bottom -gt $area.Bottom) { $f.Top = [Math]::Max($area.Top, $area.Bottom - $f.Height) }
+            }
+            finally { $f.ResumeLayout() }
         }
 
         # IDServidorFiscal escolhido no filtro, ou $null para todos (e para banco com um so)
@@ -3499,8 +3563,9 @@ function Show-XmlDownloader {
                 }
             }
             $lvi.ToolTipText = $dica
+            # Linha nova entra desmarcada; ao reordenar ou filtrar volta como estava
             if ($Item.ContainsKey('Marcado')) { $lvi.Checked = [bool]$Item.Marcado }
-            else { $lvi.Checked = ($Item.Conteudo -ne "") }
+            else { $lvi.Checked = $false }
             $lvi.Tag = $Item
             $Item.Linha = $lvi
             [void]$lv.Items.Add($lvi)
@@ -3535,14 +3600,14 @@ function Show-XmlDownloader {
             $total = $lv.Items.Count
             if ($total -eq 0) {
                 $lblMarcadas.Text = ""
-                $btnMarcar.Text = "DESMARCAR TODAS"
+                $btnMarcar.Text = "MARCAR TODAS"
                 $btnMarcar.Enabled = $false
                 return
             }
             $marc = $lv.CheckedItems.Count
             if ($marc -eq 1) { $lblMarcadas.Text = "1 de $total marcada" }
             else { $lblMarcadas.Text = "$marc de $total marcadas" }
-            if ($marc -eq 0) { $lblMarcadas.ForeColor = $Script:UiAmarelo } else { $lblMarcadas.ForeColor = $Script:UiVerde }
+            if ($marc -eq 0) { $lblMarcadas.ForeColor = $Script:UiSuave } else { $lblMarcadas.ForeColor = $Script:UiVerde }
             if ($marc -gt 0) { $btnMarcar.Text = "DESMARCAR TODAS" } else { $btnMarcar.Text = "MARCAR TODAS" }
             $btnMarcar.Enabled = $true
         }
@@ -3959,7 +4024,7 @@ function Show-XmlDownloader {
                     & $setStatus ("$($achados.Count) linha(s): $nOk com XML. Sem XML: " + $txtSem) $Script:UiAmarelo
                 }
                 else {
-                    & $setStatus "$($achados.Count) linha(s), todas com XML. Marque e clique em BAIXAR." $Script:UiVerde
+                    & $setStatus "$($achados.Count) linha(s), todas com XML. Marque as que quer e clique em BAIXAR SELECIONADOS, ou BAIXAR TUDO." $Script:UiVerde
                 }
                 Log-Message "INFO" "XMLs: busca retornou $($achados.Count) linha(s), $nOk com XML"
                 & $atualizaModo
@@ -4258,11 +4323,12 @@ function Show-XmlDownloader {
                 if (-not $acabouDeBuscar) { & $setStatus "Faça a busca antes de gerar o PDF." $Script:UiAmarelo }
                 return
             }
+            # Marcadas; sem nenhuma marcada vale a lista inteira, como no BAIXAR TUDO
+            # (a busca vem desmarcada, e por chave ou pedido e digitar e gerar)
             $sel = @()
             foreach ($lvi in $lv.CheckedItems) { $sel += $lvi.Tag }
             if ($sel.Count -eq 0) {
-                if (-not $acabouDeBuscar) { & $setStatus "Marque ao menos uma nota na lista para gerar o PDF." $Script:UiAmarelo }
-                return
+                foreach ($lvi in $lv.Items) { if ($null -ne $lvi.Tag) { $sel += $lvi.Tag } }
             }
 
             # Numero de pedido que zera por dia: a busca direta pode trazer o mesmo
@@ -4272,11 +4338,11 @@ function Show-XmlDownloader {
                 $repetidos = @($sel | Where-Object { $null -ne $_.Pedido } | Group-Object { "$($_.Pedido)" } | Where-Object { $_.Count -gt 1 })
                 if ($repetidos.Count -gt 0) {
                     $detalhe = @($repetidos | Select-Object -First 10 | ForEach-Object { "Pedido $($_.Name): $($_.Count) notas" }) -join "`r`n"
-                    & $setStatus "Pedido repetido em mais de uma nota: deixe marcada só a do dia certo e clique de novo em ESPELHO FISCAL (PDF)." $Script:UiAmarelo
+                    & $setStatus "Pedido repetido em mais de uma nota: marque só a do dia certo e clique de novo em ESPELHO FISCAL (PDF)." $Script:UiAmarelo
                     [System.Windows.Forms.MessageBox]::Show(
                         "O número do pedido se repete (ele zera por dia), então a busca trouxe mais de uma nota:`r`n`r`n$detalhe`r`n`r`n" +
-                        "A lista está da mais recente para a mais antiga. Confira a coluna Data, deixe marcada só a nota certa e clique de novo em ESPELHO FISCAL (PDF). " +
-                        "Se quiser todas, é só clicar de novo sem desmarcar.",
+                        "A lista está da mais recente para a mais antiga. Confira a coluna Data, marque só a nota certa e clique de novo em ESPELHO FISCAL (PDF). " +
+                        "Se quiser todas, é só clicar de novo sem marcar nenhuma.",
                         "Espelho fiscal (PDF)", "OK", "Information") | Out-Null
                     return
                 }
@@ -4858,23 +4924,23 @@ function Show-XmlDownloader {
             "       Somente canceladas ....  so as que tem XML de cancelamento",
             "",
             "5) BAIXAR",
-            "   A busca ja vem com todas as notas com XML marcadas. Para baixar so",
-            "   algumas, clique em DESMARCAR TODAS (ao lado do Tipo de nota),",
-            "   marque as que quer e use BAIXAR SELECIONADOS. O contador ao lado",
-            "   mostra quantas estao marcadas.",
-            "   BAIXAR SELECIONADOS grava as linhas marcadas.",
-            "   BAIXAR TUDO grava tudo que esta aparecendo na lista, entao com o",
-            "   filtro ligado ele baixa so o que o filtro deixou a mostra.",
+            "   A busca vem com as notas desmarcadas. Marque as que quer e use",
+            "   BAIXAR SELECIONADOS. MARCAR TODAS (ao lado do Tipo de nota) marca",
+            "   a lista inteira de uma vez, e o contador ao lado mostra quantas",
+            "   estao marcadas.",
+            "   BAIXAR TUDO grava tudo que esta aparecendo na lista, marcado ou",
+            "   nao; com o filtro ligado baixa so o que o filtro deixou a mostra.",
             "   Nota sem XML e pulada e aparece num aviso no fim.",
             "   CANCELAR interrompe tanto a busca quanto o download.",
             "",
             "6) ESPELHO FISCAL (PDF)",
             "   Gera o espelho fiscal da nota em PDF, no mesmo formato do cupom",
-            "   (80 mm, com QR Code), das notas marcadas. Por chave ou por pedido",
-            "   nem precisa buscar antes: digite e clique em ESPELHO FISCAL (PDF).",
+            "   (80 mm, com QR Code), das notas marcadas; sem nenhuma marcada, de",
+            "   todas da lista. Por chave ou por pedido nem precisa buscar antes:",
+            "   digite e clique em ESPELHO FISCAL (PDF).",
             "   O numero do pedido pode se repetir (zera por dia): se ele aparecer",
             "   em mais de uma nota, a lista mostra todas, da mais recente para a",
-            "   mais antiga. Deixe marcada so a do dia certo e clique de novo.",
+            "   mais antiga. Marque so a do dia certo e clique de novo.",
             "   Uma nota: o PDF abre sozinho. Varias: abre a pasta do lote.",
             "   So NFC-e autorizada tem espelho. A cancelada sai com a tarja",
             "   NOTA CANCELADA; inutilizada e sem protocolo ficam de fora e",
@@ -4922,6 +4988,7 @@ function Show-XmlDownloader {
             "   Enter no campo Notas ou Pedido ja faz a busca.",
             "   Enter no campo Servidor testa a conexao.",
             "   Clique no cabecalho da coluna para ordenar a lista.",
+            "   Arraste o cabecalho da coluna para mudar a ordem (fica guardada).",
             "   Botao direito na lista: marcar todos, desmarcar todos, copiar chave.",
             "   Duplo clique numa linha ja baixada abre o XML."
         ) -join "`r`n"
@@ -5169,7 +5236,15 @@ function Show-XmlDownloader {
                 }
             })
 
-        $f.Add_FormClosing({ $Script:XmlCancelar = $true; $Script:XmlForm = $null })
+        $f.Add_FormClosing({
+                $Script:XmlCancelar = $true; $Script:XmlForm = $null
+                # Ordem das colunas arrastadas: DisplayIndex de cada coluna, na ordem dos indices
+                try {
+                    $ordem = @(foreach ($col in $lv.Columns) { $col.DisplayIndex }) -join ','
+                    Set-Content -Path $Script:XmlArqColunas -Value $ordem -ErrorAction Stop
+                }
+                catch {}
+            })
 
         & $atualizaModo
         & $contaNotas
@@ -11492,6 +11567,7 @@ function Add-CtxLink {
 
 Add-CtxLink "Manual Técnico" "https://netcontroll.gitbook.io/xmenu-tecnico"
 Add-CtxLink "Versões XMenu" "https://netcontroll.gitbook.io/xmenu-versoes"
+Add-CtxLink "Universidade XMenu" "https://netcontroll.gitbook.io/xmenu-universidade"
 Add-CtxLink "ADM Master" "https://netcontroll.com.br/adm/"
 Add-CtxLink "Portal Xmenu" "https://portal.netcontroll.com.br/#/auth/login"
 # ============================================
