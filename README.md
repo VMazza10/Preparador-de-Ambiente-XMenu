@@ -80,7 +80,8 @@ Os arquivos do próprio programa vêm por endereço fixo de `raw.githubuserconte
 │   ├── PREPARADOR WEB REVENDA.BAT
 │   └── Antigos/                    versões anteriores dos executáveis
 ├── Ferramentas/
-│   ├── CLIQUE AQUI.BAT             roda o script local (para testar antes de publicar)
+│   ├── TESTAR ANTES DE SUBIR.BAT   abre o XMenu ou o Revenda local (para testar antes de publicar)
+│   ├── CLIQUE AQUI.BAT             abre o XMenu local
 │   └── GIT_PUSH.bat                publica as alterações no GitHub
 ├── Recursos/                       wallpapers, tutorial antigo e atalho de exemplo
 └── BKP/                            cópia de segurança dos scripts
@@ -102,7 +103,7 @@ O programa e os executáveis já distribuídos baixam estes arquivos por endere�
 
 ## Desenvolvimento
 
-1. Edite o script e teste com `Ferramentas/CLIQUE AQUI.BAT`, que roda a cópia local.
+1. Edite o script e teste com `Ferramentas/TESTAR ANTES DE SUBIR.BAT`, que abre a cópia local do XMenu ou do Revenda.
 2. Publique com `Ferramentas/GIT_PUSH.bat` (ou `git push`).
 
 > O que vai para a branch `main` entra em produção na hora: é de lá que os executáveis baixam o script.

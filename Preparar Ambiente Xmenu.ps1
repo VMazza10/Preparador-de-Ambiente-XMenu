@@ -11099,21 +11099,32 @@ Add-CtxLink "Portal Xmenu" "https://portal.netcontroll.com.br/#/auth/login"
 # ============================================
 
 # HEADER
-$head = New-Object System.Windows.Forms.Panel; $head.Dock = 'Top'; $head.Height = 200
-$head.BackColor = [System.Drawing.Color]::FromArgb(14, 88, 62); $head.Padding = '20,20,20,0'
+# Faixa fixa de 58 px para sobrar tela em notebook: titulo com o "Desenvolvido por"
+# embaixo, dados do PC em duas linhas ao lado e LINKS UTEIS a direita.
+if ($null -eq $Script:ToolTip) {
+    $Script:ToolTip = New-Object System.Windows.Forms.ToolTip
+    $Script:ToolTip.InitialDelay = 500
+    $Script:ToolTip.AutoPopDelay = 10000
+}
+
+$head = New-Object System.Windows.Forms.Panel; $head.Dock = 'Top'; $head.Height = 58
+$head.BackColor = [System.Drawing.Color]::FromArgb(14, 88, 62); $head.Padding = '20,10,20,10'
 [void]$form.Controls.Add($head)
 
-$hLeft = New-Object System.Windows.Forms.Panel; $hLeft.Dock = 'Fill'; $hLeft.BackColor = 'Transparent'
-[void]$head.Controls.Add($hLeft)
+# Ordem importa no Dock: o Fill entra primeiro e as laterais (titulo e botao) depois
+$hInfo = New-Object System.Windows.Forms.Panel; $hInfo.Dock = 'Fill'; $hInfo.BackColor = 'Transparent'
+[void]$head.Controls.Add($hInfo)
+$hTitulo = New-Object System.Windows.Forms.Panel; $hTitulo.Dock = 'Left'; $hTitulo.Width = 250; $hTitulo.BackColor = 'Transparent'
+[void]$head.Controls.Add($hTitulo)
 $lT = New-Object System.Windows.Forms.Label; $lT.Text = "XMenu Manager"; $lT.AutoSize = $true
 $lT.ForeColor = [System.Drawing.Color]::White
-$lT.Font = New-Object System.Drawing.Font("Segoe UI", 24, [System.Drawing.FontStyle]::Bold); $lT.Location = '0,10'
-[void]$hLeft.Controls.Add($lT)
+$lT.Font = New-Object System.Drawing.Font("Segoe UI", 14, [System.Drawing.FontStyle]::Bold); $lT.Location = '0,-3'
+[void]$hTitulo.Controls.Add($lT)
 $lS = New-Object System.Windows.Forms.Label; $lS.Text = "Desenvolvido por Vinicius Mazaroski"; $lS.AutoSize = $true
 $lS.ForeColor = [System.Drawing.Color]::Gold
-$lS.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
-$lS.Location = '5,60'
-[void]$hLeft.Controls.Add($lS)
+$lS.Font = New-Object System.Drawing.Font("Segoe UI", 8, [System.Drawing.FontStyle]::Bold)
+$lS.Location = '2,23'
+[void]$hTitulo.Controls.Add($lS)
 
 # Os dados de hardware sao lidos logo depois que a janela aparece (no Shown, la no fim):
 # a janela abre com "..." e o cabecalho se completa em uns 0,3 s.
@@ -11159,51 +11170,104 @@ $preencheHardware = {
     }
     catch {}
 
-    $lHw1.Text = "[ Host: $env:COMPUTERNAME   |   IP Local: $localIP   |   Usuario: $env:USERNAME ]"
-    $lHw2.Text = "Sistema: $($os.Caption -replace 'Microsoft ','')   |   CPU: $($cpu.Name.Trim())"
-    $lHw3.Text = "RAM: $([Math]::Round($ram.TotalPhysicalMemory / 1GB)) GB   |   $diskType (C:): $([Math]::Round($disk.Size / 1GB)) GB   |   Video: $gpuName"
+    # Processador sem (R), (TM), "CPU", "@ 2.90GHz" e "Six-Core Processor" para caber na grade;
+    # o texto copiado continua com o nome completo
+    $cpuCompleto = "$($cpu.Name)".Trim()
+    $cpuCurto = ($cpuCompleto -replace '\((R|TM)\)|®|™', '' -replace '\s+CPU\b', '' -replace '\s+@.*$', '' -replace '\s+\S+-Core Processor$', '' -replace '\s+Processor$', '' -replace '\s{2,}', ' ').Trim()
+    $gpuCurto = ("$gpuName" -replace '\((R|TM)\)|®|™', '' -replace '\s{2,}', ' ').Trim()
+    $sistemaPc = "$($os.Caption -replace 'Microsoft ','')".Trim()
+    $ramPc = "$([Math]::Round($ram.TotalPhysicalMemory / 1GB)) GB"
+    $discoPc = "$([Math]::Round($disk.Size / 1GB)) GB"
+    $Script:InfoPc = @(
+        [PSCustomObject]@{ Linha = 0; Col = 0; Nome = 'Host'; Valor = $env:COMPUTERNAME },
+        [PSCustomObject]@{ Linha = 0; Col = 1; Nome = 'IP'; Valor = $localIP },
+        [PSCustomObject]@{ Linha = 0; Col = 2; Nome = 'Usuário'; Valor = $env:USERNAME },
+        [PSCustomObject]@{ Linha = 0; Col = 3; Nome = 'Sistema'; Valor = $sistemaPc },
+        [PSCustomObject]@{ Linha = 1; Col = 0; Nome = 'CPU'; Valor = $cpuCurto },
+        [PSCustomObject]@{ Linha = 1; Col = 1; Nome = 'RAM'; Valor = $ramPc },
+        [PSCustomObject]@{ Linha = 1; Col = 2; Nome = "$diskType (C:)"; Valor = $discoPc },
+        [PSCustomObject]@{ Linha = 1; Col = 3; Nome = 'Vídeo'; Valor = $gpuCurto }
+    )
+    $Script:InfoPcTexto = "Host: $env:COMPUTERNAME | IP Local: $localIP | Usuário: $env:USERNAME | Sistema: $sistemaPc`r`nCPU: $cpuCompleto | RAM: $ramPc | $diskType (C:): $discoPc | Vídeo: $gpuName"
+    $Script:ToolTip.SetToolTip($hInfo, "$($Script:InfoPcTexto)`r`n(clique para copiar os dados do PC)")
+    $hInfo.Invalidate()
 }
 
-$lHw1 = New-Object System.Windows.Forms.Label
-$lHw1.Text = "[ Host: $env:COMPUTERNAME   |   IP Local: ...   |   Usuario: $env:USERNAME ]"
-$lHw1.AutoSize = $true; $lHw1.ForeColor = [System.Drawing.Color]::WhiteSmoke
-$lHw1.Font = New-Object System.Drawing.Font("Consolas", 10.5, [System.Drawing.FontStyle]::Bold)
-$lHw1.Location = '5,105'
-[void]$hLeft.Controls.Add($lHw1)
-
-$lHw2 = New-Object System.Windows.Forms.Label
-$lHw2.Text = "Sistema: ...   |   CPU: ..."
-$lHw2.AutoSize = $true; $lHw2.ForeColor = [System.Drawing.Color]::WhiteSmoke
-$lHw2.Font = New-Object System.Drawing.Font("Consolas", 10.5, [System.Drawing.FontStyle]::Bold)
-$lHw2.Location = '5,125'
-[void]$hLeft.Controls.Add($lHw2)
-
-$lHw3 = New-Object System.Windows.Forms.Label
-$lHw3.Text = "RAM: ...   |   Disco (C:): ...   |   Video: ..."
-$lHw3.AutoSize = $true; $lHw3.ForeColor = [System.Drawing.Color]::WhiteSmoke
-$lHw3.Font = New-Object System.Drawing.Font("Consolas", 10.5, [System.Drawing.FontStyle]::Bold)
-$lHw3.Location = '5,145'
-[void]$hLeft.Controls.Add($lHw3)
-
-$hwCopyAction = {
-    $fullText = "$($lHw1.Text)`r`n$($lHw2.Text)`r`n$($lHw3.Text)"
-    [System.Windows.Forms.Clipboard]::SetText($fullText)
-    Log-Message "SUCESSO" "Informações de hardware copiadas para a área de transferência."
-}
-$lHw1.Cursor = [System.Windows.Forms.Cursors]::Hand; $lHw1.Add_Click($hwCopyAction)
-$lHw2.Cursor = [System.Windows.Forms.Cursors]::Hand; $lHw2.Add_Click($hwCopyAction)
-$lHw3.Cursor = [System.Windows.Forms.Cursors]::Hand; $lHw3.Add_Click($hwCopyAction)
+# Dados do PC em grade: nome do campo apagado e valor em branco, colunas alinhadas entre
+# as duas linhas. Desenhado no Paint para, em janela estreita, so o fim dos valores mais
+# longos virar "..." (label com AutoSize cortaria no meio da palavra).
+$fonteInfoNome = New-Object System.Drawing.Font("Segoe UI", 8)
+$fonteInfoValor = New-Object System.Drawing.Font("Segoe UI Semibold", 9)
+$corInfoNome = [System.Drawing.Color]::FromArgb(160, 205, 185)
+$altLinhaInfo = [Math]::Max($fonteInfoNome.Height, $fonteInfoValor.Height) + 2
+$Script:InfoPc = @(
+    [PSCustomObject]@{ Linha = 0; Col = 0; Nome = 'Host'; Valor = $env:COMPUTERNAME },
+    [PSCustomObject]@{ Linha = 0; Col = 1; Nome = 'IP'; Valor = '...' },
+    [PSCustomObject]@{ Linha = 0; Col = 2; Nome = 'Usuário'; Valor = $env:USERNAME },
+    [PSCustomObject]@{ Linha = 0; Col = 3; Nome = 'Sistema'; Valor = '...' },
+    [PSCustomObject]@{ Linha = 1; Col = 0; Nome = 'CPU'; Valor = '...' },
+    [PSCustomObject]@{ Linha = 1; Col = 1; Nome = 'RAM'; Valor = '...' },
+    [PSCustomObject]@{ Linha = 1; Col = 2; Nome = 'Disco (C:)'; Valor = '...' },
+    [PSCustomObject]@{ Linha = 1; Col = 3; Nome = 'Vídeo'; Valor = '...' }
+)
+$Script:InfoPcTexto = ""
+$hInfo.Cursor = [System.Windows.Forms.Cursors]::Hand
+# Sem piscar ao redimensionar a janela
+$hInfo.GetType().GetProperty('DoubleBuffered', [System.Reflection.BindingFlags]'Instance,NonPublic').SetValue($hInfo, $true, $null)
+$hInfo.Add_Resize({ $hInfo.Invalidate() })
+$hInfo.Add_Paint({
+        param($s, $e)
+        $g = $e.Graphics
+        $flags = [System.Windows.Forms.TextFormatFlags]'Left, VerticalCenter, EndEllipsis, NoPadding, SingleLine'
+        # Medir sem EndEllipsis: com ele e sem tamanho limite o MeasureText devolve quase zero
+        $flagsMedida = [System.Windows.Forms.TextFormatFlags]'NoPadding, SingleLine'
+        $gapNome = 5; $gapCol = 22; $x0 = 14
+        $larNome = @(0, 0, 0, 0); $larValor = @(0, 0, 0, 0)
+        foreach ($it in $Script:InfoPc) {
+            $larNome[$it.Col] = [Math]::Max($larNome[$it.Col], [System.Windows.Forms.TextRenderer]::MeasureText($g, $it.Nome, $fonteInfoNome, [System.Drawing.Size]::Empty, $flagsMedida).Width + 2)
+            $larValor[$it.Col] = [Math]::Max($larValor[$it.Col], [System.Windows.Forms.TextRenderer]::MeasureText($g, "$($it.Valor)", $fonteInfoValor, [System.Drawing.Size]::Empty, $flagsMedida).Width + 2)
+        }
+        # Janela estreita: tira o que falta da coluna de valor mais larga (ate 60 px), depois da seguinte
+        $usado = $x0 + 4 * $gapNome + 3 * $gapCol
+        for ($c = 0; $c -lt 4; $c++) { $usado += $larNome[$c] + $larValor[$c] }
+        $sobra = $s.ClientSize.Width - $usado
+        for ($volta = 0; $volta -lt 4 -and $sobra -lt 0; $volta++) {
+            $maior = 0
+            for ($c = 1; $c -lt 4; $c++) { if ($larValor[$c] -gt $larValor[$maior]) { $maior = $c } }
+            $corte = [Math]::Min(-$sobra, $larValor[$maior] - 60)
+            if ($corte -le 0) { break }
+            $larValor[$maior] -= $corte
+            $sobra += $corte
+        }
+        $y0 = [int](($s.ClientSize.Height - 2 * $altLinhaInfo) / 2)
+        # Filete separando do titulo
+        $caneta = New-Object System.Drawing.Pen([System.Drawing.Color]::FromArgb(70, 255, 255, 255), 1)
+        $g.DrawLine($caneta, 0, $y0 + 2, 0, $y0 + 2 * $altLinhaInfo - 2)
+        $caneta.Dispose()
+        foreach ($it in $Script:InfoPc) {
+            $x = $x0
+            for ($c = 0; $c -lt $it.Col; $c++) { $x += $larNome[$c] + $gapNome + $larValor[$c] + $gapCol }
+            $y = $y0 + $it.Linha * $altLinhaInfo
+            [System.Windows.Forms.TextRenderer]::DrawText($g, $it.Nome, $fonteInfoNome, (New-Object System.Drawing.Rectangle($x, $y, $larNome[$it.Col], $altLinhaInfo)), $corInfoNome, $flags)
+            [System.Windows.Forms.TextRenderer]::DrawText($g, "$($it.Valor)", $fonteInfoValor, (New-Object System.Drawing.Rectangle(($x + $larNome[$it.Col] + $gapNome), $y, $larValor[$it.Col], $altLinhaInfo)), [System.Drawing.Color]::White, $flags)
+        }
+    })
+$hInfo.Add_Click({
+        if ("$($Script:InfoPcTexto)" -eq "") { return }
+        [System.Windows.Forms.Clipboard]::SetText($Script:InfoPcTexto)
+        Log-Message "SUCESSO" "Informações de hardware copiadas para a área de transferência."
+    })
 
 $hRight = New-Object System.Windows.Forms.FlowLayoutPanel; $hRight.Dock = 'Right'; $hRight.Width = 140
-$hRight.FlowDirection = 'TopDown'; $hRight.BackColor = 'Transparent'; $hRight.WrapContents = $false
-$hRight.Padding = '0,40,0,0'
+$hRight.FlowDirection = 'LeftToRight'; $hRight.BackColor = 'Transparent'; $hRight.WrapContents = $false
+$hRight.Padding = '0,2,0,0'
 [void]$head.Controls.Add($hRight)
 
 # O diagnostico de rede agora fica na grade de SUPORTE E DIAGNOSTICO,
 # junto com as outras ferramentas (nao precisa mais de botao no cabecalho).
 
 # --- NOVO BOTAO LINKS NO HEADER ---
-$btnLinks = New-Object System.Windows.Forms.Button; $btnLinks.Text = "LINKS ÚTEIS ▼"; $btnLinks.Size = '140,40'
+$btnLinks = New-Object System.Windows.Forms.Button; $btnLinks.Text = "LINKS ÚTEIS ▼"; $btnLinks.Size = '140,34'
 $btnLinks.BackColor = 'White'; $btnLinks.ForeColor = [System.Drawing.Color]::FromArgb(12, 78, 55)
 $btnLinks.FlatStyle = 'Flat'; $btnLinks.FlatAppearance.BorderSize = 0; $btnLinks.Cursor = [System.Windows.Forms.Cursors]::Hand
 $btnLinks.Font = New-Object System.Drawing.Font("Segoe UI", 9.5, [System.Drawing.FontStyle]::Bold)
@@ -11215,6 +11279,18 @@ $btnLinks.Add_Click({
     })
 [void]$hRight.Controls.Add($btnLinks)
 # ----------------------------------
+
+# Posicoes pelo tamanho real das letras: com a escala do Windows em 125% ou 150% a
+# fonte cresce e posicao fixa em pixel cortava o "Desenvolvido por". A faixa acompanha.
+$altTituloBloco = $lT.PreferredHeight - 3 + $lS.PreferredHeight
+$altUtilCab = [Math]::Max([Math]::Max($altTituloBloco, 2 * $altLinhaInfo), $btnLinks.Height)
+$head.Padding = New-Object System.Windows.Forms.Padding(20, 8, 20, 8)
+$head.Height = $altUtilCab + 16
+$topoTitulo = [int](($altUtilCab - $altTituloBloco) / 2)
+$lT.Location = New-Object System.Drawing.Point(0, $topoTitulo)
+$lS.Location = New-Object System.Drawing.Point(2, ($topoTitulo + $lT.PreferredHeight - 3))
+$hTitulo.Width = [Math]::Max($lT.PreferredWidth, $lS.PreferredWidth + 2) + 24
+$hRight.Padding = New-Object System.Windows.Forms.Padding(0, [int](($altUtilCab - $btnLinks.Height) / 2), 0, 0)
 
 # FOOTER
 $foot = New-Object System.Windows.Forms.Panel; $foot.Dock = 'Bottom'; $foot.Height = 30
@@ -11231,22 +11307,26 @@ $stat.TextAlign = 'MiddleLeft'; $stat.Padding = '10,0,0,0'; $stat.ForeColor = 'G
 
 # MAIN LAYOUT
 $layout = New-Object System.Windows.Forms.TableLayoutPanel; $layout.Dock = 'Fill'; $layout.ColumnCount = 1
-$layout.Padding = '20'; $layout.RowCount = 3
-[void]$layout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Percent, 20)))
-[void]$layout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Absolute, 70)))
-[void]$layout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Percent, 80)))
+# Log com 3 linhas e o resto da altura para os botoes, que e o que o tecnico usa.
+# Altura pela fonte real para acompanhar a escala do Windows (125%, 150%).
+$fonteLog = New-Object System.Drawing.Font("Consolas", 9)
+$altLog = $fonteLog.Height * 3 + $form.Font.Height + 24
+$layout.Padding = '10'; $layout.RowCount = 3
+[void]$layout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Absolute, $altLog)))
+[void]$layout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Absolute, 60)))
+[void]$layout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Percent, 100)))
 [void]$form.Controls.Add($layout); $layout.BringToFront()
 
 $gLog = New-Object System.Windows.Forms.GroupBox; $gLog.Text = "Log"; $gLog.ForeColor = 'Gray'; $gLog.Dock = 'Fill'
 [void]$layout.Controls.Add($gLog, 0, 0)
 $tLog = New-Object System.Windows.Forms.RichTextBox; $tLog.Dock = 'Fill'; $tLog.BackColor = [System.Drawing.Color]::FromArgb(20, 20, 20)
-$tLog.ForeColor = 'White'; $tLog.BorderStyle = 'None'; $tLog.ReadOnly = $true; $tLog.Font = New-Object System.Drawing.Font("Consolas", 9)
+$tLog.ForeColor = 'White'; $tLog.BorderStyle = 'None'; $tLog.ReadOnly = $true; $tLog.Font = $fonteLog
 [void]$gLog.Controls.Add($tLog); $Script:LogBox = $tLog
 
 $bCfg = New-Object System.Windows.Forms.Button; $bCfg.Text = "PREPARAR AMBIENTE WINDOWS"
 $bCfg.Dock = 'Fill'; $bCfg.BackColor = [System.Drawing.Color]::FromArgb(14, 88, 62); $bCfg.ForeColor = 'White'
 $bCfg.FlatStyle = 'Flat'; $bCfg.Font = New-Object System.Drawing.Font("Segoe UI", 12, [System.Drawing.FontStyle]::Bold)
-$bCfg.Margin = '0,10,0,10'; $bCfg.Cursor = 'Hand'
+$bCfg.Margin = '0,6,0,6'; $bCfg.Cursor = 'Hand'
 $bCfg.FlatAppearance.BorderSize = 0
 $bCfg.FlatAppearance.MouseOverBackColor = [System.Drawing.Color]::FromArgb(20, 112, 80)
 $bCfg.FlatAppearance.MouseDownBackColor = [System.Drawing.Color]::FromArgb(10, 68, 48)
