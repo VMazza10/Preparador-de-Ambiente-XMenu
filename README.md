@@ -1,4 +1,4 @@
-# XMenu System Manager — Preparador de Ambiente
+# Preparador XMenu — Suporte Técnico
 
 Ferramenta em **PowerShell + Windows Forms** que prepara e dá suporte aos computadores que rodam **XMenu** e **NetPDV**. O técnico abre um único executável e tem, numa janela só, o preparo do Windows, os instaladores, os diagnósticos e os reparos que antes eram feitos à mão, um por um.
 
@@ -56,7 +56,7 @@ Antes isso era um passo a passo manual ([tutorial antigo](Recursos/Tutorial%20de
 ```mermaid
 flowchart LR
     A[Técnico abre<br>PREPARADOR WEB.exe] -->|baixa a versão atual| B[Preparar Ambiente<br>Xmenu.ps1]
-    B -->|roda como administrador| C[Janela do XMenu<br>System Manager]
+    B -->|roda como administrador| C[Janela do<br>Preparador XMenu]
     C -->|Preparar Ambiente Windows| D[fundo.png<br>Config/]
     C -->|instaladores| E[Releases do GitHub e<br>sites dos fabricantes]
 ```

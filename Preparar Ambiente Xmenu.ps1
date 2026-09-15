@@ -1,5 +1,5 @@
 ﻿# =============================================================================
-# XMENU SYSTEM MANAGER v5.0
+# PREPARADOR XMENU v5.0
 # Visual: Dashboard Moderno
 # Correcoes:
 #   - CRITICO: Removido DoEvents do loop de evento de download (causava crash).
@@ -1595,6 +1595,27 @@ function Get-XmlChave {
     return ""
 }
 
+function Get-XmlCertificadoAssinatura {
+    # Certificado que assinou a nota, lido do <X509Certificate> da propria assinatura:
+    # e o nome que aparece no Windows ("EMPRESA LTDA:12345678000199"). Serve para dar
+    # nome aos certificados quando o banco emite com mais de um.
+    # Devolve hashtable Nome / Cnpj / Vence, ou $null se o XML nao tiver assinatura.
+    param([string]$Xml)
+    if ([string]::IsNullOrEmpty($Xml)) { return $null }
+    $achou = [regex]::Match($Xml, '<(?:\w+:)?X509Certificate>\s*([A-Za-z0-9+/=\s]+?)\s*</(?:\w+:)?X509Certificate>')
+    if (-not $achou.Success) { return $null }
+    try {
+        $bytes = [Convert]::FromBase64String(($achou.Groups[1].Value -replace '\s', ''))
+        $cert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2 (, $bytes)
+        $cn = "$($cert.GetNameInfo([System.Security.Cryptography.X509Certificates.X509NameType]::SimpleName, $false))".Trim()
+        $nome = $cn; $cnpj = ""
+        # e-CNPJ da ICP-Brasil: "RAZAO SOCIAL:CNPJ" (o CNPJ alfanumerico tambem cabe aqui)
+        if ($cn -match '^(.*\S)\s*:\s*([0-9A-Za-z]{14})$') { $nome = $matches[1]; $cnpj = $matches[2].ToUpper() }
+        return @{ Nome = $nome; Cnpj = $cnpj; Vence = $cert.NotAfter }
+    }
+    catch { return $null }
+}
+
 function Get-XmlNomeArquivo {
     # Nome dos arquivos de uma nota, sem extensao. O fim do nome diz a situacao,
     # para o arquivo continuar legivel quando sai da pasta do lote e se mistura.
@@ -1626,6 +1647,8 @@ function Get-XmlNomeLote {
     #            ("Séries 7 e 8"; acima de 3 vira "4 séries")
     #   -Notas: no modo Pedido, os numeros dos pedidos
     #   -Titulo: "Espelho NFC-e" no lote de PDFs
+    #   -Empresa: banco com mais de um certificado; cada empresa tem o seu lote
+    #             ("XML NFC-e - ALTA ALIMENTOS LTDA - Série 1 - Notas 1 a 15")
     param(
         [ValidateSet('Serie', 'Periodo', 'Chave', 'Pedido')][string]$Modo,
         [string]$Serie = "",
@@ -1634,9 +1657,11 @@ function Get-XmlNomeLote {
         [datetime]$De,
         [datetime]$Ate,
         [int]$Quantidade = 0,
-        [string]$Titulo = "XML NFC-e"
+        [string]$Titulo = "XML NFC-e",
+        [string]$Empresa = ""
     )
     $partes = @($Titulo)
+    if ("$Empresa".Trim() -ne "") { $partes += "$Empresa".Trim() }
     if ("$Serie".Trim() -ne "") { $partes += "Série " + "$Serie".Trim() }
     else {
         $listaSeries = @($Series | Sort-Object -Unique)
@@ -2711,6 +2736,17 @@ function Show-XmlDownloader {
         $btnTestar = New-ToolButton $cardConn "TESTAR CONEXÃO" 624 32 150 27 $Script:UiAzul $null $dicaTestar
         $btnPendentes = New-ToolButton $cardConn "NOTAS PENDENTES" 786 32 160 27 $Script:UiAmarelo $null "Lista as NFC-e que não subiram: sem autorização da SEFAZ e sem inutilização, com a situação e o motivo (sem resposta, rejeitada, contingência não enviada, ignorada)."
         $lblConn = New-ToolLabel $cardConn "Informe o servidor e clique em TESTAR CONEXÃO." 14 60 9 -Cor $Script:UiSuave -W 930
+        # Certificado: so aparece quando o banco emite com mais de um (IDServidorFiscal).
+        # Raro, mas nesses clientes as duas empresas usam a mesma serie e os numeros se repetem.
+        $lblCert = New-ToolLabel $cardConn "Certificado:" 548 60 9 -Cor $Script:UiSuave
+        $cmbCert = & $novaCombo $cardConn 630 56 316
+        $cmbCert.DropDownWidth = 460
+        $lblCert.Visible = $false
+        $cmbCert.Visible = $false
+        $Script:XmlTemServidor = $false
+        $Script:XmlServidores = @()
+        $Script:XmlNomeServidor = @{}
+        $Script:XmlFaltantesTexto = ""
 
         # ---------------------------------------------------------------------
         # CARTAO 2: os quatro modos de busca
@@ -2805,6 +2841,8 @@ function Show-XmlDownloader {
         # Total da nota: com o pedido repetido (zera por dia) o valor mostra qual e a certa
         $colValor = $lv.Columns.Add("Valor R$", 75)
         $colValor.TextAlign = 'Right'
+        # Empresa do certificado que emitiu: largura 0 quando o banco tem um so
+        $colCert = $lv.Columns.Add("Certificado", 0)
         [void]$f.Controls.Add($lv)
 
         # Aviso sobreposto a lista: no rodape ficava discreto demais para uma
@@ -2834,6 +2872,7 @@ function Show-XmlDownloader {
             $Script:ToolTip.SetToolTip($txtServidor, "Onde está o SQL Server. Deixe 127.0.0.1 quando o banco roda na própria máquina; use o IP ou o nome do servidor quando o PDV é terminal. A janela lembra o último usado.")
             $Script:ToolTip.SetToolTip($txtSenha, "Senha do usuário sa. Nos clientes é sempre netcontroll; só mude se esse cliente tiver senha diferente.")
             $Script:ToolTip.SetToolTip($cmbParceiro, "Código da loja dentro do banco. Carrega sozinho ao testar a conexão. Quando só existe um, já vem escolhido.")
+            $Script:ToolTip.SetToolTip($cmbCert, "Este banco emite NFC-e com mais de um certificado (uma empresa em cada caixa). Escolha de qual empresa são as notas; em Todos, cada empresa sai no seu próprio lote e zip. O nome vem do certificado que assinou as notas.")
             $Script:ToolTip.SetToolTip($rbSerie, "O modo mais usado: você sabe a série e os números das notas que o cliente pediu.")
             $Script:ToolTip.SetToolTip($cmbSerie, "Série do caixa. A lista vem do próprio banco depois de testar a conexão.")
             $Script:ToolTip.SetToolTip($txtNotas, "Aceita intervalo, lista ou os dois juntos:  1-15  |  1,5,9  |  1-10,15,20-25. Pode digitar com espaços. Enter já faz a busca.")
@@ -3043,6 +3082,135 @@ function Show-XmlDownloader {
             if ($cmbSerie.Items.Count -gt 0 -and "$($cmbSerie.Text)".Trim() -eq "") { $cmbSerie.SelectedIndex = 0 }
         }
 
+        # Certificados do parceiro (IDServidorFiscal da NFCeTokenID). O filtro so aparece
+        # com dois ou mais: a grande maioria dos bancos tem so o 0 e fica como sempre foi.
+        # O nome sai do certificado que assinou a ultima nota autorizada de cada um.
+        $carregarCertificados = {
+            param($Conexao, $Parceiro)
+            $Script:XmlTemServidor = $false
+            $Script:XmlServidores = @()
+            $Script:XmlNomeServidor = @{}
+            $cmd = $Conexao.CreateCommand()
+            $cmd.CommandTimeout = 30
+            # Banco de versao antiga do NetWebPDV nao tem a coluna: a busca segue sem ela
+            $cmd.CommandText = "SELECT COUNT(*) FROM sys.columns WHERE name = 'IDServidorFiscal' AND object_id IN (OBJECT_ID('dbo.NFCeTokenID'), OBJECT_ID('dbo.NFCeTokenIDLog'))"
+            $Script:XmlTemServidor = ([int]$cmd.ExecuteScalar() -eq 2)
+            $cmd.CommandText = "SELECT COUNT(*) FROM sys.columns WHERE name = 'IDServidorFiscal' AND object_id = OBJECT_ID('dbo.NSUFiscal')"
+            $Script:XmlNsuTemServidor = ([int]$cmd.ExecuteScalar() -eq 1)
+            if ($Script:XmlTemServidor) {
+                # Um certificado por volta, direto pela PK (IDParceiro, IDServidorFiscal, Serie, ID),
+                # sem varrer a tabela: num banco grande o DISTINCT levaria segundos
+                $cmd.CommandText = "SET NOCOUNT ON; DECLARE @s int; DECLARE @r TABLE (Servidor int); " +
+                "SELECT @s = MIN(IDServidorFiscal) FROM NFCeTokenID WHERE IDParceiro = @p; " +
+                "WHILE @s IS NOT NULL BEGIN INSERT INTO @r (Servidor) VALUES (@s); " +
+                "SELECT @s = MIN(IDServidorFiscal) FROM NFCeTokenID WHERE IDParceiro = @p AND IDServidorFiscal > @s; END " +
+                "SELECT Servidor FROM @r ORDER BY Servidor"
+                $par = $cmd.Parameters.Add("@p", [System.Data.SqlDbType]::BigInt); $par.Value = [long]$Parceiro
+                $ids = @()
+                $rd = & $executarLeitor $cmd
+                try { while ($rd.Read()) { $ids += [int]$rd.GetValue(0) } } finally { $rd.Close() }
+
+                if ($ids.Count -gt 1) {
+                    foreach ($idServ in $ids) {
+                        $nomeServ = ""; $cnpjServ = ""; $venceServ = $null
+                        try {
+                            $c2 = $Conexao.CreateCommand()
+                            $c2.CommandTimeout = 20
+                            $c2.CommandText = "SELECT TOP 1 xmlEnvio, xmlResposta FROM NFCeTokenIDLog WHERE IDParceiro = @p AND IDServidorFiscal = @s AND CodigoRetorno = 100 ORDER BY ID DESC"
+                            $par = $c2.Parameters.Add("@p", [System.Data.SqlDbType]::BigInt); $par.Value = [long]$Parceiro
+                            $par = $c2.Parameters.Add("@s", [System.Data.SqlDbType]::Int); $par.Value = $idServ
+                            $rd2 = & $executarLeitor $c2
+                            try {
+                                if ($rd2.Read()) {
+                                    $cert = Get-XmlCertificadoAssinatura "$(Get-XmlDbValor $rd2 'xmlEnvio')"
+                                    if ($null -eq $cert) { $cert = Get-XmlCertificadoAssinatura "$(Get-XmlDbValor $rd2 'xmlResposta')" }
+                                    if ($null -ne $cert) { $nomeServ = $cert.Nome; $cnpjServ = $cert.Cnpj; $venceServ = $cert.Vence }
+                                }
+                            }
+                            finally { $rd2.Close() }
+                        }
+                        catch {}
+                        # Sem nota assinada: o nome do cadastro do servidor fiscal (tabela SATs)
+                        if ($nomeServ -eq "" -and $idServ -gt 0) {
+                            try {
+                                $c3 = $Conexao.CreateCommand()
+                                $c3.CommandTimeout = 20
+                                $c3.CommandText = "IF OBJECT_ID('dbo.SATs') IS NOT NULL SELECT TOP 1 NomeCertificado, Nome, CNPJ FROM SATs WHERE IDParceiro = @p AND ID = @s"
+                                $par = $c3.Parameters.Add("@p", [System.Data.SqlDbType]::BigInt); $par.Value = [long]$Parceiro
+                                $par = $c3.Parameters.Add("@s", [System.Data.SqlDbType]::Int); $par.Value = $idServ
+                                $rd3 = & $executarLeitor $c3
+                                try {
+                                    if ($rd3.Read()) {
+                                        $nomeServ = "$(Get-XmlDbValor $rd3 'NomeCertificado')".Trim()
+                                        if ($nomeServ -eq "") { $nomeServ = "$(Get-XmlDbValor $rd3 'Nome')".Trim() }
+                                        $cnpjServ = "$(Get-XmlDbValor $rd3 'CNPJ')" -replace '[^0-9A-Za-z]', ''
+                                    }
+                                }
+                                finally { $rd3.Close() }
+                            }
+                            catch {}
+                        }
+                        if ($nomeServ -eq "") {
+                            if ($idServ -eq 0) { $nomeServ = "Certificado principal" } else { $nomeServ = "Certificado $idServ" }
+                        }
+                        $rotulo = $nomeServ
+                        if ($cnpjServ.Length -eq 14) { $rotulo = $rotulo + " - " + (Format-DanfeDocumento $cnpjServ) }
+                        $Script:XmlServidores += @{ Id = $idServ; Nome = $nomeServ; Cnpj = $cnpjServ; Vence = $venceServ; Rotulo = $rotulo }
+                        $Script:XmlNomeServidor["$idServ"] = $nomeServ
+                    }
+                }
+            }
+
+            $multi = (@($Script:XmlServidores).Count -gt 1)
+            $cmbCert.Items.Clear()
+            if ($multi) {
+                [void]$cmbCert.Items.Add("Todos os certificados")
+                foreach ($sv in $Script:XmlServidores) { [void]$cmbCert.Items.Add($sv.Rotulo) }
+                $cmbCert.SelectedIndex = 0
+                Log-Message "INFO" ("XMLs: banco com $(@($Script:XmlServidores).Count) certificados - " + (($Script:XmlServidores | ForEach-Object { $_.Rotulo }) -join " | "))
+            }
+            $lblCert.Visible = $multi
+            $cmbCert.Visible = $multi
+            if ($multi) { $lblConn.Width = 526; $colCert.Width = 170 } else { $lblConn.Width = 930; $colCert.Width = 0 }
+        }
+
+        # IDServidorFiscal escolhido no filtro, ou $null para todos (e para banco com um so)
+        $servidorEscolhido = {
+            if (-not $cmbCert.Visible -or $cmbCert.SelectedIndex -le 0) { return $null }
+            return [int]$Script:XmlServidores[$cmbCert.SelectedIndex - 1].Id
+        }
+
+        # Parametro @servidor de toda consulta: DBNull quando nao ha filtro
+        $addServidor = {
+            param($Cmd)
+            $p = $Cmd.Parameters.Add("@servidor", [System.Data.SqlDbType]::Int)
+            $sel = & $servidorEscolhido
+            if ($null -eq $sel) { $p.Value = [System.DBNull]::Value } else { $p.Value = $sel }
+        }
+
+        # Faltantes separados por empresa ("ALTA ALIMENTOS LTDA: 5, 9 | NICOLETTI...: 7") para
+        # o aviso e o COPIAR FALTANTES; vazio quando o banco tem um certificado so
+        $faltantesPorEmpresa = {
+            param($Itens)
+            if (@($Script:XmlServidores).Count -le 1) { return "" }
+            $partesF = @()
+            foreach ($grupoF in @(@($Itens) | Group-Object { "$($_.Servidor)" } | Sort-Object Name)) {
+                $numsF = @($grupoF.Group | ForEach-Object { [long]$_.Nota } | Sort-Object -Unique)
+                if ($numsF.Count -eq 0) { continue }
+                $partesF += "$(& $nomeEmpresa $grupoF.Group[0].Servidor): $(ConvertTo-FaixaTexto $numsF)"
+            }
+            return ($partesF -join " | ")
+        }
+
+        # Nome curto da empresa de um IDServidorFiscal (vazio quando o banco tem um so)
+        $nomeEmpresa = {
+            param($Servidor)
+            if (@($Script:XmlServidores).Count -le 1 -or $null -eq $Servidor) { return "" }
+            $n = $Script:XmlNomeServidor["$Servidor"]
+            if ($null -eq $n) { return "Certificado $Servidor" }
+            return $n
+        }
+
         $testar = {
             # -Auto e a tentativa unica feita ao abrir a janela: timeout curto para
             # nao deixar a tela presa quando a maquina nao tem SQL instalado.
@@ -3088,9 +3256,16 @@ function Show-XmlDownloader {
                 }
                 $cmbParceiro.SelectedIndex = 0
                 & $carregarSeries $cn ("$($cmbParceiro.Text)".Trim())
+                try { & $carregarCertificados $cn ("$($cmbParceiro.Text)".Trim()) }
+                catch { Log-Message "INFO" "XMLs: não deu para ler os certificados do banco - $($_.Exception.Message)" }
 
                 $lblConn.ForeColor = $Script:UiVerde
-                $lblConn.Text = "OK - $versao | banco: $banco | parceiros: $($cmbParceiro.Items.Count) | séries: $($cmbSerie.Items.Count)"
+                if (@($Script:XmlServidores).Count -gt 1) {
+                    # Linha dividida com o filtro de certificado: sem a versao do SQL, que ja foi para o log
+                    $lblConn.Text = "OK - banco: $banco | séries: $($cmbSerie.Items.Count) | $(@($Script:XmlServidores).Count) certificados"
+                    Log-Message "INFO" "XMLs: $versao"
+                }
+                else { $lblConn.Text = "OK - $versao | banco: $banco | parceiros: $($cmbParceiro.Items.Count) | séries: $($cmbSerie.Items.Count)" }
                 Log-Message "SUCESSO" "XMLs: conectado em $($txtServidor.Text) / $banco"
 
                 # Lembra o servidor para a proxima abertura
@@ -3121,21 +3296,37 @@ function Show-XmlDownloader {
         # A log so tem indice por ID, entao ela e varrida uma vez por bloco e
         # deduplicada com ROW_NUMBER (preferindo a autorizada, CodigoRetorno 100).
         # ---------------------------------------------------------------------
-        $cteLogs = "SELECT g.IDParceiro, g.SerieTokenID, g.IDTokenID, g.Chave, g.nProtocolo, " +
-        "g.CodigoRetorno, g.DataEmissao AS LogDataEmissao, g.xmlEnvio, g.xmlResposta, " +
-        "g.xmlCancelamento, g.xmlRespostaCancelamento, g.DataEmissaoCancelamento, " +
-        "g.ChaveCancelamento, ROW_NUMBER() OVER (PARTITION BY " +
-        "g.IDParceiro, g.SerieTokenID, g.IDTokenID ORDER BY " +
-        "CASE WHEN g.CodigoRetorno = 100 THEN 0 ELSE 1 END, " +
-        "CASE WHEN g.xmlResposta IS NULL THEN 1 ELSE 0 END, g.ID DESC) AS rn FROM NFCeTokenIDLog g"
-
-        $colunas = "t.Serie, t.ID, t.Usada, t.Inutilizada, t.Erro, t.Ignorada, t.OFFLine, " +
-        "t.DataEmissao, t.data, t.xmlEnvioOff, t.XmlInutilizada, t.MotivoInutilizada, " +
-        "l.Chave, l.nProtocolo, l.CodigoRetorno, l.LogDataEmissao, l.xmlEnvio, l.xmlResposta, " +
-        "l.xmlCancelamento, l.xmlRespostaCancelamento, l.DataEmissaoCancelamento, l.ChaveCancelamento"
-
-        $juncao = "FROM NFCeTokenID t LEFT JOIN logs l ON l.IDParceiro = t.IDParceiro " +
-        "AND l.SerieTokenID = t.Serie AND l.IDTokenID = t.ID AND l.rn = 1"
+        # Com mais de um certificado a mesma serie e o mesmo numero existem uma vez por
+        # IDServidorFiscal (a PK e IDParceiro + IDServidorFiscal + Serie + ID): a nota e o
+        # XML so se ligam certo com ele. Sem a coluna (banco antigo) fica a ligacao de antes.
+        # Devolve hashtable: CteLogs / Colunas / Juncao / FiltroT / FiltroG
+        $sqlBase = {
+            $servG = ""; $servT = ""; $servJ = ""; $fT = ""; $fG = ""
+            if ($Script:XmlTemServidor) {
+                $servG = "g.IDServidorFiscal, "
+                $servT = "t.IDServidorFiscal, "
+                $servJ = "AND l.IDServidorFiscal = t.IDServidorFiscal "
+                $fT = " AND (@servidor IS NULL OR t.IDServidorFiscal = @servidor)"
+                $fG = " AND (@servidor IS NULL OR g.IDServidorFiscal = @servidor)"
+            }
+            return @{
+                CteLogs = "SELECT g.IDParceiro, " + $servG + "g.SerieTokenID, g.IDTokenID, g.Chave, g.nProtocolo, " +
+                "g.CodigoRetorno, g.DataEmissao AS LogDataEmissao, g.xmlEnvio, g.xmlResposta, " +
+                "g.xmlCancelamento, g.xmlRespostaCancelamento, g.DataEmissaoCancelamento, " +
+                "g.ChaveCancelamento, ROW_NUMBER() OVER (PARTITION BY " +
+                "g.IDParceiro, " + $servG + "g.SerieTokenID, g.IDTokenID ORDER BY " +
+                "CASE WHEN g.CodigoRetorno = 100 THEN 0 ELSE 1 END, " +
+                "CASE WHEN g.xmlResposta IS NULL THEN 1 ELSE 0 END, g.ID DESC) AS rn FROM NFCeTokenIDLog g"
+                Colunas = $servT + "t.Serie, t.ID, t.Usada, t.Inutilizada, t.Erro, t.Ignorada, t.OFFLine, " +
+                "t.DataEmissao, t.data, t.xmlEnvioOff, t.XmlInutilizada, t.MotivoInutilizada, " +
+                "l.Chave, l.nProtocolo, l.CodigoRetorno, l.LogDataEmissao, l.xmlEnvio, l.xmlResposta, " +
+                "l.xmlCancelamento, l.xmlRespostaCancelamento, l.DataEmissaoCancelamento, l.ChaveCancelamento"
+                Juncao = "FROM NFCeTokenID t LEFT JOIN logs l ON l.IDParceiro = t.IDParceiro " +
+                "AND l.SerieTokenID = t.Serie AND l.IDTokenID = t.ID " + $servJ + "AND l.rn = 1"
+                FiltroT = $fT
+                FiltroG = $fG
+            }
+        }
 
         # Transforma uma linha do reader no registro usado pela lista e pelo download.
         # A situacao sai so dos dados, nunca do "Tipo de nota": o filtro e aplicado
@@ -3154,6 +3345,8 @@ function Show-XmlDownloader {
                 Codigo = Get-XmlDbValor $rd "CodigoRetorno"; Cancelamento = ""; ChaveCanc = ""
                 Cancelada = $false; DataCancelamento = $null; Linha = $null
                 Pedido = Get-XmlDbValor $rd "Pedido"; Valor = $null
+                # Certificado que emitiu (null em banco sem a coluna)
+                Servidor = Get-XmlDbValor $rd "IDServidorFiscal"
             }
 
             $xEnvio = Get-XmlDbValor $rd "xmlEnvio"
@@ -3287,6 +3480,7 @@ function Show-XmlDownloader {
             $valorTxt = ""
             if ($null -ne $Item.Valor) { $valorTxt = ([decimal]$Item.Valor).ToString("#,##0.00", [System.Globalization.CultureInfo]::GetCultureInfo("pt-BR")) }
             [void]$lvi.SubItems.Add($valorTxt)
+            [void]$lvi.SubItems.Add((& $nomeEmpresa $Item.Servidor))
 
             # verde = valida | amarelo = atencao | vermelho = nao vale | cinza = nao existe
             if ($sit -eq "CANCELADA") { $lvi.ForeColor = $Script:UiVermelho }
@@ -3421,6 +3615,7 @@ function Show-XmlDownloader {
                 $Script:XmlResultados = @()
                 $Script:XmlPedidas = @()
                 $Script:XmlFaltantes = @()
+                $Script:XmlFaltantesTexto = ""
                 $pb.Value = 0
                 $lblProg.Text = ""
 
@@ -3440,6 +3635,16 @@ function Show-XmlDownloader {
                 & $mostraCarregando "Consultando o banco..."
                 $cn = & $abrirConexao
 
+                $sb = & $sqlBase
+                $cteLogs = $sb.CteLogs; $colunas = $sb.Colunas; $juncao = $sb.Juncao
+                # Certificados que esta busca cobre: com o filtro, so o escolhido; em Todos, cada
+                # um. Banco com um certificado so conta como um ($null), igual era antes.
+                $multiEmp = (@($Script:XmlServidores).Count -gt 1)
+                $servSel = & $servidorEscolhido
+                if (-not $multiEmp) { $Script:XmlServidoresBusca = @($null) }
+                elseif ($null -eq $servSel) { $Script:XmlServidoresBusca = @($Script:XmlServidores | ForEach-Object { $_.Id }) }
+                else { $Script:XmlServidoresBusca = @($servSel) }
+
                 if ($rbSerie.Checked) {
                     if ("$($cmbSerie.Text)".Trim() -eq "") {
                         & $setStatus "Escolha a série." $Script:UiVermelho; return $false
@@ -3458,15 +3663,16 @@ function Show-XmlDownloader {
                         $inSql = ($nomes -join ",")
 
                         $sql = ";WITH logs AS (" + $cteLogs + " WHERE g.IDParceiro = @parceiro " +
-                        "AND g.SerieTokenID = @serie AND g.IDTokenID IN ($inSql)) SELECT " + $colunas +
+                        "AND g.SerieTokenID = @serie AND g.IDTokenID IN ($inSql)" + $sb.FiltroG + ") SELECT " + $colunas +
                         " " + $juncao + " WHERE t.IDParceiro = @parceiro AND t.Serie = @serie " +
-                        "AND t.ID IN ($inSql) ORDER BY t.ID"
+                        "AND t.ID IN ($inSql)" + $sb.FiltroT + " ORDER BY t.ID"
 
                         $cmd = $cn.CreateCommand()
                         $cmd.CommandTimeout = 120
                         $cmd.CommandText = $sql
                         $par = $cmd.Parameters.Add("@parceiro", [System.Data.SqlDbType]::BigInt); $par.Value = $parceiro
                         $par = $cmd.Parameters.Add("@serie", [System.Data.SqlDbType]::Int); $par.Value = $serie
+                        & $addServidor $cmd
                         for ($i = 0; $i -lt $bloco.Count; $i++) {
                             $par = $cmd.Parameters.Add("@n$i", [System.Data.SqlDbType]::BigInt)
                             $par.Value = [long]$bloco[$i]
@@ -3475,21 +3681,29 @@ function Show-XmlDownloader {
                         & $setStatus "Consultando... $($achados.Count) notas lidas" $Script:UiAmarelo
                     }
 
-                    # Numero pedido que nem linha tem na tabela de numeracao
+                    # Numero pedido que nem linha tem na tabela de numeracao. Com mais de um
+                    # certificado confere em cada empresa: a nota 100 de uma nao tampa a falta da outra.
                     $vistos = @{}
-                    foreach ($a in $achados) { $vistos["$($a.Nota)"] = $true }
-                    foreach ($n in $fx.Notas) {
-                        if (-not $vistos.ContainsKey("$n")) {
-                            $achados.Add(@{
-                                Nota = [long]$n; Serie = $serie; Data = $null; Chave = ""
-                                Status = "NÃO ENCONTRADA"; Origem = ""; Conteudo = ""; Arquivo = ""
-                                Tamanho = 0; Aviso = "sem registro na NFCeTokenID"; Inutilizada = $false
-                                Codigo = $null; Cancelamento = ""; ChaveCanc = ""
-                                Cancelada = $false; DataCancelamento = $null; Linha = $null
-                            })
+                    foreach ($a in $achados) {
+                        if ($multiEmp) { $vistos["$($a.Servidor)|$($a.Nota)"] = $true } else { $vistos["$($a.Nota)"] = $true }
+                    }
+                    foreach ($servBusca in $Script:XmlServidoresBusca) {
+                        foreach ($n in $fx.Notas) {
+                            $chaveVisto = "$n"
+                            if ($multiEmp) { $chaveVisto = "$servBusca|$n" }
+                            if (-not $vistos.ContainsKey($chaveVisto)) {
+                                $achados.Add(@{
+                                        Nota = [long]$n; Serie = $serie; Data = $null; Chave = ""
+                                        Status = "NÃO ENCONTRADA"; Origem = ""; Conteudo = ""; Arquivo = ""
+                                        Tamanho = 0; Aviso = "sem registro na NFCeTokenID"; Inutilizada = $false
+                                        Codigo = $null; Cancelamento = ""; ChaveCanc = ""
+                                        Cancelada = $false; DataCancelamento = $null; Linha = $null
+                                        Servidor = $servBusca
+                                    })
+                            }
                         }
                     }
-                    $achados = @($achados | Sort-Object { [long]$_.Nota })
+                    $achados = @($achados | Sort-Object { [long]$_.Nota }, { "$($_.Servidor)" })
                 }
                 elseif ($rbPeriodo.Checked) {
                     $d1 = $dtIni.Value.Date
@@ -3498,7 +3712,7 @@ function Show-XmlDownloader {
                     $serieOpc = "$($cmbSerie2.Text)".Trim()
 
                     $filtroPeriodo = "t.IDParceiro = @parceiro AND (@serie IS NULL OR t.Serie = @serie) " +
-                    "AND COALESCE(t.DataEmissao, t.data) >= @d1 AND COALESCE(t.DataEmissao, t.data) < @d2"
+                    "AND COALESCE(t.DataEmissao, t.data) >= @d1 AND COALESCE(t.DataEmissao, t.data) < @d2" + $sb.FiltroT
                     $novoCmdPeriodo = {
                         param([string]$Sql)
                         $c = $cn.CreateCommand()
@@ -3509,6 +3723,7 @@ function Show-XmlDownloader {
                         if ($serieOpc -eq "") { $p.Value = [System.DBNull]::Value } else { $p.Value = [int]$serieOpc }
                         $p = $c.Parameters.Add("@d1", [System.Data.SqlDbType]::DateTime); $p.Value = $d1
                         $p = $c.Parameters.Add("@d2", [System.Data.SqlDbType]::DateTime); $p.Value = $d2
+                        & $addServidor $c
                         return $c
                     }
 
@@ -3533,26 +3748,34 @@ function Show-XmlDownloader {
                     # Paginas de 5000 por (Serie, ID): ate 5000 notas continua sendo uma
                     # consulta so, igual antes; acima disso vem tudo, pagina a pagina
                     $pagina = 5000
-                    $ultSerie = -1; $ultId = [long]-1
+                    $ultSerie = -1; $ultId = [long]-1; $ultServ = [int]::MinValue
+                    # Com o certificado na PK a pagina anda por (IDServidorFiscal, Serie, ID): sem ele a
+                    # nota de mesmo numero da outra empresa podia ficar de fora entre duas paginas
+                    $ordemPagina = " AND (t.Serie > @ultSerie OR (t.Serie = @ultSerie AND t.ID > @ultId)) ORDER BY t.Serie, t.ID"
+                    if ($Script:XmlTemServidor) {
+                        $ordemPagina = " AND (t.IDServidorFiscal > @ultServ OR (t.IDServidorFiscal = @ultServ AND " +
+                        "(t.Serie > @ultSerie OR (t.Serie = @ultSerie AND t.ID > @ultId)))) ORDER BY t.IDServidorFiscal, t.Serie, t.ID"
+                    }
                     do {
                         $texto = "Consultando o banco... $($achados.Count) de $totalPeriodo notas"
                         & $setStatus $texto $Script:UiAmarelo
                         & $mostraCarregando $texto
 
                         $sql = ";WITH logs AS (" + $cteLogs + " WHERE g.IDParceiro = @parceiro " +
-                        "AND (@serie IS NULL OR g.SerieTokenID = @serie)) SELECT TOP (@pagina) " + $colunas +
-                        " " + $juncao + " WHERE " + $filtroPeriodo +
-                        " AND (t.Serie > @ultSerie OR (t.Serie = @ultSerie AND t.ID > @ultId)) ORDER BY t.Serie, t.ID"
+                        "AND (@serie IS NULL OR g.SerieTokenID = @serie)" + $sb.FiltroG + ") SELECT TOP (@pagina) " + $colunas +
+                        " " + $juncao + " WHERE " + $filtroPeriodo + $ordemPagina
                         $cmd = & $novoCmdPeriodo $sql
                         $par = $cmd.Parameters.Add("@pagina", [System.Data.SqlDbType]::Int); $par.Value = $pagina
                         $par = $cmd.Parameters.Add("@ultSerie", [System.Data.SqlDbType]::Int); $par.Value = $ultSerie
                         $par = $cmd.Parameters.Add("@ultId", [System.Data.SqlDbType]::BigInt); $par.Value = $ultId
+                        $par = $cmd.Parameters.Add("@ultServ", [System.Data.SqlDbType]::Int); $par.Value = $ultServ
 
                         $veio = & $lerParaLista $cmd $achados
                         if ($veio -gt 0) {
                             $ultimo = $achados[$achados.Count - 1]
                             $ultSerie = [int]$ultimo.Serie
                             $ultId = [long]$ultimo.Nota
+                            if ($null -ne $ultimo.Servidor) { $ultServ = [int]$ultimo.Servidor }
                         }
                     } while ($veio -eq $pagina)
                 }
@@ -3584,10 +3807,33 @@ function Show-XmlDownloader {
                         "AND EXISTS (SELECT 1 FROM peds pd WHERE pd.PSerie = g.SerieTokenID AND pd.PNota = g.IDTokenID)) " +
                         "SELECT " + $colunas + ", pd.Pedido " + $juncao + " JOIN peds pd ON pd.IDParceiro = t.IDParceiro " +
                         "AND pd.PSerie = t.Serie AND pd.PNota = t.ID ORDER BY pd.Pedido, COALESCE(t.DataEmissao, t.data) DESC"
+                        if ($Script:XmlTemServidor) {
+                            # Mesma serie e numero nas duas empresas: vale a nota cuja chave e a da venda
+                            # (a NSUFiscal as vezes grava o certificado errado); sem chave, o certificado da
+                            # NSUFiscal. Uma nota por venda, e o filtro de certificado por cima.
+                            $servNsu = "CAST(NULL AS int)"
+                            if ($Script:XmlNsuTemServidor) { $servNsu = "n.IDServidorFiscal" }
+                            $sql = ";WITH peds AS (SELECT DISTINCT p.IDParceiro, p.ID AS Pedido, n.Serie AS PSerie, n.NumeroNota AS PNota, " +
+                            "$servNsu AS PServ, RIGHT(ISNULL(n.Chave, ''), 44) AS PChave " +
+                            "FROM Pedidos p JOIN NSUFiscal n ON n.IDParceiro = p.IDParceiro AND n.ID = p.IDNSUFiscal AND n.tipoDoc = 2 " +
+                            "WHERE p.IDParceiro = @parceiro AND p.ID IN ($inSql) AND (@dia IS NULL OR p.DataCaixa = @dia " +
+                            "OR (p.DataCaixa IS NULL AND p.Data >= @dia AND p.Data < DATEADD(day, 1, @dia)))), logs AS (" + $cteLogs + " WHERE g.IDParceiro = @parceiro " +
+                            "AND EXISTS (SELECT 1 FROM peds pd WHERE pd.PSerie = g.SerieTokenID AND pd.PNota = g.IDTokenID)), " +
+                            "cand AS (SELECT " + $colunas + ", pd.Pedido, " +
+                            "CASE WHEN LEN(pd.PChave) = 44 AND RIGHT(ISNULL(l.Chave, ''), 44) = pd.PChave THEN 0 " +
+                            "WHEN pd.PServ IS NULL OR t.IDServidorFiscal = pd.PServ THEN 1 ELSE 2 END AS PrefServ, " +
+                            "ROW_NUMBER() OVER (PARTITION BY pd.Pedido, pd.PSerie, pd.PNota, pd.PChave, pd.PServ ORDER BY " +
+                            "CASE WHEN LEN(pd.PChave) = 44 AND RIGHT(ISNULL(l.Chave, ''), 44) = pd.PChave THEN 0 " +
+                            "WHEN pd.PServ IS NULL OR t.IDServidorFiscal = pd.PServ THEN 1 ELSE 2 END, t.IDServidorFiscal) AS RnServ " +
+                            $juncao + " JOIN peds pd ON pd.IDParceiro = t.IDParceiro AND pd.PSerie = t.Serie AND pd.PNota = t.ID) " +
+                            "SELECT c.* FROM cand c WHERE c.RnServ = 1 AND c.PrefServ < 2 AND (@servidor IS NULL OR c.IDServidorFiscal = @servidor) " +
+                            "ORDER BY c.Pedido, COALESCE(c.DataEmissao, c.data) DESC"
+                        }
 
                         $cmd = $cn.CreateCommand()
                         $cmd.CommandTimeout = 120
                         $cmd.CommandText = $sql
+                        & $addServidor $cmd
                         $par = $cmd.Parameters.Add("@parceiro", [System.Data.SqlDbType]::BigInt); $par.Value = $parceiro
                         $par = $cmd.Parameters.Add("@dia", [System.Data.SqlDbType]::DateTime)
                         if ($null -eq $Script:XmlPedidoDia) { $par.Value = [System.DBNull]::Value } else { $par.Value = $Script:XmlPedidoDia }
@@ -3606,13 +3852,21 @@ function Show-XmlDownloader {
                         return $false
                     }
 
-                    $cte3 = "SELECT g.IDParceiro, g.SerieTokenID, g.IDTokenID, g.Chave, g.nProtocolo, " +
+                    # A chave ja diz de qual empresa e a nota: aqui o filtro de certificado nao entra,
+                    # so a ligacao com a nota do certificado certo
+                    $serv3 = ""; $servCol3 = ""; $servJun3 = ""
+                    if ($Script:XmlTemServidor) {
+                        $serv3 = "g.IDServidorFiscal, "
+                        $servCol3 = "COALESCE(t.IDServidorFiscal, l.IDServidorFiscal) AS IDServidorFiscal, "
+                        $servJun3 = " AND t.IDServidorFiscal = l.IDServidorFiscal"
+                    }
+                    $cte3 = "SELECT g.IDParceiro, " + $serv3 + "g.SerieTokenID, g.IDTokenID, g.Chave, g.nProtocolo, " +
                     "g.CodigoRetorno, g.DataEmissao AS LogDataEmissao, g.xmlEnvio, g.xmlResposta, " +
                     "g.xmlCancelamento, g.xmlRespostaCancelamento, g.DataEmissaoCancelamento, " +
                     "g.ChaveCancelamento, ROW_NUMBER() OVER (PARTITION BY g.Chave " +
                     "ORDER BY CASE WHEN g.CodigoRetorno = 100 THEN 0 ELSE 1 END, g.ID DESC) AS rn " +
                     "FROM NFCeTokenIDLog g"
-                    $cols3 = "COALESCE(t.Serie, l.SerieTokenID) AS Serie, COALESCE(t.ID, l.IDTokenID) AS ID, " +
+                    $cols3 = $servCol3 + "COALESCE(t.Serie, l.SerieTokenID) AS Serie, COALESCE(t.ID, l.IDTokenID) AS ID, " +
                     "t.Usada, t.Inutilizada, t.Erro, t.Ignorada, t.OFFLine, t.DataEmissao, t.data, " +
                     "t.xmlEnvioOff, t.XmlInutilizada, t.MotivoInutilizada, l.Chave, l.nProtocolo, " +
                     "l.CodigoRetorno, l.LogDataEmissao, l.xmlEnvio, l.xmlResposta, l.xmlCancelamento, " +
@@ -3627,7 +3881,7 @@ function Show-XmlDownloader {
 
                         $sql = ";WITH logs AS (" + $cte3 + " WHERE RIGHT(g.Chave, 44) IN ($inSql)) SELECT " +
                         $cols3 + " FROM logs l LEFT JOIN NFCeTokenID t ON t.IDParceiro = l.IDParceiro " +
-                        "AND t.Serie = l.SerieTokenID AND t.ID = l.IDTokenID WHERE l.rn = 1 ORDER BY l.Chave"
+                        "AND t.Serie = l.SerieTokenID AND t.ID = l.IDTokenID" + $servJun3 + " WHERE l.rn = 1 ORDER BY l.Chave"
 
                         $cmd = $cn.CreateCommand()
                         $cmd.CommandTimeout = 120
@@ -3660,6 +3914,7 @@ function Show-XmlDownloader {
                 # Ja deixa os faltantes prontos: o COPIAR FALTANTES tem que funcionar
                 # logo depois da busca, sem depender de clicar em CONFERIR SEQUENCIA
                 $Script:XmlFaltantes = $semXmlAgora
+                $Script:XmlFaltantesTexto = & $faltantesPorEmpresa @($achados | Where-Object { "$($_.Conteudo)" -eq "" })
 
                 # Pedido sem NFC-e (venda nao fiscal, numero errado, outra loja): vai
                 # para o aviso e para o COPIAR FALTANTES, que no modo pedido copia pedidos
@@ -3669,6 +3924,7 @@ function Show-XmlDownloader {
                     foreach ($a in $achados) { if ($null -ne $a.Pedido) { $comNota["$($a.Pedido)"] = $true } }
                     $pedidosSemNfce = @($Script:XmlPedidosBuscados | Where-Object { -not $comNota.ContainsKey("$_") })
                     $Script:XmlFaltantes = @($pedidosSemNfce)
+                    $Script:XmlFaltantesTexto = ""
                 }
 
                 if ($achados.Count -eq 0) {
@@ -3693,10 +3949,14 @@ function Show-XmlDownloader {
                 }
                 elseif ($nOk -eq 0) {
                     # Avisa na hora, sem esperar o usuario clicar em BAIXAR a toa
-                    & $setStatus ("Nenhuma das $($achados.Count) notas tem XML no banco - " + (ConvertTo-FaixaTexto $semXmlAgora)) $Script:UiVermelho
+                    $txtSem = ConvertTo-FaixaTexto $semXmlAgora
+                    if ("$($Script:XmlFaltantesTexto)" -ne "") { $txtSem = $Script:XmlFaltantesTexto }
+                    & $setStatus ("Nenhuma das $($achados.Count) notas tem XML no banco - " + $txtSem) $Script:UiVermelho
                 }
                 elseif ($semXmlAgora.Count -gt 0) {
-                    & $setStatus ("$($achados.Count) linha(s): $nOk com XML. Sem XML: " + (ConvertTo-FaixaTexto $semXmlAgora)) $Script:UiAmarelo
+                    $txtSem = ConvertTo-FaixaTexto $semXmlAgora
+                    if ("$($Script:XmlFaltantesTexto)" -ne "") { $txtSem = $Script:XmlFaltantesTexto }
+                    & $setStatus ("$($achados.Count) linha(s): $nOk com XML. Sem XML: " + $txtSem) $Script:UiAmarelo
                 }
                 else {
                     & $setStatus "$($achados.Count) linha(s), todas com XML. Marque e clique em BAIXAR." $Script:UiVerde
@@ -3729,27 +3989,28 @@ function Show-XmlDownloader {
         # que esta na tela na hora de baixar: mexer na tela entre buscar e baixar
         # fazia uma busca por periodo sair com o nome "Série 5" da caixa de serie.
         # Sem serie escolhida, entram as series das notas que vao ser gravadas.
+        # -Empresa: banco com mais de um certificado, cada empresa sai no seu lote
         $nomeDoLote = {
-            param($ItensLote, [string]$Titulo = "XML NFC-e")
+            param($ItensLote, [string]$Titulo = "XML NFC-e", [string]$Empresa = "")
             $filtro = $Script:XmlFiltro
             if ($null -eq $filtro) { $filtro = @{ Modo = 'Chave'; Serie = '' } }
             $seriesLote = @($ItensLote | ForEach-Object { [int]$_.Serie } | Sort-Object -Unique)
             if ($filtro.Modo -eq 'Serie') {
-                return (Get-XmlNomeLote -Modo Serie -Serie $filtro.Serie -Notas $filtro.Notas -Titulo $Titulo)
+                return (Get-XmlNomeLote -Modo Serie -Serie $filtro.Serie -Notas $filtro.Notas -Titulo $Titulo -Empresa $Empresa)
             }
             if ($filtro.Modo -eq 'Periodo') {
-                return (Get-XmlNomeLote -Modo Periodo -Serie $filtro.Serie -Series $seriesLote -De $filtro.De -Ate $filtro.Ate -Titulo $Titulo)
+                return (Get-XmlNomeLote -Modo Periodo -Serie $filtro.Serie -Series $seriesLote -De $filtro.De -Ate $filtro.Ate -Titulo $Titulo -Empresa $Empresa)
             }
             if ($filtro.Modo -eq 'Pedido') {
                 # Os pedidos que vao no lote, e nao todos os digitados: pedido sem NFC-e nao entra
                 $pedidosLote = @($ItensLote | Where-Object { $null -ne $_.Pedido } | ForEach-Object { [int]$_.Pedido })
                 if ($pedidosLote.Count -eq 0) { $pedidosLote = @($filtro.Pedidos) }
                 if ($null -ne $filtro.Dia) {
-                    return (Get-XmlNomeLote -Modo Pedido -Series $seriesLote -Notas $pedidosLote -Titulo $Titulo -De $filtro.Dia)
+                    return (Get-XmlNomeLote -Modo Pedido -Series $seriesLote -Notas $pedidosLote -Titulo $Titulo -De $filtro.Dia -Empresa $Empresa)
                 }
-                return (Get-XmlNomeLote -Modo Pedido -Series $seriesLote -Notas $pedidosLote -Titulo $Titulo)
+                return (Get-XmlNomeLote -Modo Pedido -Series $seriesLote -Notas $pedidosLote -Titulo $Titulo -Empresa $Empresa)
             }
-            return (Get-XmlNomeLote -Modo Chave -Series $seriesLote -Quantidade @($ItensLote).Count -Titulo $Titulo)
+            return (Get-XmlNomeLote -Modo Chave -Series $seriesLote -Quantidade @($ItensLote).Count -Titulo $Titulo -Empresa $Empresa)
         }
 
         $baixar = {
@@ -3783,108 +4044,150 @@ function Show-XmlDownloader {
             $btnCancelar.Enabled = $true
             $pb.Maximum = $comXml.Count
             $pb.Value = 0
-
-            $pasta = New-XmlLotePasta (& $nomeDoLote $comXml)
-            $Script:XmlUltimoLote = $pasta
             $Script:XmlUltimoZip = ""
-            $pastaInut = Join-Path $pasta "Inutilizadas"
-            $pastaCanc = Join-Path $pasta "Cancelamentos"
-            # Nota sem protocolo fica separada: a pasta principal e so do que vale
-            $pastaSemProt = Join-Path $pasta "Sem protocolo"
+
+            # Banco com mais de um certificado: um lote (pasta + zip) por empresa, com o nome
+            # dela. Cada empresa costuma ter o seu contador e os arquivos de mesma serie e
+            # numero nao se misturam. Com um certificado so e um lote, como sempre foi.
+            $grupos = New-Object 'System.Collections.Generic.List[object]'
+            if (@($Script:XmlServidores).Count -gt 1) {
+                foreach ($grupoEmp in @($comXml | Group-Object { "$($_.Servidor)" } | Sort-Object Name)) {
+                    $grupos.Add(@{ Empresa = (& $nomeEmpresa $grupoEmp.Group[0].Servidor); Itens = @($grupoEmp.Group) })
+                }
+            }
+            else { $grupos.Add(@{ Empresa = ""; Itens = $comXml }) }
 
             $nNormal = 0; $nInut = 0; $nCorr = 0; $nCanc = 0; $nSemProt = 0
             $nFalta = $semXml.Count
             $baixadas = @()
+            $baixadasPorServ = @{}
+            $pastasLote = @()
+            $zipsLote = @()
             $i = 0
             $interrompido = $false
 
-            foreach ($it in $comXml) {
-                $i++
-                if ($Script:XmlCancelar) {
-                    $interrompido = $true
-                    Log-Message "CANCEL" "XMLs: lote interrompido em $i de $($comXml.Count)"
-                    break
-                }
-                $lblProg.Text = "Baixando $i de $($comXml.Count)..."
-                $pb.Value = $i
+            foreach ($grupo in $grupos) {
+                if ($interrompido) { break }
+                $pasta = New-XmlLotePasta (& $nomeDoLote $grupo.Itens "XML NFC-e" $grupo.Empresa)
+                $pastasLote += $pasta
+                $Script:XmlUltimoLote = $pasta
+                $pastaInut = Join-Path $pasta "Inutilizadas"
+                $pastaCanc = Join-Path $pasta "Cancelamentos"
+                # Nota sem protocolo fica separada: a pasta principal e so do que vale
+                $pastaSemProt = Join-Path $pasta "Sem protocolo"
 
-                try {
-                    # XML que nao parseia ainda e gravado, so que marcado
-                    $corrompido = $false
-                    try { $null = [xml]$it.Conteudo } catch { $corrompido = $true }
-                    if ($corrompido) { $nCorr++ }
-
-                    # serie + numero + chave, e no fim _INUT / _CANC / _CORROMPIDO
-                    $nomes = Get-XmlNomeArquivo -Item $it -Corrompido:$corrompido
-
-                    # Guardado antes: o Status pode virar CORROMPIDO logo abaixo
-                    $semProt = ("$($it.Status)" -eq "SEM PROTOCOLO")
-                    $destino = $pasta
-                    if ($it.Inutilizada) { $destino = $pastaInut }
-                    elseif ($semProt) { $destino = $pastaSemProt }
-                    if (-not (Test-Path $destino)) { New-Item -Path $destino -ItemType Directory -Force | Out-Null }
-
-                    $caminho = Join-Path $destino ($nomes.Nota + ".xml")
-                    [System.IO.File]::WriteAllText($caminho, $it.Conteudo, (New-Object System.Text.UTF8Encoding($false)))
-                    $it.Arquivo = $nomes.Nota + ".xml"
-                    $it.Caminho = $caminho
-                    $it.Tamanho = (Get-Item -LiteralPath $caminho).Length
-                    if ($corrompido) { $it.Status = "CORROMPIDO" }
-                    if ($it.Inutilizada) { $nInut++ }
-                    elseif ($semProt) { $nSemProt++ }
-                    else { $nNormal++ }
-                    $baixadas += [int]$it.Nota
-
-                    if ("$($it.Cancelamento)" -ne "") {
-                        if (-not (Test-Path $pastaCanc)) { New-Item -Path $pastaCanc -ItemType Directory -Force | Out-Null }
-                        $nomeC = $nomes.Evento + ".xml"
-                        [System.IO.File]::WriteAllText((Join-Path $pastaCanc $nomeC), $it.Cancelamento, (New-Object System.Text.UTF8Encoding($false)))
-                        $nCanc++
+                foreach ($it in $grupo.Itens) {
+                    $i++
+                    if ($Script:XmlCancelar) {
+                        $interrompido = $true
+                        Log-Message "CANCEL" "XMLs: lote interrompido em $i de $($comXml.Count)"
+                        break
                     }
+                    $lblProg.Text = "Baixando $i de $($comXml.Count)..."
+                    $pb.Value = $i
+
+                    try {
+                        # XML que nao parseia ainda e gravado, so que marcado
+                        $corrompido = $false
+                        try { $null = [xml]$it.Conteudo } catch { $corrompido = $true }
+                        if ($corrompido) { $nCorr++ }
+
+                        # serie + numero + chave, e no fim _INUT / _CANC / _CORROMPIDO
+                        $nomes = Get-XmlNomeArquivo -Item $it -Corrompido:$corrompido
+
+                        # Guardado antes: o Status pode virar CORROMPIDO logo abaixo
+                        $semProt = ("$($it.Status)" -eq "SEM PROTOCOLO")
+                        $destino = $pasta
+                        if ($it.Inutilizada) { $destino = $pastaInut }
+                        elseif ($semProt) { $destino = $pastaSemProt }
+                        if (-not (Test-Path $destino)) { New-Item -Path $destino -ItemType Directory -Force | Out-Null }
+
+                        $caminho = Join-Path $destino ($nomes.Nota + ".xml")
+                        [System.IO.File]::WriteAllText($caminho, $it.Conteudo, (New-Object System.Text.UTF8Encoding($false)))
+                        $it.Arquivo = $nomes.Nota + ".xml"
+                        $it.Caminho = $caminho
+                        $it.Tamanho = (Get-Item -LiteralPath $caminho).Length
+                        if ($corrompido) { $it.Status = "CORROMPIDO" }
+                        if ($it.Inutilizada) { $nInut++ }
+                        elseif ($semProt) { $nSemProt++ }
+                        else { $nNormal++ }
+                        $baixadas += [int]$it.Nota
+                        if (-not $baixadasPorServ.ContainsKey("$($it.Servidor)")) { $baixadasPorServ["$($it.Servidor)"] = @{} }
+                        $baixadasPorServ["$($it.Servidor)"]["$($it.Nota)"] = $true
+
+                        if ("$($it.Cancelamento)" -ne "") {
+                            if (-not (Test-Path $pastaCanc)) { New-Item -Path $pastaCanc -ItemType Directory -Force | Out-Null }
+                            $nomeC = $nomes.Evento + ".xml"
+                            [System.IO.File]::WriteAllText((Join-Path $pastaCanc $nomeC), $it.Cancelamento, (New-Object System.Text.UTF8Encoding($false)))
+                            $nCanc++
+                        }
+                    }
+                    catch {
+                        $nFalta++
+                        $it.Status = "ERRO"
+                        $it.Aviso = $_.Exception.Message
+                        Log-Message "ERRO" "XMLs: falha ao gravar a nota $($it.Nota) - $($_.Exception.Message)"
+                    }
+
+                    if ($null -ne $it.Linha -and -not $lv.IsDisposed) {
+                        if ($it.Tamanho -gt 0) { $it.Linha.SubItems[5].Text = "{0:N0} B" -f $it.Tamanho }
+                        $it.Linha.SubItems[6].Text = $it.Arquivo
+                        # A situacao so muda quando a gravacao deu problema
+                        if ($it.Status -eq "CORROMPIDO" -or $it.Status -eq "ERRO") {
+                            $it.Linha.SubItems[3].Text = $it.Status
+                            $it.Linha.ForeColor = $Script:UiVermelho
+                            $it.Linha.ToolTipText = "$($it.Status) - $($it.Aviso)"
+                        }
+                    }
+                    [System.Windows.Forms.Application]::DoEvents()
+                }
+
+                # A pasta fica so com os XMLs: o resumo do lote vai para o log e para a
+                # janela, e os faltantes saem pelo botao COPIAR FALTANTES.
+
+                # Zip sempre ao final, mesmo com o lote interrompido
+                try {
+                    Add-Type -AssemblyName System.IO.Compression.FileSystem
+                    $zip = $pasta + ".zip"
+                    if (Test-Path $zip) { Remove-Item -LiteralPath $zip -Force -ErrorAction SilentlyContinue }
+                    [System.IO.Compression.ZipFile]::CreateFromDirectory($pasta, $zip)
+                    $Script:XmlUltimoZip = $zip
+                    $zipsLote += $zip
+                    Log-Message "ZIP" "XMLs: pasta compactada em $zip"
                 }
                 catch {
-                    $nFalta++
-                    $it.Status = "ERRO"
-                    $it.Aviso = $_.Exception.Message
-                    Log-Message "ERRO" "XMLs: falha ao gravar a nota $($it.Nota) - $($_.Exception.Message)"
+                    Log-Message "ERRO" "XMLs: falha ao gerar o zip - $($_.Exception.Message). A pasta continua disponível."
                 }
-
-                if ($null -ne $it.Linha -and -not $lv.IsDisposed) {
-                    if ($it.Tamanho -gt 0) { $it.Linha.SubItems[5].Text = "{0:N0} B" -f $it.Tamanho }
-                    $it.Linha.SubItems[6].Text = $it.Arquivo
-                    # A situacao so muda quando a gravacao deu problema
-                    if ($it.Status -eq "CORROMPIDO" -or $it.Status -eq "ERRO") {
-                        $it.Linha.SubItems[3].Text = $it.Status
-                        $it.Linha.ForeColor = $Script:UiVermelho
-                        $it.Linha.ToolTipText = "$($it.Status) - $($it.Aviso)"
-                    }
-                }
-                [System.Windows.Forms.Application]::DoEvents()
             }
 
-            # Faltantes: so faz sentido no modo por serie, onde existe lista pedida
+            # Faltantes: so faz sentido no modo por serie, onde existe lista pedida. Com mais
+            # de um certificado, confere a lista pedida em cada empresa buscada.
             $Script:XmlFaltantes = @()
+            $Script:XmlFaltantesTexto = ""
             if ($rbSerie.Checked -and $Script:XmlPedidas.Count -gt 0) {
-                $veio = @{}
-                foreach ($n in $baixadas) { $veio["$n"] = $true }
-                $Script:XmlFaltantes = @($Script:XmlPedidas | Where-Object { -not $veio.ContainsKey("$_") })
+                if (@($Script:XmlServidores).Count -gt 1) {
+                    $todasFaltas = @(); $partesFalta = @()
+                    foreach ($servF in @($Script:XmlServidoresBusca)) {
+                        $veioServ = $baixadasPorServ["$servF"]
+                        if ($null -eq $veioServ) { $veioServ = @{} }
+                        $faltaServ = @($Script:XmlPedidas | Where-Object { -not $veioServ.ContainsKey("$_") })
+                        if ($faltaServ.Count -gt 0) {
+                            $todasFaltas += $faltaServ
+                            $partesFalta += "$(& $nomeEmpresa $servF): $(ConvertTo-FaixaTexto $faltaServ)"
+                        }
+                    }
+                    $Script:XmlFaltantes = @($todasFaltas | Sort-Object -Unique)
+                    $Script:XmlFaltantesTexto = ($partesFalta -join " | ")
+                }
+                else {
+                    $veio = @{}
+                    foreach ($n in $baixadas) { $veio["$n"] = $true }
+                    $Script:XmlFaltantes = @($Script:XmlPedidas | Where-Object { -not $veio.ContainsKey("$_") })
+                }
             }
-            else { $Script:XmlFaltantes = $faltaram }
-
-            # A pasta fica so com os XMLs: o resumo do lote vai para o log e para a
-            # janela, e os faltantes saem pelo botao COPIAR FALTANTES.
-
-            # Zip sempre ao final, mesmo com o lote interrompido
-            try {
-                Add-Type -AssemblyName System.IO.Compression.FileSystem
-                $zip = $pasta + ".zip"
-                if (Test-Path $zip) { Remove-Item -LiteralPath $zip -Force -ErrorAction SilentlyContinue }
-                [System.IO.Compression.ZipFile]::CreateFromDirectory($pasta, $zip)
-                $Script:XmlUltimoZip = $zip
-                Log-Message "ZIP" "XMLs: pasta compactada em $zip"
-            }
-            catch {
-                Log-Message "ERRO" "XMLs: falha ao gerar o zip - $($_.Exception.Message). A pasta continua disponível."
+            else {
+                $Script:XmlFaltantes = $faltaram
+                $Script:XmlFaltantesTexto = & $faltantesPorEmpresa $semXml
             }
 
             $btnCancelar.Enabled = $false
@@ -3902,10 +4205,19 @@ function Show-XmlDownloader {
             else { & $setStatus $resumo $Script:UiVerde }
             Log-Message "SUCESSO" "XMLs: $resumo"
 
-            $msg = $resumo + "`r`n`r`npasta: $pasta"
-            if ($Script:XmlUltimoZip -ne "") { $msg = $msg + "`r`nzip: " + $Script:XmlUltimoZip }
+            if ($pastasLote.Count -le 1) {
+                $msg = $resumo + "`r`n`r`npasta: $pasta"
+                if ($Script:XmlUltimoZip -ne "") { $msg = $msg + "`r`nzip: " + $Script:XmlUltimoZip }
+            }
+            else {
+                # Um lote por empresa: lista cada pasta (o zip de cada uma fica ao lado)
+                $msg = $resumo + "`r`n`r`n$($pastasLote.Count) lotes, um por empresa:`r`n" + (($pastasLote | ForEach-Object { "  - $_" }) -join "`r`n")
+                if ($zipsLote.Count -gt 0) { $msg = $msg + "`r`n(o .zip de cada lote fica ao lado da pasta)" }
+            }
             if ($Script:XmlFaltantes.Count -gt 0) {
-                $msg = $msg + "`r`n`r`nSem XML no banco (não baixadas): " + (ConvertTo-FaixaTexto $Script:XmlFaltantes)
+                $txtFaltam = ConvertTo-FaixaTexto $Script:XmlFaltantes
+                if ("$($Script:XmlFaltantesTexto)" -ne "") { $txtFaltam = $Script:XmlFaltantesTexto }
+                $msg = $msg + "`r`n`r`nSem XML no banco (não baixadas): " + $txtFaltam
             }
             if ($nSemProt -gt 0) {
                 $msg = $msg + "`r`n`r`nATENÇÃO: $nSemProt nota(s) sem protocolo de autorização, na subpasta ""Sem protocolo"". " +
@@ -3915,8 +4227,11 @@ function Show-XmlDownloader {
             [System.Windows.Forms.MessageBox]::Show($msg, "Baixar XMLs NFC-e", "OK", "Information") | Out-Null
 
             # Todo lote termina indo para a pasta: abre direto em vez de exigir mais um clique
-            # Caminho entre aspas: o nome do lote pode ter virgula, que o explorer le como separador
-            try { if (Test-Path -LiteralPath $pasta) { Start-Process "explorer.exe" ("`"" + $pasta + "`"") } } catch {}
+            # Caminho entre aspas: o nome do lote pode ter virgula, que o explorer le como separador.
+            # Varios lotes (um por empresa): abre a pasta de cima, com todos lado a lado.
+            $abrirLote = $pasta
+            if ($pastasLote.Count -gt 1) { $abrirLote = Split-Path $pasta -Parent; $Script:XmlUltimoLote = $abrirLote }
+            try { if (Test-Path -LiteralPath $abrirLote) { Start-Process "explorer.exe" ("`"" + $abrirLote + "`"") } } catch {}
         }
 
         # Espelho fiscal (DANFE NFC-e) em PDF das notas marcadas. Por chave ou por
@@ -4005,72 +4320,90 @@ function Show-XmlDownloader {
             try {
                 & $setStatus "Gerando o espelho fiscal em PDF..." $Script:UiAmarelo
                 $raizPdf = Join-Path $Script:DownloadFolder "Espelhos NFC-e"
-                if ($podem.Count -eq 1) {
-                    if (-not (Test-Path $raizPdf)) { New-Item -Path $raizPdf -ItemType Directory -Force | Out-Null }
-                    $pasta = $raizPdf
+                # Mesma regra dos XMLs: com mais de um certificado, um lote por empresa
+                $gruposPdf = New-Object 'System.Collections.Generic.List[object]'
+                if (@($Script:XmlServidores).Count -gt 1 -and $podem.Count -gt 1) {
+                    foreach ($grupoEmp in @($podem | Group-Object { "$($_.Servidor)" } | Sort-Object Name)) {
+                        $gruposPdf.Add(@{ Empresa = (& $nomeEmpresa $grupoEmp.Group[0].Servidor); Itens = @($grupoEmp.Group) })
+                    }
                 }
-                else { $pasta = New-XmlLotePasta (& $nomeDoLote $podem "Espelho NFC-e") -Subpasta "Espelhos NFC-e" }
+                else { $gruposPdf.Add(@{ Empresa = ""; Itens = $podem }) }
+                $pastasPdf = @()
 
                 $i = 0
-                foreach ($it in $podem) {
-                    $i++
-                    if ($Script:XmlCancelar) {
-                        $interrompido = $true
-                        Log-Message "CANCEL" "Espelho PDF:interrompido em $i de $($podem.Count)"
-                        break
+                foreach ($grupoPdf in $gruposPdf) {
+                    if ($interrompido) { break }
+                    if ($podem.Count -eq 1) {
+                        if (-not (Test-Path $raizPdf)) { New-Item -Path $raizPdf -ItemType Directory -Force | Out-Null }
+                        $pasta = $raizPdf
                     }
-                    $lblProg.Text = "Gerando PDF $i de $($podem.Count)..."
-                    $pb.Value = $i
-                    [System.Windows.Forms.Application]::DoEvents()
-                    try {
-                        $nomes = Get-XmlNomeArquivo -Item $it
-                        $destino = Join-Path $pasta ($nomes.Nota + ".pdf")
-                        # O PDF da mesma nota aberto no leitor fica travado: grava ao lado com (2)
-                        $copia = 1
-                        while ($true) {
-                            try {
-                                Export-DanfeNfcePdf -Xml $it.Conteudo -Caminho $destino -Cancelada:([bool]$it.Cancelada) -DataCancelamento $it.DataCancelamento
-                                break
-                            }
-                            catch {
-                                if ($_.Exception.GetBaseException() -isnot [System.IO.IOException] -or $copia -ge 5) { throw }
-                                $copia++
-                                $destino = Join-Path $pasta ($nomes.Nota + " ($copia).pdf")
-                            }
-                        }
-                        $it.CaminhoPdf = $destino
-                        $gerados += $destino
-                        if ($null -ne $it.Linha -and -not $lv.IsDisposed) {
-                            if ("$($it.Arquivo)" -ne "") { $it.Linha.SubItems[6].Text = "$($it.Arquivo) + PDF" }
-                            else { $it.Linha.SubItems[6].Text = (Split-Path $destino -Leaf) }
-                        }
-                    }
-                    catch {
-                        $falhasPdf += "Série $($it.Serie) nota $($it.Nota): $($_.Exception.Message)"
-                        Log-Message "ERRO" "Espelho PDF:falha na nota $($it.Nota) - $($_.Exception.Message)"
-                    }
-                }
+                    else { $pasta = New-XmlLotePasta (& $nomeDoLote $grupoPdf.Itens "Espelho NFC-e" $grupoPdf.Empresa) -Subpasta "Espelhos NFC-e" }
+                    $geradosGrupo = @()
 
-                if ($gerados.Count -eq 0 -and $pasta -ne $raizPdf) {
-                    # Lote sem nenhum PDF: nao deixa pasta vazia para tras
-                    try { [System.IO.Directory]::Delete($pasta) } catch {}
-                }
-                elseif ($gerados.Count -gt 0) {
-                    $Script:XmlUltimoLote = $pasta
-                    if ($gerados.Count -gt 1) {
+                    foreach ($it in $grupoPdf.Itens) {
+                        $i++
+                        if ($Script:XmlCancelar) {
+                            $interrompido = $true
+                            Log-Message "CANCEL" "Espelho PDF:interrompido em $i de $($podem.Count)"
+                            break
+                        }
+                        $lblProg.Text = "Gerando PDF $i de $($podem.Count)..."
+                        $pb.Value = $i
+                        [System.Windows.Forms.Application]::DoEvents()
                         try {
-                            Add-Type -AssemblyName System.IO.Compression.FileSystem
-                            $zip = $pasta + ".zip"
-                            if (Test-Path $zip) { Remove-Item -LiteralPath $zip -Force -ErrorAction SilentlyContinue }
-                            [System.IO.Compression.ZipFile]::CreateFromDirectory($pasta, $zip)
-                            $Script:XmlUltimoZip = $zip
+                            $nomes = Get-XmlNomeArquivo -Item $it
+                            $destino = Join-Path $pasta ($nomes.Nota + ".pdf")
+                            # O PDF da mesma nota aberto no leitor fica travado: grava ao lado com (2)
+                            $copia = 1
+                            while ($true) {
+                                try {
+                                    Export-DanfeNfcePdf -Xml $it.Conteudo -Caminho $destino -Cancelada:([bool]$it.Cancelada) -DataCancelamento $it.DataCancelamento
+                                    break
+                                }
+                                catch {
+                                    if ($_.Exception.GetBaseException() -isnot [System.IO.IOException] -or $copia -ge 5) { throw }
+                                    $copia++
+                                    $destino = Join-Path $pasta ($nomes.Nota + " ($copia).pdf")
+                                }
+                            }
+                            $it.CaminhoPdf = $destino
+                            $gerados += $destino
+                            $geradosGrupo += $destino
+                            if ($null -ne $it.Linha -and -not $lv.IsDisposed) {
+                                if ("$($it.Arquivo)" -ne "") { $it.Linha.SubItems[6].Text = "$($it.Arquivo) + PDF" }
+                                else { $it.Linha.SubItems[6].Text = (Split-Path $destino -Leaf) }
+                            }
                         }
                         catch {
-                            $zip = ""
-                            Log-Message "ERRO" "Espelho PDF:falha ao gerar o zip - $($_.Exception.Message). A pasta continua disponível."
+                            $falhasPdf += "Série $($it.Serie) nota $($it.Nota): $($_.Exception.Message)"
+                            Log-Message "ERRO" "Espelho PDF:falha na nota $($it.Nota) - $($_.Exception.Message)"
+                        }
+                    }
+
+                    if ($geradosGrupo.Count -eq 0 -and $pasta -ne $raizPdf) {
+                        # Lote sem nenhum PDF: nao deixa pasta vazia para tras
+                        try { [System.IO.Directory]::Delete($pasta) } catch {}
+                    }
+                    elseif ($geradosGrupo.Count -gt 0) {
+                        $pastasPdf += $pasta
+                        $Script:XmlUltimoLote = $pasta
+                        if ($geradosGrupo.Count -gt 1) {
+                            try {
+                                Add-Type -AssemblyName System.IO.Compression.FileSystem
+                                $zip = $pasta + ".zip"
+                                if (Test-Path $zip) { Remove-Item -LiteralPath $zip -Force -ErrorAction SilentlyContinue }
+                                [System.IO.Compression.ZipFile]::CreateFromDirectory($pasta, $zip)
+                                $Script:XmlUltimoZip = $zip
+                            }
+                            catch {
+                                $zip = ""
+                                Log-Message "ERRO" "Espelho PDF:falha ao gerar o zip - $($_.Exception.Message). A pasta continua disponível."
+                            }
                         }
                     }
                 }
+                # Um lote por empresa: a pasta de cima mostra todos
+                if ($pastasPdf.Count -gt 1) { $pasta = $raizPdf; $Script:XmlUltimoLote = $raizPdf; $zip = "" }
 
                 $resumo = "$($gerados.Count) PDF(s) gerado(s)"
                 if ($fora.Count -gt 0) { $resumo = $resumo + " | $($fora.Count) sem espelho" }
@@ -4083,7 +4416,8 @@ function Show-XmlDownloader {
                 # Deu tudo certo: so abre o resultado. Aviso so quando algo ficou de fora.
                 if ($fora.Count -gt 0 -or $falhasPdf.Count -gt 0 -or $interrompido) {
                     $msg = $resumo
-                    if ($gerados.Count -gt 0) { $msg = $msg + "`r`n`r`npasta: $pasta" }
+                    if ($pastasPdf.Count -gt 1) { $msg = $msg + "`r`n`r`n$($pastasPdf.Count) lotes, um por empresa:`r`n" + (($pastasPdf | ForEach-Object { "  - $_" }) -join "`r`n") }
+                    elseif ($gerados.Count -gt 0) { $msg = $msg + "`r`n`r`npasta: $pasta" }
                     if ($zip -ne "") { $msg = $msg + "`r`nzip: $zip" }
                     if ($fora.Count -gt 0) { $msg = $msg + "`r`n`r`nSem espelho (só NFC-e autorizada tem espelho fiscal):`r`n" + (& $descreveFora) }
                     if ($falhasPdf.Count -gt 0) { $msg = $msg + "`r`n`r`nNão deu para gerar:`r`n" + (($falhasPdf | Select-Object -First 15) -join "`r`n") }
@@ -4134,8 +4468,20 @@ function Show-XmlDownloader {
                 $cn = & $abrirConexao
 
                 $existe = @{}
-                $naoUsadas = @()
-                $inutil = @()
+                $naoUsadas = @{}
+                $inutil = @{}
+                # Com mais de um certificado cada empresa tem a sua numeracao na mesma serie:
+                # a conferencia e feita em cada uma (ou so na escolhida no filtro)
+                $multiEmp = (@($Script:XmlServidores).Count -gt 1)
+                $servSel = & $servidorEscolhido
+                if (-not $multiEmp) { $servidoresConf = @("") }
+                elseif ($null -eq $servSel) { $servidoresConf = @($Script:XmlServidores | ForEach-Object { "$($_.Id)" }) }
+                else { $servidoresConf = @("$servSel") }
+                $colServ = ""; $filtroServ = ""
+                if ($Script:XmlTemServidor) {
+                    $colServ = "IDServidorFiscal, "
+                    $filtroServ = " AND (@servidor IS NULL OR IDServidorFiscal = @servidor)"
+                }
 
                 # Confere exatamente os numeros pedidos, em blocos de 500. Usar
                 # BETWEEN do menor ao maior traria notas que ninguem perguntou:
@@ -4148,10 +4494,11 @@ function Show-XmlDownloader {
 
                     $cmd = $cn.CreateCommand()
                     $cmd.CommandTimeout = 120
-                    $cmd.CommandText = "SELECT ID, Usada, Inutilizada FROM NFCeTokenID " +
-                    "WHERE IDParceiro = @p AND Serie = @s AND ID IN (" + ($nomes -join ",") + ") ORDER BY ID"
+                    $cmd.CommandText = "SELECT " + $colServ + "ID, Usada, Inutilizada FROM NFCeTokenID " +
+                    "WHERE IDParceiro = @p AND Serie = @s AND ID IN (" + ($nomes -join ",") + ")" + $filtroServ + " ORDER BY ID"
                     $par = $cmd.Parameters.Add("@p", [System.Data.SqlDbType]::BigInt); $par.Value = $parceiro
                     $par = $cmd.Parameters.Add("@s", [System.Data.SqlDbType]::Int); $par.Value = $serie
+                    & $addServidor $cmd
                     for ($i = 0; $i -lt $bloco.Count; $i++) {
                         $par = $cmd.Parameters.Add("@n$i", [System.Data.SqlDbType]::BigInt)
                         $par.Value = [long]$bloco[$i]
@@ -4159,30 +4506,44 @@ function Show-XmlDownloader {
 
                     $rd = & $executarLeitor $cmd -Cancelavel
                     while ($rd.Read()) {
+                        $sv = ""
+                        if ($multiEmp) { $sv = "$(Get-XmlDbValor $rd 'IDServidorFiscal')" }
                         $id = [int]$rd["ID"]
-                        $existe["$id"] = $true
-                        if (-not [bool]$rd["Usada"]) { $naoUsadas += $id }
-                        if (-not $rd.IsDBNull($rd.GetOrdinal("Inutilizada")) -and [bool]$rd["Inutilizada"]) { $inutil += $id }
+                        $existe["$sv|$id"] = $true
+                        if (-not [bool]$rd["Usada"]) { $naoUsadas[$sv] = @($naoUsadas[$sv]) + $id }
+                        if (-not $rd.IsDBNull($rd.GetOrdinal("Inutilizada")) -and [bool]$rd["Inutilizada"]) { $inutil[$sv] = @($inutil[$sv]) + $id }
                     }
                     $rd.Close()
                     [System.Windows.Forms.Application]::DoEvents()
                 }
 
-                $semRegistro = @($fx.Notas | Where-Object { -not $existe.ContainsKey("$_") })
-
                 $linhas = @()
                 $linhas += "Série $serie - $($fx.Total) nota(s) conferida(s): " + (ConvertTo-FaixaTexto $fx.Notas)
-                $linhas += ""
-                if ($semRegistro.Count -eq 0) { $linhas += "Numeração sem lacunas: todos os números têm registro." }
-                else { $linhas += "SEM REGISTRO no banco ($($semRegistro.Count)): " + (ConvertTo-FaixaTexto $semRegistro) }
-                if ($naoUsadas.Count -gt 0) { $linhas += "Token gerado e NÃO USADO ($($naoUsadas.Count)): " + (ConvertTo-FaixaTexto $naoUsadas) }
-                if ($inutil.Count -gt 0) { $linhas += "Inutilizadas ($($inutil.Count)): " + (ConvertTo-FaixaTexto $inutil) }
+                $todasSem = @(); $partesSem = @(); $totalSem = 0
+                foreach ($sv in $servidoresConf) {
+                    $semRegistro = @($fx.Notas | Where-Object { -not $existe.ContainsKey("$sv|$_") })
+                    $nUsadasSv = @($naoUsadas[$sv] | Where-Object { $null -ne $_ })
+                    $inutSv = @($inutil[$sv] | Where-Object { $null -ne $_ })
+                    $linhas += ""
+                    if ($multiEmp) { $linhas += "$(& $nomeEmpresa $sv)".ToUpper() }
+                    if ($semRegistro.Count -eq 0) { $linhas += "Numeração sem lacunas: todos os números têm registro." }
+                    else {
+                        $linhas += "SEM REGISTRO no banco ($($semRegistro.Count)): " + (ConvertTo-FaixaTexto $semRegistro)
+                        $todasSem += $semRegistro
+                        $totalSem += $semRegistro.Count
+                        if ($multiEmp) { $partesSem += "$(& $nomeEmpresa $sv): $(ConvertTo-FaixaTexto $semRegistro)" }
+                    }
+                    if ($nUsadasSv.Count -gt 0) { $linhas += "Token gerado e NÃO USADO ($($nUsadasSv.Count)): " + (ConvertTo-FaixaTexto $nUsadasSv) }
+                    if ($inutSv.Count -gt 0) { $linhas += "Inutilizadas ($($inutSv.Count)): " + (ConvertTo-FaixaTexto $inutSv) }
+                }
 
-                $Script:XmlFaltantes = @($semRegistro)
+                $Script:XmlFaltantes = @($todasSem | Sort-Object -Unique)
+                $Script:XmlFaltantesTexto = ($partesSem -join " | ")
                 & $atualizaModo
-                if ($semRegistro.Count -eq 0) { & $setStatus $linhas[2] $Script:UiVerde }
-                else { & $setStatus $linhas[2] $Script:UiAmarelo }
-                Log-Message "INFO" "XMLs: conferência da série $serie - $($semRegistro.Count) sem registro"
+                if ($totalSem -eq 0) { & $setStatus "Numeração sem lacunas: todos os números têm registro." $Script:UiVerde }
+                elseif ($multiEmp) { & $setStatus ("SEM REGISTRO no banco: " + $Script:XmlFaltantesTexto) $Script:UiAmarelo }
+                else { & $setStatus ("SEM REGISTRO no banco ($totalSem): " + (ConvertTo-FaixaTexto $Script:XmlFaltantes)) $Script:UiAmarelo }
+                Log-Message "INFO" "XMLs: conferência da série $serie - $totalSem sem registro"
                 & $mostraCarregando ""
                 [System.Windows.Forms.MessageBox]::Show(($linhas -join "`r`n"), "Conferir sequência", "OK", "Information") | Out-Null
             }
@@ -4216,25 +4577,36 @@ function Show-XmlDownloader {
             try {
                 $cmd = $cnP.CreateCommand()
                 $cmd.CommandTimeout = 300
-                $cmd.CommandText = ";WITH ult AS (SELECT l.IDParceiro, l.SerieTokenID, l.IDTokenID, l.CodigoRetorno, l.MotivoErro, l.Chave, l.DataEmissao, " +
-                "ROW_NUMBER() OVER (PARTITION BY l.IDParceiro, l.SerieTokenID, l.IDTokenID ORDER BY l.ID DESC) AS rn, " +
-                "MAX(CASE WHEN l.CodigoRetorno IN (100, 150) THEN 1 ELSE 0 END) OVER (PARTITION BY l.IDParceiro, l.SerieTokenID, l.IDTokenID) AS aut " +
+                # Com mais de um certificado a mesma serie e numero existem uma vez por empresa:
+                # a ultima tentativa de envio tem que ser a do certificado da propria nota
+                $svL = ""; $svT = ""; $svX = ""; $svJu = ""; $svJp = ""; $svJe = ""; $svF = ""
+                if ($Script:XmlTemServidor) {
+                    $svL = "l.IDServidorFiscal, "; $svT = "t.IDServidorFiscal, "; $svX = "x.IDServidorFiscal, "
+                    $svJu = "AND u.IDServidorFiscal = t.IDServidorFiscal "
+                    $svJp = "AND p.IDServidorFiscal = x.IDServidorFiscal "
+                    $svJe = "AND e.IDServidorFiscal = p.IDServidorFiscal "
+                    $svF = "AND (@servidor IS NULL OR t.IDServidorFiscal = @servidor) "
+                }
+                $cmd.CommandText = ";WITH ult AS (SELECT l.IDParceiro, " + $svL + "l.SerieTokenID, l.IDTokenID, l.CodigoRetorno, l.MotivoErro, l.Chave, l.DataEmissao, " +
+                "ROW_NUMBER() OVER (PARTITION BY l.IDParceiro, " + $svL + "l.SerieTokenID, l.IDTokenID ORDER BY l.ID DESC) AS rn, " +
+                "MAX(CASE WHEN l.CodigoRetorno IN (100, 150) THEN 1 ELSE 0 END) OVER (PARTITION BY l.IDParceiro, " + $svL + "l.SerieTokenID, l.IDTokenID) AS aut " +
                 "FROM NFCeTokenIDLog l WHERE l.IDParceiro = @p), " +
-                "pend AS (SELECT t.IDParceiro, t.Serie, t.ID, COALESCE(t.DataEmissao, t.data, u.DataEmissao) AS Emissao, t.OFFLine, t.OFFLineOK, t.Erro, t.ErroResolvido, " +
+                "pend AS (SELECT t.IDParceiro, " + $svT + "t.Serie, t.ID, COALESCE(t.DataEmissao, t.data, u.DataEmissao) AS Emissao, t.OFFLine, t.OFFLineOK, t.Erro, t.ErroResolvido, " +
                 "t.MotivoErro AS MotivoToken, t.Ignorada, t.MotivoIgnorada, t.MotivoGerouOutra, t.IDDestinoTransferencia, " +
                 "u.CodigoRetorno, u.MotivoErro AS MotivoLog, u.Chave, SUBSTRING(t.xmlEnvioOff, 1, 1000) AS InicioXmlOff " +
-                "FROM NFCeTokenID t LEFT JOIN ult u ON u.IDParceiro = t.IDParceiro AND u.SerieTokenID = t.Serie AND u.IDTokenID = t.ID AND u.rn = 1 " +
-                "WHERE t.IDParceiro = @p AND ISNULL(t.Inutilizada, 0) = 0 AND ISNULL(u.aut, 0) = 0 " +
+                "FROM NFCeTokenID t LEFT JOIN ult u ON u.IDParceiro = t.IDParceiro AND u.SerieTokenID = t.Serie AND u.IDTokenID = t.ID " + $svJu + "AND u.rn = 1 " +
+                "WHERE t.IDParceiro = @p AND ISNULL(t.Inutilizada, 0) = 0 AND ISNULL(u.aut, 0) = 0 " + $svF +
                 "AND (t.Usada = 1 OR t.OFFLine = 1 OR u.IDTokenID IS NOT NULL) " +
                 "AND (@desde IS NULL OR COALESCE(t.DataEmissao, t.data, u.DataEmissao) >= @desde)), " +
                 # Envio que falhou nao grava a chave na log: ela sai do comeco do XML enviado,
                 # lido so das notas pendentes e so os primeiros 1000 caracteres
-                "env AS (SELECT x.SerieTokenID, x.IDTokenID, SUBSTRING(x.xmlEnvio, 1, 1000) AS InicioXml, " +
-                "ROW_NUMBER() OVER (PARTITION BY x.SerieTokenID, x.IDTokenID ORDER BY x.ID DESC) AS rn " +
-                "FROM NFCeTokenIDLog x JOIN pend p ON p.IDParceiro = x.IDParceiro AND p.Serie = x.SerieTokenID AND p.ID = x.IDTokenID " +
+                "env AS (SELECT " + $svX + "x.SerieTokenID, x.IDTokenID, SUBSTRING(x.xmlEnvio, 1, 1000) AS InicioXml, " +
+                "ROW_NUMBER() OVER (PARTITION BY " + $svX + "x.SerieTokenID, x.IDTokenID ORDER BY x.ID DESC) AS rn " +
+                "FROM NFCeTokenIDLog x JOIN pend p ON p.IDParceiro = x.IDParceiro AND p.Serie = x.SerieTokenID AND p.ID = x.IDTokenID " + $svJp +
                 "WHERE x.xmlEnvio IS NOT NULL) " +
-                "SELECT p.*, e.InicioXml FROM pend p LEFT JOIN env e ON e.SerieTokenID = p.Serie AND e.IDTokenID = p.ID AND e.rn = 1 " +
+                "SELECT p.*, e.InicioXml FROM pend p LEFT JOIN env e ON e.SerieTokenID = p.Serie AND e.IDTokenID = p.ID " + $svJe + "AND e.rn = 1 " +
                 "ORDER BY p.Emissao DESC, p.Serie, p.ID"
+                & $addServidor $cmd
                 $par = $cmd.Parameters.Add("@p", [System.Data.SqlDbType]::BigInt); $par.Value = $parceiroP
                 $par = $cmd.Parameters.Add("@desde", [System.Data.SqlDbType]::DateTime)
                 if ($Dias -gt 0) { $par.Value = (Get-Date).Date.AddDays(-$Dias) } else { $par.Value = [System.DBNull]::Value }
@@ -4294,6 +4666,7 @@ function Show-XmlDownloader {
                         $lista.Add(@{
                                 Serie = [int](Get-XmlDbValor $rd "Serie"); Nota = [long](Get-XmlDbValor $rd "ID")
                                 Emissao = Get-XmlDbValor $rd "Emissao"; Situacao = $situacao; Motivo = $motivo; Chave = $chaveP
+                                Empresa = (& $nomeEmpresa (Get-XmlDbValor $rd "IDServidorFiscal"))
                             })
                     }
                 }
@@ -4332,6 +4705,9 @@ function Show-XmlDownloader {
             [void]$lvP.Columns.Add("Situação", 190)
             [void]$lvP.Columns.Add("Motivo", 420)
             [void]$lvP.Columns.Add("Chave de acesso", 280)
+            # Empresa do certificado: so tem largura quando o banco emite com mais de um
+            $colCertP = $lvP.Columns.Add("Certificado", 0)
+            if (@($Script:XmlServidores).Count -gt 1) { $colCertP.Width = 170 }
             [void]$fp.Controls.Add($lvP)
 
             $btnCopiarP = New-ToolButton $fp "COPIAR LISTA" 16 480 184 30 $Script:UiCinza $null "Copia a lista pronta para colar no WhatsApp ou no e-mail do suporte"
@@ -4364,6 +4740,7 @@ function Show-XmlDownloader {
                             [void]$lvi.SubItems.Add($p.Situacao)
                             [void]$lvi.SubItems.Add($p.Motivo)
                             [void]$lvi.SubItems.Add($p.Chave)
+                            [void]$lvi.SubItems.Add("$($p.Empresa)")
                             if ($p.Situacao -like "REJEITADA*" -or $p.Situacao -eq "COM ERRO") { $lvi.ForeColor = $Script:UiVermelho }
                             else { $lvi.ForeColor = $Script:UiAmarelo }
                             $lvi.ToolTipText = "$($p.Situacao) - $($p.Motivo)"
@@ -4400,7 +4777,9 @@ function Show-XmlDownloader {
                     foreach ($p in $Script:PendentesLista) {
                         $dtP = ""
                         if ($null -ne $p.Emissao) { try { $dtP = ([datetime]$p.Emissao).ToString("dd/MM/yyyy HH:mm") } catch {} }
-                        $linhasP += "Série $($p.Serie) nota $($p.Nota) - $dtP - $($p.Situacao) - $($p.Motivo)"
+                        $empP = ""
+                        if ("$($p.Empresa)" -ne "") { $empP = "$($p.Empresa) - " }
+                        $linhasP += "$($empP)Série $($p.Serie) nota $($p.Nota) - $dtP - $($p.Situacao) - $($p.Motivo)"
                     }
                     $txtP = $linhasP -join "`r`n"
                     try { Set-Clipboard -Value $txtP -ErrorAction Stop }
@@ -4436,6 +4815,9 @@ function Show-XmlDownloader {
             "   Se o SQL estiver em outra maquina, troque o servidor e clique em",
             "   TESTAR CONEXAO. Ele confirma a versao do SQL e carrega o parceiro e",
             "   as series que existem no banco.",
+            "   Banco que emite com mais de um certificado (uma empresa em cada",
+            "   caixa, mesma serie): aparece o campo Certificado. Escolha a empresa",
+            "   ou deixe Todos, e cada empresa sai no seu proprio lote e zip.",
             "",
             "2) ESCOLHA UM DOS QUATRO MODOS",
             "   - Por serie + sequencia (o mais usado)",
@@ -4575,12 +4957,26 @@ function Show-XmlDownloader {
                 try {
                     $cn = & $abrirConexao
                     & $carregarSeries $cn ("$($cmbParceiro.Text)".Trim())
+                    & $carregarCertificados $cn ("$($cmbParceiro.Text)".Trim())
                 }
                 catch {}
                 finally {
                     if ($null -ne $cn) { try { $cn.Close() } catch {} }
                     $Script:XmlOcupado = $false
                 }
+            })
+
+        # Trocar o certificado muda o que a busca traz do banco: a lista antiga sai para nao
+        # baixar notas de uma empresa achando que sao da outra
+        $cmbCert.Add_SelectedIndexChanged({
+                if ($Script:XmlOcupado -or @($Script:XmlResultados).Count -eq 0) { return }
+                $Script:XmlResultados = @()
+                $Script:XmlFaltantes = @()
+                $Script:XmlFaltantesTexto = ""
+                $lv.Items.Clear()
+                & $atualizaMarcadas
+                & $atualizaModo
+                & $setStatus "Certificado trocado para ""$($cmbCert.Text)"": clique em BUSCAR para listar as notas." $Script:UiAmarelo
             })
 
         $btnBuscar.Add_Click({ [void](& $buscar) })
@@ -4616,6 +5012,7 @@ function Show-XmlDownloader {
                     return
                 }
                 $txt = ConvertTo-FaixaTexto $Script:XmlFaltantes
+                if ("$($Script:XmlFaltantesTexto)" -ne "") { $txt = $Script:XmlFaltantesTexto }
                 try { Set-Clipboard -Value $txt -ErrorAction Stop }
                 catch { [System.Windows.Forms.Clipboard]::SetText($txt) }
                 & $setStatus "Copiado: $txt" $Script:UiVerde
@@ -4698,6 +5095,7 @@ function Show-XmlDownloader {
                     6 { $expr = { "$($_.Arquivo)" } }
                     7 { $expr = { if ($null -ne $_.Pedido) { [long]$_.Pedido } else { [long]-1 } } }
                     8 { $expr = { if ($null -ne $_.Valor) { [decimal]$_.Valor } else { [decimal]-1 } } }
+                    9 { $expr = { "$(& $nomeEmpresa $_.Servidor)" } }
                 }
                 if ($Script:XmlOrdemAsc) { $ord = @($Script:XmlResultados | Sort-Object $expr) }
                 else { $ord = @($Script:XmlResultados | Sort-Object $expr -Descending) }
@@ -11073,7 +11471,7 @@ $formWidth = if ($screen.Width -lt 1200) { $screen.Width - 50 } else { 1200 }
 $formHeight = if ($screen.Height -lt 900) { $screen.Height - 50 } else { 900 }
 
 $form = New-Object System.Windows.Forms.Form
-$form.Text = "XMenu System Manager v5.0"
+$form.Text = "Preparador XMenu – Suporte Técnico v5.0"
 $form.Size = New-Object System.Drawing.Size($formWidth, $formHeight)
 $form.StartPosition = "CenterScreen"
 $form.BackColor = [System.Drawing.Color]::FromArgb(25, 25, 30); $form.ForeColor = 'White'
@@ -11116,7 +11514,7 @@ $hInfo = New-Object System.Windows.Forms.Panel; $hInfo.Dock = 'Fill'; $hInfo.Bac
 [void]$head.Controls.Add($hInfo)
 $hTitulo = New-Object System.Windows.Forms.Panel; $hTitulo.Dock = 'Left'; $hTitulo.Width = 250; $hTitulo.BackColor = 'Transparent'
 [void]$head.Controls.Add($hTitulo)
-$lT = New-Object System.Windows.Forms.Label; $lT.Text = "XMenu Manager"; $lT.AutoSize = $true
+$lT = New-Object System.Windows.Forms.Label; $lT.Text = "Preparador XMenu"; $lT.AutoSize = $true
 $lT.ForeColor = [System.Drawing.Color]::White
 $lT.Font = New-Object System.Drawing.Font("Segoe UI", 14, [System.Drawing.FontStyle]::Bold); $lT.Location = '0,-3'
 [void]$hTitulo.Controls.Add($lT)
@@ -11215,22 +11613,44 @@ $hInfo.Cursor = [System.Windows.Forms.Cursors]::Hand
 # Sem piscar ao redimensionar a janela
 $hInfo.GetType().GetProperty('DoubleBuffered', [System.Reflection.BindingFlags]'Instance,NonPublic').SetValue($hInfo, $true, $null)
 $hInfo.Add_Resize({ $hInfo.Invalidate() })
+# Largura de cada coluna da grade (nome e valor) e o total que ela pede. Usada no
+# Paint e ao abrir, para alargar a janela quando a grade nao cabe.
+$gapNomeInfo = 5; $gapColInfo = 22; $x0Info = 14
+$medirInfoPc = {
+    param($g)
+    # Medir sem EndEllipsis: com ele e sem tamanho limite o MeasureText devolve quase zero
+    $flagsMedida = [System.Windows.Forms.TextFormatFlags]'NoPadding, SingleLine'
+    $larNome = @(0, 0, 0, 0); $larValor = @(0, 0, 0, 0)
+    foreach ($it in $Script:InfoPc) {
+        $larNome[$it.Col] = [Math]::Max($larNome[$it.Col], [System.Windows.Forms.TextRenderer]::MeasureText($g, $it.Nome, $fonteInfoNome, [System.Drawing.Size]::Empty, $flagsMedida).Width + 2)
+        $larValor[$it.Col] = [Math]::Max($larValor[$it.Col], [System.Windows.Forms.TextRenderer]::MeasureText($g, "$($it.Valor)", $fonteInfoValor, [System.Drawing.Size]::Empty, $flagsMedida).Width + 2)
+    }
+    $usado = $x0Info + 4 * $gapNomeInfo + 3 * $gapColInfo
+    for ($c = 0; $c -lt 4; $c++) { $usado += $larNome[$c] + $larValor[$c] }
+    return @{ Nome = $larNome; Valor = $larValor; Usado = $usado }
+}
+# Ao abrir: se a grade nao coube (escala do Windows em 125%, nome de processador
+# comprido), alarga a janela o que faltar, centralizada e sem passar da tela
+$ajustarJanelaAoCabecalho = {
+    $gMed = $hInfo.CreateGraphics()
+    try { $med = & $medirInfoPc $gMed } finally { $gMed.Dispose() }
+    $falta = $med.Usado - $hInfo.ClientSize.Width
+    if ($falta -le 0) { return }
+    $areaTela = [System.Windows.Forms.Screen]::FromControl($form).WorkingArea
+    $novaLargura = [Math]::Min($form.Width + $falta + 12, $areaTela.Width - 20)
+    if ($novaLargura -le $form.Width) { return }
+    $form.Left = $areaTela.Left + [int](($areaTela.Width - $novaLargura) / 2)
+    $form.Width = $novaLargura
+}
 $hInfo.Add_Paint({
         param($s, $e)
         $g = $e.Graphics
         $flags = [System.Windows.Forms.TextFormatFlags]'Left, VerticalCenter, EndEllipsis, NoPadding, SingleLine'
-        # Medir sem EndEllipsis: com ele e sem tamanho limite o MeasureText devolve quase zero
-        $flagsMedida = [System.Windows.Forms.TextFormatFlags]'NoPadding, SingleLine'
-        $gapNome = 5; $gapCol = 22; $x0 = 14
-        $larNome = @(0, 0, 0, 0); $larValor = @(0, 0, 0, 0)
-        foreach ($it in $Script:InfoPc) {
-            $larNome[$it.Col] = [Math]::Max($larNome[$it.Col], [System.Windows.Forms.TextRenderer]::MeasureText($g, $it.Nome, $fonteInfoNome, [System.Drawing.Size]::Empty, $flagsMedida).Width + 2)
-            $larValor[$it.Col] = [Math]::Max($larValor[$it.Col], [System.Windows.Forms.TextRenderer]::MeasureText($g, "$($it.Valor)", $fonteInfoValor, [System.Drawing.Size]::Empty, $flagsMedida).Width + 2)
-        }
+        $gapNome = $gapNomeInfo; $gapCol = $gapColInfo; $x0 = $x0Info
+        $med = & $medirInfoPc $g
+        $larNome = $med.Nome; $larValor = $med.Valor
         # Janela estreita: tira o que falta da coluna de valor mais larga (ate 60 px), depois da seguinte
-        $usado = $x0 + 4 * $gapNome + 3 * $gapCol
-        for ($c = 0; $c -lt 4; $c++) { $usado += $larNome[$c] + $larValor[$c] }
-        $sobra = $s.ClientSize.Width - $usado
+        $sobra = $s.ClientSize.Width - $med.Usado
         for ($volta = 0; $volta -lt 4 -and $sobra -lt 0; $volta++) {
             $maior = 0
             for ($c = 1; $c -lt 4; $c++) { if ($larValor[$c] -gt $larValor[$maior]) { $maior = $c } }
@@ -11258,7 +11678,7 @@ $hInfo.Add_Click({
         Log-Message "SUCESSO" "Informações de hardware copiadas para a área de transferência."
     })
 
-$hRight = New-Object System.Windows.Forms.FlowLayoutPanel; $hRight.Dock = 'Right'; $hRight.Width = 140
+$hRight = New-Object System.Windows.Forms.FlowLayoutPanel; $hRight.Dock = 'Right'; $hRight.Width = 116
 $hRight.FlowDirection = 'LeftToRight'; $hRight.BackColor = 'Transparent'; $hRight.WrapContents = $false
 $hRight.Padding = '0,2,0,0'
 [void]$head.Controls.Add($hRight)
@@ -11267,10 +11687,10 @@ $hRight.Padding = '0,2,0,0'
 # junto com as outras ferramentas (nao precisa mais de botao no cabecalho).
 
 # --- NOVO BOTAO LINKS NO HEADER ---
-$btnLinks = New-Object System.Windows.Forms.Button; $btnLinks.Text = "LINKS ÚTEIS ▼"; $btnLinks.Size = '140,34'
+$btnLinks = New-Object System.Windows.Forms.Button; $btnLinks.Text = "LINKS ÚTEIS ▼"; $btnLinks.Size = '116,28'
 $btnLinks.BackColor = 'White'; $btnLinks.ForeColor = [System.Drawing.Color]::FromArgb(12, 78, 55)
 $btnLinks.FlatStyle = 'Flat'; $btnLinks.FlatAppearance.BorderSize = 0; $btnLinks.Cursor = [System.Windows.Forms.Cursors]::Hand
-$btnLinks.Font = New-Object System.Drawing.Font("Segoe UI", 9.5, [System.Drawing.FontStyle]::Bold)
+$btnLinks.Font = New-Object System.Drawing.Font("Segoe UI", 8.5, [System.Drawing.FontStyle]::Bold)
 $btnLinks.Margin = '0,0,0,0'
 $btnLinks.FlatAppearance.MouseOverBackColor = [System.Drawing.Color]::FromArgb(240, 240, 240)
 $btnLinks.FlatAppearance.MouseDownBackColor = [System.Drawing.Color]::FromArgb(220, 220, 220)
@@ -11656,7 +12076,7 @@ $bClock.Add_Click({ Invoke-ClockSync })
 [void]$tbl.Controls.Add($bClock)
 
 # Mensagem de abertura: explica o programa para quem abre pela primeira vez
-Log-Message "INFO" "XMenu System Manager v5.0 - preparo e suporte de computadores com XMenu e NetPDV"
+Log-Message "INFO" "Preparador XMenu v5.0 - preparo e suporte de computadores com XMenu e NetPDV"
 Log-Message "LOG" "==============================================================="
 Log-Message "LOG" "COMO USAR"
 Log-Message "LOG" "  PREPARAR AMBIENTE WINDOWS .. ajusta energia, UAC e desempenho do PC num clique"
@@ -11687,5 +12107,6 @@ $form.Add_Shown({
         # Desenha a janela primeiro e so depois le o hardware do cabecalho
         $this.Refresh()
         try { & $preencheHardware } catch {}
+        try { & $ajustarJanelaAoCabecalho } catch {}
     })
 [void]$form.ShowDialog()
