@@ -1,5 +1,5 @@
 ﻿# =============================================================================
-# PREPARADOR XMENU v5.8
+# PREPARADOR XMENU v5.9
 # Visual: Dashboard Moderno
 # Correcoes:
 #   - CRITICO: Removido DoEvents do loop de evento de download (causava crash).
@@ -3097,6 +3097,20 @@ function Show-XmlDownloader {
             return , $tarefa.Result
         }
 
+        # Quando a busca nao acha nada, registra no log o que esta conexao esta vendo:
+        # banco, servidor, usuario e quantas linhas a tabela tem. Se a tabela vier vazia
+        # aqui e cheia no SSMS, o programa esta olhando outro lugar - e isso o log conta.
+        $conferirConexao = {
+            try {
+                $onde = "$((& $escalar $cn "SELECT DB_NAME() + ' | ' + CONVERT(varchar(128), @@SERVERNAME) + ' | ' + SUSER_NAME() + ' | schema ' + SCHEMA_NAME()"))"
+                $totTab = "$((& $escalar $cn 'SELECT COUNT(*) FROM NFCeTokenID'))"
+                $totPar = "$((& $escalar $cn ("SELECT COUNT(*) FROM NFCeTokenID WHERE IDParceiro = $([long]$parceiro)")))"
+                $ultima = "$((& $escalar $cn ("SELECT CONVERT(varchar(30), MAX(COALESCE(DataEmissao, data)), 120) FROM NFCeTokenID WHERE IDParceiro = $([long]$parceiro)")))"
+                Log-Message "INFO" "XMLs: conexão vê -> $onde | NFCeTokenID: $totTab linha(s) | parceiro $($parceiro): $totPar | nota mais nova: $ultima"
+            }
+            catch { Log-Message "ERRO" "XMLs: não consegui conferir o que a conexão está vendo: $($_.Exception.Message)" }
+        }
+
         # Conta simples numa conexao ja aberta (usada pelo diagnostico da busca)
         $escalar = {
             param($Conexao, [string]$Sql)
@@ -3951,6 +3965,7 @@ function Show-XmlDownloader {
                             Log-Message "INFO" "XMLs: busca sem resultado (parceiro $parceiro, série $serie). $($Script:XmlDicaBusca)"
                         }
                         catch { Log-Message "ERRO" "XMLs: não consegui conferir onde estão essas notas: $($_.Exception.Message)" }
+                        & $conferirConexao
                     }
 
                     # Numero pedido que nem linha tem na tabela de numeracao. Com mais de um
@@ -4019,11 +4034,13 @@ function Show-XmlDownloader {
                         $(if ($Script:XmlTemServidor -and $null -ne $servSel) { " AND t.IDServidorFiscal = $([int]$servSel)" } else { "" })
                         $totalLit = 0
                         try { $totalLit = [int]"$((& $escalar $cn ("SELECT COUNT(*) FROM NFCeTokenID t WHERE " + $filtroLit)))" } catch {}
+                        Log-Message "INFO" "XMLs: período $($d1.ToString('dd/MM/yyyy')) a $($dtFim.Value.ToString('dd/MM/yyyy')), parceiro $parceiro - com parâmetros: 0 nota(s), sem parâmetros: $totalLit nota(s)"
                         if ($totalLit -gt 0) {
                             Log-Message "SUCESSO" "XMLs: período sem resultado com parâmetros; a consulta sem parâmetros achou $totalLit nota(s) - a busca vai usar essa forma"
                             $filtroPeriodo = $filtroLit
                             $totalPeriodo = $totalLit
                         }
+                        else { & $conferirConexao }
                     }
 
                     if ($totalPeriodo -gt 10000) {
@@ -12326,7 +12343,7 @@ $formWidth = if ($screen.Width -lt 1200) { $screen.Width - 50 } else { 1200 }
 $formHeight = if ($screen.Height -lt 900) { $screen.Height - 50 } else { 900 }
 
 $form = New-Object System.Windows.Forms.Form
-$form.Text = "Preparador XMenu – Suporte Técnico v5.8"
+$form.Text = "Preparador XMenu – Suporte Técnico v5.9"
 $form.Size = New-Object System.Drawing.Size($formWidth, $formHeight)
 $form.StartPosition = "CenterScreen"
 $form.BackColor = [System.Drawing.Color]::FromArgb(25, 25, 30); $form.ForeColor = 'White'
@@ -12932,7 +12949,7 @@ $bClock.Add_Click({ Invoke-ClockSync })
 [void]$tbl.Controls.Add($bClock)
 
 # Mensagem de abertura: explica o programa para quem abre pela primeira vez
-Log-Message "INFO" "Preparador XMenu v5.8 - preparo e suporte de computadores com XMenu e NetPDV"
+Log-Message "INFO" "Preparador XMenu v5.9 - preparo e suporte de computadores com XMenu e NetPDV"
 Log-Message "LOG" "==============================================================="
 Log-Message "LOG" "COMO USAR"
 Log-Message "LOG" "  PREPARAR AMBIENTE WINDOWS .. ajusta energia, UAC e desempenho do PC num clique"
@@ -12942,7 +12959,8 @@ Log-Message "LOG" "  EXTERNOS ................... acesso remoto, Chrome, TEF HUB
 Log-Message "LOG" "  SUPORTE E DIAGNÓSTICO ...... impressoras, rede, SQL, backup, XMLs e reparos do Windows"
 Log-Message "LOG" "  Passe o mouse sobre um botão para ver o que ele faz antes de clicar."
 Log-Message "LOG" "---------------------------------------------------------------"
-Log-Message "LOG" "NOVO NA v5.8"
+Log-Message "LOG" "NOVO NA v5.9"
+Log-Message "SUCESSO" "  XMLs NFC-e: busca sem resultado registra no log o que a conexão está vendo no banco"
 Log-Message "SUCESSO" "  XMLs NFC-e: em PC antigo, a busca refaz a consulta sem parâmetros quando não vem nada"
 Log-Message "SUCESSO" "  Corrigido: arquivo do último servidor ilegível deixava o campo Servidor com lixo"
 Log-Message "SUCESSO" "  Zoom só em monitor pequeno de verdade (até 1024x640); nos demais nada muda"
