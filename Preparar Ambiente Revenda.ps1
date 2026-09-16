@@ -1,6 +1,6 @@
 ﻿# =============================================================================
 # PREPARADOR XMENU - VERSAO REVENDA
-# Baseado na v5.0
+# Baseado na v5.1
 # Alteracoes Revenda:
 #   - Wallpaper: fundo_revenda.png
 #   - Removido: Atalhos de Suporte e Pasta Netcontroll
@@ -6446,6 +6446,29 @@ public class RodaDoMouse : IMessageFilter
     }
 }
 
+# Zoom da janela: reduz tudo junto - posicao, tamanho, fonte e coluna de lista - do
+# jeito que o Windows faz quando muda a escala da tela. E o que faz uma janela
+# desenhada para 1000 px caber num monitor de 800, sem cortar campo nem texto.
+function Set-EscalaControles {
+    param($Pai, [single]$Fator, [single]$FonteMinima = 6.75)
+    foreach ($c in $Pai.Controls) {
+        $c.SetBounds([int][Math]::Round($c.Left * $Fator), [int][Math]::Round($c.Top * $Fator),
+            [int][Math]::Round($c.Width * $Fator), [int][Math]::Round($c.Height * $Fator))
+        if ($null -ne $c.Font) {
+            $novoTam = [Math]::Max($FonteMinima, [single]($c.Font.Size * $Fator))
+            if ([Math]::Abs($novoTam - $c.Font.Size) -gt 0.05) { $c.Font = New-Object System.Drawing.Font($c.Font.FontFamily, $novoTam, $c.Font.Style) }
+        }
+        # Coluna de lista tem largura em pixel: sem isso a grade estoura a janela. Aqui
+        # encolhe menos que o resto (meio caminho), senao o numero da nota sai como
+        # "10..."; se faltar espaco, a propria lista tem barra de rolagem.
+        if ($c -is [System.Windows.Forms.ListView]) {
+            $fatorCol = (1 + $Fator) / 2
+            foreach ($col in $c.Columns) { $col.Width = [int][Math]::Round($col.Width * $fatorCol) }
+        }
+        if ($c.Controls.Count -gt 0) { Set-EscalaControles $c $Fator $FonteMinima }
+    }
+}
+
 # Tela pequena (PDV antigo em 800x600): a janela foi desenhada maior que o monitor,
 # os botoes de baixo ficavam fora da tela e o tamanho minimo nao deixava diminuir.
 # Aqui a janela encolhe ate a area util, libera o redimensionar e o minimizar, e o
@@ -6459,10 +6482,37 @@ function Set-JanelaAdaptavel {
         $maxA = $area.Height - $Margem
         if ($Janela.Width -le $maxL -and $Janela.Height -le $maxA) { return $false }
 
-        # O tamanho em que a tela foi desenhada vira a area de rolagem: os controles
-        # ficam onde estao e o tecnico rola ate eles, em vez de perde-los fora da tela
-        $desenho = $Janela.ClientSize
+        # Onde o conteudo termina de verdade. Nao da para confiar so no tamanho da
+        # janela: em monitor pequeno o Windows pode abri-la ja encolhida, e ai a conta
+        # do rodape sairia errada e os botoes ficariam cortados.
+        $limiteDir = 0; $limiteBaixo = 0
+        foreach ($ctl in $Janela.Controls) {
+            if ("$($ctl.Dock)" -ne 'None') { continue }
+            if ($ctl.Right -gt $limiteDir) { $limiteDir = $ctl.Right }
+            if ($ctl.Bottom -gt $limiteBaixo) { $limiteBaixo = $ctl.Bottom }
+        }
+        $desenho = New-Object System.Drawing.Size(
+            [Math]::Max($Janela.ClientSize.Width, ($limiteDir + 12)),
+            [Math]::Max($Janela.ClientSize.Height, ($limiteBaixo + 12)))
         $borda = $Janela.Height - $Janela.ClientSize.Height
+
+        # Primeiro o zoom: tudo encolhe junto ate a janela caber no monitor (no maximo
+        # 28% menor, senao a letra fica ilegivel). E o que evita campo e texto cortados.
+        $clienteL = [Math]::Min($Janela.Width, $maxL) - ($Janela.Width - $Janela.ClientSize.Width)
+        $clienteA = [Math]::Min($Janela.Height, $maxA) - $borda
+        # 1.0 e nao 1: com inteiro, o PowerShell arredondaria o fator para 1 e o zoom
+        # nunca aconteceria
+        $fator = [Math]::Min(([double]$clienteL / $desenho.Width), ([double]$clienteA / $desenho.Height))
+        $fator = [Math]::Max(0.72, [Math]::Min(1.0, $fator))
+        if ($fator -lt 0.995) {
+            Set-EscalaControles $Janela ([single]$fator) 6.0
+            if ($null -ne $Janela.Font) {
+                $Janela.Font = New-Object System.Drawing.Font($Janela.Font.FontFamily, [Math]::Max(6.0, [single]($Janela.Font.Size * $fator)), $Janela.Font.Style)
+            }
+            $desenho = New-Object System.Drawing.Size([int][Math]::Round($desenho.Width * $fator), [int][Math]::Round($desenho.Height * $fator))
+            Log-Message "INFO" "Janela ""$($Janela.Text)"": tela de $($area.Width)x$($area.Height), tudo reduzido para $([int][Math]::Round($fator * 100))% para caber"
+        }
+
         $novoCliente = [Math]::Min($Janela.Height, $maxA) - $borda
         # Se vai sobrar rolagem na largura, a barra de baixo come um pedaco da altura
         if ($desenho.Width -gt ([Math]::Min($Janela.Width, $maxL) - ($Janela.Width - $Janela.ClientSize.Width))) {
@@ -6481,7 +6531,9 @@ function Set-JanelaAdaptavel {
         try {
             if ($doRodape.Count -gt 0 -and $conteudo.Count -gt 0) {
                 $topoRodape = ($doRodape | ForEach-Object { $_.Top } | Measure-Object -Minimum).Minimum
-                $alturaRodape = $desenho.Height - $topoRodape
+                $baseRodape = ($doRodape | ForEach-Object { $_.Bottom } | Measure-Object -Maximum).Maximum
+                # Altura pelo proprio rodape (nao pela janela, que pode ter vindo encolhida)
+                $alturaRodape = [Math]::Max(($baseRodape - $topoRodape + 10), ($desenho.Height - $topoRodape))
                 $painelRodape = New-Object System.Windows.Forms.Panel
                 $painelRodape.Size = New-Object System.Drawing.Size($desenho.Width, $alturaRodape)
                 $painelRodape.BackColor = $Janela.BackColor
@@ -11685,7 +11737,7 @@ $formWidth = if ($screen.Width -lt 1000) { 900 } else { 1000 }
 $formHeight = if ($screen.Height -lt 800) { 700 } else { 800 }
 
 $form = New-Object System.Windows.Forms.Form
-$form.Text = "Preparador XMenu – Suporte Técnico v5.0 - REVENDA"
+$form.Text = "Preparador XMenu – Suporte Técnico v5.1 - REVENDA"
 $form.Size = New-Object System.Drawing.Size($formWidth, $formHeight)
 $form.StartPosition = "CenterScreen"
 $form.BackColor = [System.Drawing.Color]::FromArgb(25, 25, 30); $form.ForeColor = 'White'
@@ -12288,7 +12340,7 @@ $bClock.Add_Click({ Invoke-ClockSync })
 [void]$tbl.Controls.Add($bClock)
 
 # Mensagem de abertura: explica o programa para quem abre pela primeira vez
-Log-Message "INFO" "Preparador XMenu v5.0 - REVENDA - preparo e suporte de computadores com XMenu e NetPDV"
+Log-Message "INFO" "Preparador XMenu v5.1 - REVENDA - preparo e suporte de computadores com XMenu e NetPDV"
 Log-Message "LOG" "==============================================================="
 Log-Message "LOG" "COMO USAR"
 Log-Message "LOG" "  PREPARAR AMBIENTE WINDOWS .. ajusta energia, UAC e desempenho do PC num clique"
@@ -12298,11 +12350,11 @@ Log-Message "LOG" "  EXTERNOS ................... acesso remoto, Chrome, TEF HUB
 Log-Message "LOG" "  SUPORTE E DIAGNÓSTICO ...... impressoras, rede, SQL, backup, XMLs e reparos do Windows"
 Log-Message "LOG" "  Passe o mouse sobre um botão para ver o que ele faz antes de clicar."
 Log-Message "LOG" "---------------------------------------------------------------"
-Log-Message "LOG" "NOVO NA v5.0"
-Log-Message "SUCESSO" "  Baixar XMLs NFC-e: por série, período, chave ou pedido, e espelho fiscal da nota em PDF"
-Log-Message "SUCESSO" "  Backup do Banco NetWebPDV: backup completo com o banco no ar, sem parar o serviço"
-Log-Message "SUCESSO" "  Impressoras LPR: cria a impressora, imprime teste e corrige a porta quando o IP muda"
-Log-Message "SUCESSO" "  Drivers de impressora: pesquisa por marca ou modelo"
+Log-Message "LOG" "NOVO NA v5.1"
+Log-Message "SUCESSO" "  Telas se ajustam ao monitor: em tela pequena tudo encolhe junto, sem cortar campo nem botão"
+Log-Message "SUCESSO" "  Roda do mouse rola a lista que está embaixo do ponteiro, sem precisar clicar antes"
+Log-Message "SUCESSO" "  XMLs NFC-e: filtro de certificado quando o cliente emite com dois, e colunas que você arrasta"
+Log-Message "SUCESSO" "  XMLs NFC-e: a busca vem desmarcada e BAIXAR TUDO grava a lista inteira"
 Log-Message "LOG" "---------------------------------------------------------------"
 Log-Message "LOG" "Downloads, XMLs, espelhos em PDF e backups ficam em: Área de Trabalho > Arquivos Xmenu"
 Log-Message "LOG" "O registro de cada sessão fica em: C:\Arquivos Xmenu\Logs"
