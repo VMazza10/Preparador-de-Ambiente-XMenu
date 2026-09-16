@@ -1,5 +1,5 @@
 ﻿# =============================================================================
-# PREPARADOR XMENU v5.6
+# PREPARADOR XMENU v5.7
 # Visual: Dashboard Moderno
 # Correcoes:
 #   - CRITICO: Removido DoEvents do loop de evento de download (causava crash).
@@ -1364,20 +1364,26 @@ function Get-XmlDbValor {
         # PowerShell 4 (Windows Server 2012 R2) as vezes entrega o leitor dentro de um
         # array de um elemento: sem isso, toda coluna vinha vazia e a nota perdia o numero
         if ($Reader -is [System.Array] -and $Reader.Length -gt 0) { $Reader = $Reader[0] }
-        if (-not [object]::ReferenceEquals($Script:DbMapaLeitor, $Reader)) {
-            $Script:DbMapaLeitor = $Reader
-            $Script:DbMapaColunas = @{}
-            for ($k = 0; $k -lt $Reader.FieldCount; $k++) {
-                $Script:DbMapaColunas["$($Reader.GetName($k))".ToLowerInvariant()] = $k
-            }
-        }
-        $chave = "$Coluna".ToLowerInvariant()
-        if (-not $Script:DbMapaColunas.ContainsKey($chave)) { return $null }
-        $i = $Script:DbMapaColunas[$chave]
+        $i = $Reader.GetOrdinal($Coluna)
         if ($Reader.IsDBNull($i)) { return $null }
         return $Reader.GetValue($i)
     }
-    catch { return $null }
+    catch {
+        # GetOrdinal falhou (collation que diferencia maiuscula, por exemplo): procura a
+        # coluna na mao. Guardar um mapa de colunas entre consultas ja causou estrago -
+        # uma consulta pegava o mapa da outra e a nota vinha sem numero -, entao aqui e
+        # sempre leitura direta, sem cache.
+        try {
+            for ($k = 0; $k -lt $Reader.FieldCount; $k++) {
+                if ([string]::Equals($Reader.GetName($k), $Coluna, [System.StringComparison]::OrdinalIgnoreCase)) {
+                    if ($Reader.IsDBNull($k)) { return $null }
+                    return $Reader.GetValue($k)
+                }
+            }
+        }
+        catch {}
+        return $null
+    }
 }
 
 function Repair-XmlAcentos {
@@ -2664,12 +2670,18 @@ function Show-XmlDownloader {
         $Script:XmlFaltantes = @()
         $Script:XmlArqServidor = Join-Path $Script:DownloadFolder "xml_ultimo_servidor.txt"
 
-        # Servidor da ultima execucao, se houver
+        # Servidor da ultima execucao, se houver. O arquivo e lido sempre como UTF-8 e o
+        # conteudo e conferido: ja apareceu cliente com esse arquivo gravado noutra
+        # codificacao, e o campo Servidor abria cheio de caractere estranho. Nome de
+        # servidor so tem letras, numeros, ponto, traco, barra invertida e virgula (porta).
         $srvInicial = "127.0.0.1"
         try {
             if (Test-Path $Script:XmlArqServidor) {
-                $lido = (Get-Content -Path $Script:XmlArqServidor -TotalCount 1 -ErrorAction Stop).Trim()
-                if ($lido -ne "") { $srvInicial = $lido }
+                $lido = "$([System.IO.File]::ReadAllText($Script:XmlArqServidor, [System.Text.Encoding]::UTF8))"
+                $lido = ($lido -split "`n")[0]
+                $lido = ($lido -replace "[`0`r`n]", "").Trim()
+                if ($lido -match '^[A-Za-z0-9._\\,\-]{1,80}$') { $srvInicial = $lido }
+                elseif ($lido -ne "") { Log-Message "ERRO" "XMLs: o arquivo do último servidor estava ilegível; voltando para 127.0.0.1" }
             }
         }
         catch {}
@@ -3374,8 +3386,16 @@ function Show-XmlDownloader {
                 else { $lblConn.Text = "OK - $versao | banco: $banco | parceiros: $($cmbParceiro.Items.Count) | séries: $($cmbSerie.Items.Count)" }
                 Log-Message "SUCESSO" "XMLs: conectado em $($txtServidor.Text) / $banco"
 
-                # Lembra o servidor para a proxima abertura
-                try { "$($txtServidor.Text)".Trim() | Out-File -FilePath $Script:XmlArqServidor -Encoding UTF8 -Force } catch {}
+                # Lembra o servidor para a proxima abertura. Grava direto em UTF-8, sem
+                # passar pelo Out-File: com a codificacao errada o arquivo voltava como
+                # caractere estranho e a proxima abertura tentava conectar nesse lixo.
+                try {
+                    $srvGravar = "$($txtServidor.Text)".Trim()
+                    if ($srvGravar -match '^[A-Za-z0-9._\\,\-]{1,80}$') {
+                        [System.IO.File]::WriteAllText($Script:XmlArqServidor, $srvGravar, (New-Object System.Text.UTF8Encoding($false)))
+                    }
+                }
+                catch {}
             }
             catch {
                 $msg = $_.Exception.Message
@@ -3462,7 +3482,11 @@ function Show-XmlDownloader {
                     $Script:XmlAvisouColunas = $true
                     $cols = @()
                     try { for ($k = 0; $k -lt $rd.FieldCount; $k++) { $cols += $rd.GetName($k) } } catch {}
-                    Log-Message "ERRO" ("XMLs: linha sem número de nota. O banco devolveu " + @($cols).Count + " coluna(s): " + ($cols -join ', '))
+                    $tipoRd = "?"
+                    try { $tipoRd = "$($rd.GetType().FullName)" } catch {}
+                    $testeDireto = "?"
+                    try { $testeDireto = "GetOrdinal(ID) = $($rd.GetOrdinal('ID'))" } catch { $testeDireto = "GetOrdinal(ID) falhou: $($_.Exception.Message)" }
+                    Log-Message "ERRO" ("XMLs: linha sem número de nota. Leitor: $tipoRd | $testeDireto | " + @($cols).Count + " coluna(s): " + ($cols -join ', '))
                 }
             }
 
@@ -4107,6 +4131,15 @@ function Show-XmlDownloader {
                 # @() sobre uma List[object] quebra no PowerShell 5.1 ("Os tipos de
                 # argumento nao correspondem"): vira array uma vez, aqui
                 if ($achados -isnot [array]) { $achados = $achados.ToArray() }
+
+                # Vale para todos os modos: linha sem numero de nota nao existe na
+                # NFCeTokenID (a chave e IDParceiro + Serie + ID). Se sobrar alguma,
+                # e leitura que deu errado - fora da lista, e registrada no log.
+                $comNumero = @($achados | Where-Object { $null -ne $_.Nota -and [long]$_.Nota -gt 0 })
+                if ($comNumero.Count -ne @($achados).Count) {
+                    Log-Message "ERRO" "XMLs: $(@($achados).Count - $comNumero.Count) linha(s) sem número de nota foram descartadas da lista"
+                    $achados = $comNumero
+                }
                 $Script:XmlResultados = @($achados)
                 & $mostraCarregando ""
                 $visiveis = & $repintaLista
@@ -6664,11 +6697,23 @@ function Set-JanelaAdaptavel {
 
         # Primeiro o zoom: tudo encolhe junto ate a janela caber no monitor (no maximo
         # 28% menor, senao a letra fica ilegivel). E o que evita campo e texto cortados.
-        $clienteL = [Math]::Min($Janela.Width, $maxL) - ($Janela.Width - $Janela.ClientSize.Width)
+        # A altura considera o que a lista do meio pode ceder: so o que nao couber nem
+        # assim vira zoom, senao uma tela 1280x720 encolhia a janela sem precisar.
+        # Desconta a barra de rolagem de pé: se ela aparecer e a largura tiver sido
+        # calculada sem ela, sobra rolagem de lado justamente por causa da barra
+        $clienteL = [Math]::Min($Janela.Width, $maxL) - ($Janela.Width - $Janela.ClientSize.Width) - [System.Windows.Forms.SystemInformation]::VerticalScrollBarWidth
         $clienteA = [Math]::Min($Janela.Height, $maxA) - $borda
+        $cedeAltura = 0
+        foreach ($ctl in $Janela.Controls) {
+            $ancC = "$($ctl.Anchor)"
+            if (("$($ctl.Dock)" -eq 'Fill') -or ($ancC -match 'Top' -and $ancC -match 'Bottom')) {
+                $cedeAltura = [Math]::Max($cedeAltura, ($ctl.Height - $MinElastico))
+            }
+        }
+        $alturaRigida = [Math]::Max(120, ($desenho.Height - [Math]::Max(0, $cedeAltura)))
         # 1.0 e nao 1: com inteiro, o PowerShell arredondaria o fator para 1 e o zoom
         # nunca aconteceria
-        $fator = [Math]::Min(([double]$clienteL / $desenho.Width), ([double]$clienteA / $desenho.Height))
+        $fator = [Math]::Min(([double]$clienteL / $desenho.Width), ([double]$clienteA / $alturaRigida))
         $fator = [Math]::Max(0.72, [Math]::Min(1.0, $fator))
         if ($fator -lt 0.995) {
             Set-EscalaControles $Janela ([single]$fator) 6.0
@@ -12216,7 +12261,7 @@ $formWidth = if ($screen.Width -lt 1200) { $screen.Width - 50 } else { 1200 }
 $formHeight = if ($screen.Height -lt 900) { $screen.Height - 50 } else { 900 }
 
 $form = New-Object System.Windows.Forms.Form
-$form.Text = "Preparador XMenu – Suporte Técnico v5.6"
+$form.Text = "Preparador XMenu – Suporte Técnico v5.7"
 $form.Size = New-Object System.Drawing.Size($formWidth, $formHeight)
 $form.StartPosition = "CenterScreen"
 $form.BackColor = [System.Drawing.Color]::FromArgb(25, 25, 30); $form.ForeColor = 'White'
@@ -12822,7 +12867,7 @@ $bClock.Add_Click({ Invoke-ClockSync })
 [void]$tbl.Controls.Add($bClock)
 
 # Mensagem de abertura: explica o programa para quem abre pela primeira vez
-Log-Message "INFO" "Preparador XMenu v5.6 - preparo e suporte de computadores com XMenu e NetPDV"
+Log-Message "INFO" "Preparador XMenu v5.7 - preparo e suporte de computadores com XMenu e NetPDV"
 Log-Message "LOG" "==============================================================="
 Log-Message "LOG" "COMO USAR"
 Log-Message "LOG" "  PREPARAR AMBIENTE WINDOWS .. ajusta energia, UAC e desempenho do PC num clique"
@@ -12832,9 +12877,10 @@ Log-Message "LOG" "  EXTERNOS ................... acesso remoto, Chrome, TEF HUB
 Log-Message "LOG" "  SUPORTE E DIAGNÓSTICO ...... impressoras, rede, SQL, backup, XMLs e reparos do Windows"
 Log-Message "LOG" "  Passe o mouse sobre um botão para ver o que ele faz antes de clicar."
 Log-Message "LOG" "---------------------------------------------------------------"
-Log-Message "LOG" "NOVO NA v5.6"
+Log-Message "LOG" "NOVO NA v5.7"
+Log-Message "SUCESSO" "  Corrigido: arquivo do último servidor ilegível deixava o campo Servidor com lixo"
+Log-Message "SUCESSO" "  Zoom só em monitor pequeno de verdade (até 1024x640); nos demais nada muda"
 Log-Message "SUCESSO" "  XMLs NFC-e: busca com segunda tentativa, para SQL antigo (2008 R2) que não trazia as notas"
-Log-Message "SUCESSO" "  XMLs NFC-e: leitura do banco não depende mais da collation - fim da nota 0 fantasma"
 Log-Message "SUCESSO" "  XMLs NFC-e: busca vazia agora diz onde as notas estão (parceiro e série certos)"
 Log-Message "SUCESSO" "  Scanner de rede: mostra a marca e, quando o aparelho responde, o modelo da impressora"
 Log-Message "SUCESSO" "  Lista de notas aceita colar separado por espaço, TAB ou uma por linha (planilha)"
@@ -12857,6 +12903,10 @@ $ajustarEscalaPrincipal = {
     # Roda antes de a janela aparecer, para ela ja abrir pronta: $screen e a area util
     # da tela, medida no inicio do programa
     $areaTela = $screen
+    # So em monitor pequeno de verdade. Antes a conta usava 1200x900 como referencia, e
+    # entao qualquer tela com menos de 900 px de altura util (1366x768, 1600x900, que
+    # sao a maioria dos PDVs) encolhia o programa sem precisar.
+    if ($areaTela.Width -ge 1024 -and $areaTela.Height -ge 640) { return }
     # 1200x900 e o tamanho em que a tela foi desenhada
     $fator = [Math]::Min(([double]$areaTela.Width / 1200), ([double]$areaTela.Height / 900))
     $fator = [Math]::Max(0.72, [Math]::Min(1.0, $fator))
@@ -12878,7 +12928,12 @@ $form.Add_Shown({
         $this.ActiveControl = $null
         # Desenha a janela primeiro e so depois le o hardware do cabecalho
         $this.Refresh()
-        try { Enable-RodaDoMouse | Out-Null } catch {}
+        # A roda do mouse compila uma classe pequena e, em PC fraco, isso custa quase um
+        # segundo: entra logo depois que a janela ja esta na tela, e nao antes dela
+        $tRoda = New-Object System.Windows.Forms.Timer
+        $tRoda.Interval = 900
+        $tRoda.Add_Tick({ $this.Stop(); $this.Dispose(); try { Enable-RodaDoMouse | Out-Null } catch {} })
+        $tRoda.Start()
         try { Set-JanelaAdaptavel $this | Out-Null } catch {}
         try { Enable-SelecionarTudo $this } catch {}
         try { & $preencheHardware } catch {}
