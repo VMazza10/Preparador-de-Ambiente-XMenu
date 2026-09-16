@@ -1,6 +1,6 @@
 ﻿# =============================================================================
 # PREPARADOR XMENU - VERSAO REVENDA
-# Baseado na v5.7
+# Baseado na v5.8
 # Alteracoes Revenda:
 #   - Wallpaper: fundo_revenda.png
 #   - Removido: Atalhos de Suporte e Pasta Netcontroll
@@ -3096,6 +3096,15 @@ function Show-XmlDownloader {
             return , $tarefa.Result
         }
 
+        # Conta simples numa conexao ja aberta (usada pelo diagnostico da busca)
+        $escalar = {
+            param($Conexao, [string]$Sql)
+            $c = $Conexao.CreateCommand()
+            $c.CommandTimeout = 60
+            $c.CommandText = $Sql
+            return "$($c.ExecuteScalar())"
+        }
+
         # Traduz a falha de conexao numa frase que diz o que conferir. Erro que nao
         # e de conexao (consulta, permissao) volta com a mensagem original.
         $explicaFalha = {
@@ -3860,6 +3869,43 @@ function Show-XmlDownloader {
                             else {
                                 Log-Message "INFO" "XMLs: a consulta simples também não achou essas notas neste parceiro e série"
                             }
+
+                            # Terceira tentativa: os numeros vao escritos no proprio comando,
+                            # sem parametro nenhum. Em maquina antiga (PowerShell 4 com SQL
+                            # 2008 R2) ja apareceu caso de a nota existir e o filtro por
+                            # parametro nao casar. Sao todos numeros inteiros conferidos
+                            # antes ([long]/[int]), entao nao ha risco de injecao.
+                            if ($lidasB -eq 0) {
+                                $listaLiteral = (@($bloco | ForEach-Object { [long]$_ }) -join ',')
+                                $filtroServLit = ""
+                                if ($Script:XmlTemServidor -and $null -ne $servSel) { $filtroServLit = " AND t.IDServidorFiscal = $([int]$servSel)" }
+                                $sqlC = "SELECT " + $colB + " FROM NFCeTokenID t LEFT JOIN NFCeTokenIDLog l " +
+                                "ON l.IDParceiro = t.IDParceiro AND l.SerieTokenID = t.Serie AND l.IDTokenID = t.ID " + $servJoinB +
+                                "AND l.ID = (SELECT TOP 1 g2.ID FROM NFCeTokenIDLog g2 WHERE g2.IDParceiro = t.IDParceiro " +
+                                "AND g2.SerieTokenID = t.Serie AND g2.IDTokenID = t.ID " + $servSubB +
+                                "ORDER BY CASE WHEN g2.CodigoRetorno = 100 THEN 0 ELSE 1 END, " +
+                                "CASE WHEN g2.xmlResposta IS NULL THEN 1 ELSE 0 END, g2.ID DESC) " +
+                                "WHERE t.IDParceiro = $([long]$parceiro) AND t.Serie = $([int]$serie) " +
+                                "AND t.ID IN ($listaLiteral)" + $filtroServLit + " ORDER BY t.ID"
+
+                                $cmdC = $cn.CreateCommand()
+                                $cmdC.CommandTimeout = 120
+                                $cmdC.CommandText = $sqlC
+                                $lidasC = & $lerParaLista $cmdC $achados
+                                if ($lidasC -gt 0) {
+                                    Log-Message "SUCESSO" "XMLs: a consulta sem parâmetros achou $lidasC nota(s) - neste PC o filtro por parâmetro não estava casando"
+                                }
+                                else {
+                                    # Conta onde cada filtro derruba, para o log dizer o motivo
+                                    try {
+                                        $qtdSo = "$((& $escalar $cn ("SELECT COUNT(*) FROM NFCeTokenID WHERE ID IN ($listaLiteral)")))"
+                                        $qtdPar = "$((& $escalar $cn ("SELECT COUNT(*) FROM NFCeTokenID WHERE ID IN ($listaLiteral) AND IDParceiro = $([long]$parceiro)")))"
+                                        $qtdSer = "$((& $escalar $cn ("SELECT COUNT(*) FROM NFCeTokenID WHERE ID IN ($listaLiteral) AND IDParceiro = $([long]$parceiro) AND Serie = $([int]$serie)")))"
+                                        Log-Message "ERRO" "XMLs: nem sem parâmetros achou. Só pelo número: $qtdSo | + parceiro $($parceiro): $qtdPar | + série $($serie): $qtdSer"
+                                    }
+                                    catch { Log-Message "ERRO" "XMLs: não consegui conferir os filtros: $($_.Exception.Message)" }
+                                }
+                            }
                         }
                         & $setStatus "Consultando... $($achados.Count) notas lidas" $Script:UiAmarelo
                     }
@@ -3959,6 +4005,25 @@ function Show-XmlDownloader {
                     $totalPeriodo = 0
                     try { if ($rdTotal.Read()) { $totalPeriodo = [int]$rdTotal.GetValue(0) } }
                     finally { $rdTotal.Close() }
+
+                    # Nao veio nada: refaz a conta com os valores escritos no proprio
+                    # comando. Em maquina antiga (PowerShell 4 com SQL 2008 R2) o filtro por
+                    # parametro ja deixou de casar; se a conta literal trouxer notas, a busca
+                    # inteira passa a usar essa forma. Sao datas e numeros conferidos aqui.
+                    if ($totalPeriodo -eq 0) {
+                        $filtroLit = "t.IDParceiro = $([long]$parceiro) " +
+                        $(if ($serieOpc -eq "") { "" } else { "AND t.Serie = $([int]$serieOpc) " }) +
+                        "AND COALESCE(t.DataEmissao, t.data) >= CONVERT(datetime, '$($d1.ToString('yyyy-MM-dd HH:mm:ss'))', 120) " +
+                        "AND COALESCE(t.DataEmissao, t.data) < CONVERT(datetime, '$($d2.ToString('yyyy-MM-dd HH:mm:ss'))', 120)" +
+                        $(if ($Script:XmlTemServidor -and $null -ne $servSel) { " AND t.IDServidorFiscal = $([int]$servSel)" } else { "" })
+                        $totalLit = 0
+                        try { $totalLit = [int]"$((& $escalar $cn ("SELECT COUNT(*) FROM NFCeTokenID t WHERE " + $filtroLit)))" } catch {}
+                        if ($totalLit -gt 0) {
+                            Log-Message "SUCESSO" "XMLs: período sem resultado com parâmetros; a consulta sem parâmetros achou $totalLit nota(s) - a busca vai usar essa forma"
+                            $filtroPeriodo = $filtroLit
+                            $totalPeriodo = $totalLit
+                        }
+                    }
 
                     if ($totalPeriodo -gt 10000) {
                         & $mostraCarregando ""
@@ -12179,7 +12244,7 @@ $formWidth = if ($screen.Width -lt 1000) { 900 } else { 1000 }
 $formHeight = if ($screen.Height -lt 800) { 700 } else { 800 }
 
 $form = New-Object System.Windows.Forms.Form
-$form.Text = "Preparador XMenu – Suporte Técnico v5.7 - REVENDA"
+$form.Text = "Preparador XMenu – Suporte Técnico v5.8 - REVENDA"
 $form.Size = New-Object System.Drawing.Size($formWidth, $formHeight)
 $form.StartPosition = "CenterScreen"
 $form.BackColor = [System.Drawing.Color]::FromArgb(25, 25, 30); $form.ForeColor = 'White'
@@ -12782,7 +12847,7 @@ $bClock.Add_Click({ Invoke-ClockSync })
 [void]$tbl.Controls.Add($bClock)
 
 # Mensagem de abertura: explica o programa para quem abre pela primeira vez
-Log-Message "INFO" "Preparador XMenu v5.7 - REVENDA - preparo e suporte de computadores com XMenu e NetPDV"
+Log-Message "INFO" "Preparador XMenu v5.8 - REVENDA - preparo e suporte de computadores com XMenu e NetPDV"
 Log-Message "LOG" "==============================================================="
 Log-Message "LOG" "COMO USAR"
 Log-Message "LOG" "  PREPARAR AMBIENTE WINDOWS .. ajusta energia, UAC e desempenho do PC num clique"
@@ -12792,7 +12857,8 @@ Log-Message "LOG" "  EXTERNOS ................... acesso remoto, Chrome, TEF HUB
 Log-Message "LOG" "  SUPORTE E DIAGNÓSTICO ...... impressoras, rede, SQL, backup, XMLs e reparos do Windows"
 Log-Message "LOG" "  Passe o mouse sobre um botão para ver o que ele faz antes de clicar."
 Log-Message "LOG" "---------------------------------------------------------------"
-Log-Message "LOG" "NOVO NA v5.7"
+Log-Message "LOG" "NOVO NA v5.8"
+Log-Message "SUCESSO" "  XMLs NFC-e: em PC antigo, a busca refaz a consulta sem parâmetros quando não vem nada"
 Log-Message "SUCESSO" "  Corrigido: arquivo do último servidor ilegível deixava o campo Servidor com lixo"
 Log-Message "SUCESSO" "  Zoom só em monitor pequeno de verdade (até 1024x640); nos demais nada muda"
 Log-Message "SUCESSO" "  XMLs NFC-e: busca com segunda tentativa, para SQL antigo (2008 R2) que não trazia as notas"
