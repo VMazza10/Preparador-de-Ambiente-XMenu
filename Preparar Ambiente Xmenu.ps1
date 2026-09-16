@@ -3203,18 +3203,30 @@ function Show-XmlDownloader {
             $extra = 36
             if (-not $Mostrar) { $extra = -36 }
             $limite = $cardConn.Bottom
+            # Em tela pequena o conteudo mora dentro do painel que rola, e nao no formulario
+            $pai = $cardConn.Parent
             $f.SuspendLayout()
             try {
                 $cardConn.Height = $cardConn.Height + $extra
-                foreach ($ctl in @($f.Controls)) {
+                foreach ($ctl in @($pai.Controls)) {
                     if ($ctl -eq $cardConn -or $ctl.Top -lt $limite) { continue }
+                    # Painel preso na borda (o rodape fixo das telas pequenas) se vira sozinho
+                    if ("$($ctl.Dock)" -ne 'None') { continue }
                     $ancora = "$($ctl.Anchor)"
                     # O que esta preso embaixo (botoes, barra, status) fica onde esta
                     if ($ancora -notmatch 'Top') { continue }
                     $ctl.Top = $ctl.Top + $extra
                     if ($ancora -match 'Bottom') { $ctl.Height = $ctl.Height - $extra }
                 }
-                $minimo = New-Object System.Drawing.Size($f.MinimumSize.Width, ($f.MinimumSize.Height + $extra))
+                # A area de rolagem cresce junto, senao a lista e que perderia a altura
+                if ($pai -ne $f -and $pai.AutoScroll) {
+                    $pai.AutoScrollMinSize = New-Object System.Drawing.Size($pai.AutoScrollMinSize.Width, [Math]::Max(0, $pai.AutoScrollMinSize.Height + $extra))
+                }
+                # Em tela pequena o minimo ja foi reduzido pelo Set-JanelaAdaptavel: nao pode
+                # voltar a crescer alem da tela, senao a janela trava maior que o monitor
+                $areaMin = [System.Windows.Forms.Screen]::FromControl($f).WorkingArea
+                $altMin = [Math]::Min($f.MinimumSize.Height + $extra, $areaMin.Height - 10)
+                $minimo = New-Object System.Drawing.Size($f.MinimumSize.Width, $altMin)
                 # Crescendo, a altura vai antes do minimo (senao o minimo ja esticaria a
                 # janela sozinho); diminuindo, o minimo baixa antes. Na volta tira so o
                 # que foi acrescentado, mesmo que a tela nao tenha deixado crescer tudo.
@@ -6385,6 +6397,185 @@ function Get-UiTom {
     return [System.Drawing.Color]::FromArgb($r, $g, $b)
 }
 
+# Roda do mouse: o Windows entrega a rolagem para o controle que esta com o foco,
+# entao girar a roda sobre a lista de botoes ou sobre uma grade nao fazia nada sem
+# clicar antes - e em tela pequena, onde tudo depende de rolar, a janela parecia
+# travada. Este filtro entrega a rolagem para o controle que esta embaixo do
+# ponteiro, como todo programa moderno faz. Compila so quando a janela abre, para
+# nao atrasar a carga do script; se falhar, o programa segue sem isso.
+function Enable-RodaDoMouse {
+    if ($Script:RodaMouseLigada) { return $true }
+    try {
+        if (-not ("RodaDoMouse" -as [type])) {
+            Add-Type -ReferencedAssemblies System.Windows.Forms, System.Drawing -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+using System.Windows.Forms;
+
+public class RodaDoMouse : IMessageFilter
+{
+    [StructLayout(LayoutKind.Sequential)] private struct PONTO { public int X; public int Y; }
+    [DllImport("user32.dll")] private static extern bool GetCursorPos(out PONTO p);
+    [DllImport("user32.dll")] private static extern IntPtr WindowFromPoint(PONTO p);
+    [DllImport("user32.dll")] private static extern IntPtr SendMessage(IntPtr h, int msg, IntPtr wp, IntPtr lp);
+
+    public bool PreFilterMessage(ref Message m)
+    {
+        // WM_MOUSEWHEEL e WM_MOUSEHWHEEL
+        if (m.Msg != 0x020A && m.Msg != 0x020E) { return false; }
+        PONTO p;
+        if (!GetCursorPos(out p)) { return false; }
+        IntPtr alvo = WindowFromPoint(p);
+        if (alvo == IntPtr.Zero || alvo == m.HWnd) { return false; }
+        // So mexe em controle do proprio programa
+        if (Control.FromHandle(alvo) == null) { return false; }
+        SendMessage(alvo, m.Msg, m.WParam, m.LParam);
+        return true;
+    }
+
+    public static void Instalar() { Application.AddMessageFilter(new RodaDoMouse()); }
+}
+"@
+        }
+        [RodaDoMouse]::Instalar()
+        $Script:RodaMouseLigada = $true
+        Log-Message "INFO" "Roda do mouse: rolagem segue o ponteiro (listas, abas e telas pequenas)"
+        return $true
+    }
+    catch {
+        Log-Message "ERRO" "Roda do mouse: não consegui ligar a rolagem pelo ponteiro ($($_.Exception.Message))"
+        return $false
+    }
+}
+
+# Tela pequena (PDV antigo em 800x600): a janela foi desenhada maior que o monitor,
+# os botoes de baixo ficavam fora da tela e o tamanho minimo nao deixava diminuir.
+# Aqui a janela encolhe ate a area util, libera o redimensionar e o minimizar, e o
+# que nao couber vira rolagem (com a roda do mouse, por causa do filtro RodaDoMouse).
+# Em tela normal nada muda: a funcao sai na primeira linha.
+function Set-JanelaAdaptavel {
+    param($Janela, [int]$Margem = 10, [int]$MinElastico = 110)
+    try {
+        $area = [System.Windows.Forms.Screen]::FromControl($Janela).WorkingArea
+        $maxL = $area.Width - $Margem
+        $maxA = $area.Height - $Margem
+        if ($Janela.Width -le $maxL -and $Janela.Height -le $maxA) { return $false }
+
+        # O tamanho em que a tela foi desenhada vira a area de rolagem: os controles
+        # ficam onde estao e o tecnico rola ate eles, em vez de perde-los fora da tela
+        $desenho = $Janela.ClientSize
+        $borda = $Janela.Height - $Janela.ClientSize.Height
+        $novoCliente = [Math]::Min($Janela.Height, $maxA) - $borda
+        # Se vai sobrar rolagem na largura, a barra de baixo come um pedaco da altura
+        if ($desenho.Width -gt ([Math]::Min($Janela.Width, $maxL) - ($Janela.Width - $Janela.ClientSize.Width))) {
+            $novoCliente = $novoCliente - [System.Windows.Forms.SystemInformation]::HorizontalScrollBarHeight
+        }
+
+        # Rodape sempre a vista: o que esta preso so embaixo (botoes de acao, barra de
+        # progresso, status) sai da area de rolagem e fica fixo no pe da janela, e todo
+        # o resto vai para dentro de um painel que rola. Assim o tecnico nunca precisa
+        # rolar para achar BUSCAR ou BAIXAR. (O Dock sozinho nao resolve: num
+        # formulario com rolagem, o painel de baixo rolaria junto com o conteudo.)
+        $doRodape = @($Janela.Controls | Where-Object { "$($_.Dock)" -eq 'None' -and "$($_.Anchor)" -match 'Bottom' -and "$($_.Anchor)" -notmatch 'Top' })
+        $conteudo = @($Janela.Controls | Where-Object { $doRodape -notcontains $_ })
+        $painelRolavel = $null
+        $Janela.SuspendLayout()
+        try {
+            if ($doRodape.Count -gt 0 -and $conteudo.Count -gt 0) {
+                $topoRodape = ($doRodape | ForEach-Object { $_.Top } | Measure-Object -Minimum).Minimum
+                $alturaRodape = $desenho.Height - $topoRodape
+                $painelRodape = New-Object System.Windows.Forms.Panel
+                $painelRodape.Size = New-Object System.Drawing.Size($desenho.Width, $alturaRodape)
+                $painelRodape.BackColor = $Janela.BackColor
+                # Faixa interna com a largura do desenho: quando a janela e estreita, ela
+                # desliza junto com a rolagem de lado do conteudo, e nenhum botao some
+                $faixaRodape = New-Object System.Windows.Forms.Panel
+                # O tamanho vem antes dos controles: a ancora guarda a distancia ate as
+                # bordas do pai na hora em que o controle entra. Com o painel do tamanho
+                # certo, cada controle mantem exatamente a folga que tinha na janela.
+                $faixaRodape.Size = New-Object System.Drawing.Size($desenho.Width, $alturaRodape)
+                $faixaRodape.Location = New-Object System.Drawing.Point(0, 0)
+                $faixaRodape.BackColor = $Janela.BackColor
+                foreach ($ctl in $doRodape) {
+                    $anc = "$($ctl.Anchor)" -replace 'Bottom', 'Top'
+                    $novoTopo = $ctl.Top - $topoRodape
+                    $Janela.Controls.Remove($ctl)
+                    [void]$faixaRodape.Controls.Add($ctl)
+                    $ctl.Top = $novoTopo
+                    $ctl.Anchor = [System.Windows.Forms.AnchorStyles]$anc
+                }
+                [void]$painelRodape.Controls.Add($faixaRodape)
+
+                # Painel do conteudo: mesma ordem de sobreposicao e mesmas posicoes
+                $painelRolavel = New-Object System.Windows.Forms.Panel
+                $painelRolavel.Size = New-Object System.Drawing.Size($desenho.Width, $topoRodape)
+                $painelRolavel.BackColor = $Janela.BackColor
+                foreach ($ctl in $conteudo) {
+                    $pos = $ctl.Location
+                    $Janela.Controls.Remove($ctl)
+                    [void]$painelRolavel.Controls.Add($ctl)
+                    $ctl.Location = $pos
+                }
+                $painelRodape.Dock = 'Bottom'
+                $painelRolavel.Dock = 'Fill'
+                # Rolou o conteudo para o lado: o rodape vai junto. A faixa vai no Tag do
+                # painel porque o evento roda depois, quando as variaveis daqui ja sumiram
+                $painelRolavel.Tag = $faixaRodape
+                $painelRolavel.Add_Scroll({ if ($null -ne $this.Tag) { $this.Tag.Left = $this.AutoScrollPosition.X } })
+                $painelRolavel.Add_ClientSizeChanged({ if ($null -ne $this.Tag) { $this.Tag.Left = $this.AutoScrollPosition.X } })
+                [void]$Janela.Controls.Add($painelRodape)
+                [void]$Janela.Controls.Add($painelRolavel)
+                # Quem preenche o resto tem que ser encaixado por ultimo
+                $painelRolavel.BringToFront()
+                $desenho = New-Object System.Drawing.Size($desenho.Width, $topoRodape)
+                $novoCliente = $novoCliente - $painelRodape.Height
+            }
+
+            # Antes de rolar, deixa encolher o que e elastico (a lista que ocupa o meio
+            # da janela, presa em cima e embaixo, ou um painel que preenche tudo). Assim
+            # sobra bem menos rolagem, e so na parte de cima.
+            $onde = if ($null -ne $painelRolavel) { $painelRolavel } else { $Janela }
+            $podeEncolher = 0
+            foreach ($ctl in $onde.Controls) {
+                $anc = "$($ctl.Anchor)"
+                $estica = ("$($ctl.Dock)" -eq 'Fill') -or ($anc -match 'Top' -and $anc -match 'Bottom')
+                if ($estica) { $podeEncolher = [Math]::Max($podeEncolher, $ctl.Height - $MinElastico) }
+            }
+            $alturaRolagem = [Math]::Max([Math]::Min($desenho.Height, $novoCliente), $desenho.Height - [Math]::Max(0, $podeEncolher))
+
+            # Largura: telas montadas sobre um painel que preenche tudo (a inicial, com a
+            # lista de botoes) se viram em qualquer largura, entao nem precisam de rolagem
+            # de lado. Telas com campos em posicao fixa mantem a largura do desenho.
+            $larguraRolagem = $desenho.Width
+            if (@($onde.Controls | Where-Object { "$($_.Dock)" -eq 'Fill' }).Count -gt 0) {
+                $clienteLargura = [Math]::Min($Janela.Width, $maxL) - ($Janela.Width - $Janela.ClientSize.Width)
+                $larguraRolagem = [Math]::Max([Math]::Min($desenho.Width, $clienteLargura), 640)
+            }
+
+            $onde.AutoScroll = $true
+            $onde.AutoScrollMinSize = New-Object System.Drawing.Size($larguraRolagem, $alturaRolagem)
+        }
+        finally { $Janela.ResumeLayout() }
+
+        # Janela de tamanho fixo precisa virar ajustavel para caber na tela
+        if ("$($Janela.FormBorderStyle)" -like 'Fixed*') { $Janela.FormBorderStyle = 'Sizable' }
+        $Janela.MinimizeBox = $true
+        $Janela.MaximizeBox = $true
+
+        $novaL = [Math]::Min($Janela.Width, $maxL)
+        $novaA = [Math]::Min($Janela.Height, $maxA)
+        $minL = [Math]::Min($Janela.MinimumSize.Width, $novaL)
+        $minA = [Math]::Min($Janela.MinimumSize.Height, $novaA)
+        $Janela.MinimumSize = New-Object System.Drawing.Size($minL, $minA)
+        $Janela.Size = New-Object System.Drawing.Size($novaL, $novaA)
+        $Janela.Left = $area.Left + [Math]::Max(0, [int](($area.Width - $novaL) / 2))
+        $Janela.Top = $area.Top + [Math]::Max(0, [int](($area.Height - $novaA) / 2))
+        Log-Message "INFO" "Janela ""$($Janela.Text)"" ajustada para a tela de $($area.Width)x$($area.Height): $novaL x $novaA, com rolagem"
+        return $true
+    }
+    catch { return $false }
+}
+
 function New-ToolForm {
     param([string]$Titulo, [int]$Largura, [int]$Altura)
     $f = New-Object System.Windows.Forms.Form
@@ -6397,6 +6588,8 @@ function New-ToolForm {
     $f.FormBorderStyle = 'Sizable'
     $f.MinimizeBox = $true
     $f.MaximizeBox = $true
+    # Antes dos outros Shown da janela: primeiro ela cabe na tela, depois carrega
+    $f.Add_Shown({ Set-JanelaAdaptavel $this | Out-Null })
     return $f
 }
 
@@ -9306,6 +9499,7 @@ function Show-PrinterManager {
             $btnCan.Add_Click({ $fInput.Close() })
             [void]$fInput.Controls.Add($btnCan)
             
+            $fInput.Add_Shown({ try { Set-JanelaAdaptavel $this | Out-Null } catch {} })
             if ($fInput.ShowDialog() -eq 'OK') {
                 $shareName = $txt.Text.Trim() -replace '\s+', '' -replace '[^a-zA-Z0-9]', ''
                 if ($shareName) {
@@ -9796,7 +9990,7 @@ COLA RÁPIDA - INSTALAR VIA LPR
         [void]$pnlClientCard.Controls.Add($txtInstLpr)
 
         $Script:PrinterManagerForm.Add_FormClosing({ $Script:PrinterManagerForm = $null })
-        $Script:PrinterManagerForm.Add_Shown({ $this.ActiveControl = $null })
+        $Script:PrinterManagerForm.Add_Shown({ $this.ActiveControl = $null; try { Set-JanelaAdaptavel $this | Out-Null } catch {} })
         $Script:PrinterManagerForm.ShowDialog($Script:MainForm)
     }
     catch {
@@ -11139,6 +11333,7 @@ function Open-Selector {
         [void]$fSel.Controls.Add($lblDest)
     }
 
+    $fSel.Add_Shown({ try { Set-JanelaAdaptavel $this | Out-Null } catch {} })
     [void]$fSel.ShowDialog()
     if ($fSel.DialogResult -eq 'OK' -and $fSel.Tag) {
         # Ativa modo deploy para nao abrir pasta automaticamente
@@ -11528,6 +11723,7 @@ function Run-Config {
         Start-Process "OptionalFeatures.exe"
         Start-Process "intl.cpl"
 
+        $finalForm.Add_Shown({ try { Set-JanelaAdaptavel $this | Out-Null } catch {} })
         [void]$finalForm.ShowDialog() # ShowDialog impede o fechamento prematuro
     }
 
@@ -12182,6 +12378,8 @@ $form.Add_Shown({
         $this.ActiveControl = $null
         # Desenha a janela primeiro e so depois le o hardware do cabecalho
         $this.Refresh()
+        try { Enable-RodaDoMouse | Out-Null } catch {}
+        try { Set-JanelaAdaptavel $this | Out-Null } catch {}
         try { & $preencheHardware } catch {}
         try { & $ajustarJanelaAoCabecalho } catch {}
     })
