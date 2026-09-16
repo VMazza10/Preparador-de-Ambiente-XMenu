@@ -1,5 +1,5 @@
 ﻿# =============================================================================
-# PREPARADOR XMENU v5.1
+# PREPARADOR XMENU v5.2
 # Visual: Dashboard Moderno
 # Correcoes:
 #   - CRITICO: Removido DoEvents do loop de evento de download (causava crash).
@@ -1274,8 +1274,14 @@ function ConvertFrom-FaixaNotas {
 
     if ([string]::IsNullOrWhiteSpace($Texto)) { $res.Erro = $amigavel; return $res }
 
-    # Virgula, ponto-e-virgula e quebra de linha valem como o mesmo separador
-    $partes = ($Texto -replace '[;\r\n]', ',') -split ','
+    # Virgula, ponto-e-virgula, quebra de linha, TAB e espaco valem como separador: a
+    # lista costuma vir colada de uma planilha ou de outro programa, uma nota por linha
+    # ou separada por tabulacao. O hifen e normalizado antes para "1 - 10" continuar
+    # sendo o intervalo 1-10, e nao tres pedacos soltos.
+    $limpo = "$Texto" -replace '\s*-\s*', '-'
+    $limpo = $limpo -replace '[;\r\n\t]+', ','
+    $limpo = $limpo -replace ' +', ','
+    $partes = $limpo -split ','
     $conjunto = New-Object 'System.Collections.Generic.HashSet[int]'
 
     foreach ($p in $partes) {
@@ -6448,27 +6454,57 @@ public class RodaDoMouse : IMessageFilter
     }
 }
 
+# Ctrl+A nos campos de texto: o TextBox de uma linha do Windows Forms nao faz isso
+# sozinho, entao selecionar tudo para apagar e colar outra lista nao funcionava.
+$Script:CtrlASelecionaTudo = [System.Windows.Forms.KeyEventHandler] {
+    param($s, $e)
+    if ($e.Control -and -not $e.Alt -and $e.KeyCode -eq [System.Windows.Forms.Keys]::A) {
+        $s.SelectAll()
+        $e.SuppressKeyPress = $true
+        $e.Handled = $true
+    }
+}
+function Enable-SelecionarTudo {
+    param($Pai)
+    foreach ($c in $Pai.Controls) {
+        if ($c -is [System.Windows.Forms.TextBoxBase]) { $c.add_KeyDown($Script:CtrlASelecionaTudo) }
+        elseif ($c -is [System.Windows.Forms.ComboBox] -and $c.DropDownStyle -ne 'DropDownList') { $c.add_KeyDown($Script:CtrlASelecionaTudo) }
+        if ($c.Controls.Count -gt 0) { Enable-SelecionarTudo $c }
+    }
+}
+
 # Zoom da janela: reduz tudo junto - posicao, tamanho, fonte e coluna de lista - do
 # jeito que o Windows faz quando muda a escala da tela. E o que faz uma janela
 # desenhada para 1000 px caber num monitor de 800, sem cortar campo nem texto.
 function Set-EscalaControles {
-    param($Pai, [single]$Fator, [single]$FonteMinima = 6.75)
-    foreach ($c in $Pai.Controls) {
-        $c.SetBounds([int][Math]::Round($c.Left * $Fator), [int][Math]::Round($c.Top * $Fator),
-            [int][Math]::Round($c.Width * $Fator), [int][Math]::Round($c.Height * $Fator))
-        if ($null -ne $c.Font) {
-            $novoTam = [Math]::Max($FonteMinima, [single]($c.Font.Size * $Fator))
-            if ([Math]::Abs($novoTam - $c.Font.Size) -gt 0.05) { $c.Font = New-Object System.Drawing.Font($c.Font.FontFamily, $novoTam, $c.Font.Style) }
+    # O cache de fontes e o layout suspenso sao o que mantem isso rapido: sem eles,
+    # numa tela cheia de botoes, cada fonte nova refazia a conta de todo o layout.
+    param($Pai, [single]$Fator, [single]$FonteMinima = 6.75, $Cache = $null)
+    if ($null -eq $Cache) { $Cache = @{} }
+    $Pai.SuspendLayout()
+    try {
+        foreach ($c in $Pai.Controls) {
+            $c.SetBounds([int][Math]::Round($c.Left * $Fator), [int][Math]::Round($c.Top * $Fator),
+                [int][Math]::Round($c.Width * $Fator), [int][Math]::Round($c.Height * $Fator))
+            if ($null -ne $c.Font) {
+                $novoTam = [Math]::Max($FonteMinima, [single]($c.Font.Size * $Fator))
+                if ([Math]::Abs($novoTam - $c.Font.Size) -gt 0.05) {
+                    $chave = "$($c.Font.FontFamily.Name)|$novoTam|$([int]$c.Font.Style)"
+                    if (-not $Cache.ContainsKey($chave)) { $Cache[$chave] = New-Object System.Drawing.Font($c.Font.FontFamily, $novoTam, $c.Font.Style) }
+                    $c.Font = $Cache[$chave]
+                }
+            }
+            # Coluna de lista tem largura em pixel: sem isso a grade estoura a janela. Aqui
+            # encolhe menos que o resto (meio caminho), senao o numero da nota sai como
+            # "10..."; se faltar espaco, a propria lista tem barra de rolagem.
+            if ($c -is [System.Windows.Forms.ListView]) {
+                $fatorCol = (1 + $Fator) / 2
+                foreach ($col in $c.Columns) { $col.Width = [int][Math]::Round($col.Width * $fatorCol) }
+            }
+            if ($c.Controls.Count -gt 0) { Set-EscalaControles $c $Fator $FonteMinima $Cache }
         }
-        # Coluna de lista tem largura em pixel: sem isso a grade estoura a janela. Aqui
-        # encolhe menos que o resto (meio caminho), senao o numero da nota sai como
-        # "10..."; se faltar espaco, a propria lista tem barra de rolagem.
-        if ($c -is [System.Windows.Forms.ListView]) {
-            $fatorCol = (1 + $Fator) / 2
-            foreach ($col in $c.Columns) { $col.Width = [int][Math]::Round($col.Width * $fatorCol) }
-        }
-        if ($c.Controls.Count -gt 0) { Set-EscalaControles $c $Fator $FonteMinima }
     }
+    finally { $Pai.ResumeLayout($false) }
 }
 
 # Tela pequena (PDV antigo em 800x600): a janela foi desenhada maior que o monitor,
@@ -6641,7 +6677,10 @@ function New-ToolForm {
     $f.MinimizeBox = $true
     $f.MaximizeBox = $true
     # Antes dos outros Shown da janela: primeiro ela cabe na tela, depois carrega
-    $f.Add_Shown({ Set-JanelaAdaptavel $this | Out-Null })
+    $f.Add_Shown({
+            Set-JanelaAdaptavel $this | Out-Null
+            try { Enable-SelecionarTudo $this } catch {}
+        })
     return $f
 }
 
@@ -11794,7 +11833,7 @@ $formWidth = if ($screen.Width -lt 1200) { $screen.Width - 50 } else { 1200 }
 $formHeight = if ($screen.Height -lt 900) { $screen.Height - 50 } else { 900 }
 
 $form = New-Object System.Windows.Forms.Form
-$form.Text = "Preparador XMenu – Suporte Técnico v5.1"
+$form.Text = "Preparador XMenu – Suporte Técnico v5.2"
 $form.Size = New-Object System.Drawing.Size($formWidth, $formHeight)
 $form.StartPosition = "CenterScreen"
 $form.BackColor = [System.Drawing.Color]::FromArgb(25, 25, 30); $form.ForeColor = 'White'
@@ -12400,7 +12439,7 @@ $bClock.Add_Click({ Invoke-ClockSync })
 [void]$tbl.Controls.Add($bClock)
 
 # Mensagem de abertura: explica o programa para quem abre pela primeira vez
-Log-Message "INFO" "Preparador XMenu v5.1 - preparo e suporte de computadores com XMenu e NetPDV"
+Log-Message "INFO" "Preparador XMenu v5.2 - preparo e suporte de computadores com XMenu e NetPDV"
 Log-Message "LOG" "==============================================================="
 Log-Message "LOG" "COMO USAR"
 Log-Message "LOG" "  PREPARAR AMBIENTE WINDOWS .. ajusta energia, UAC e desempenho do PC num clique"
@@ -12410,11 +12449,11 @@ Log-Message "LOG" "  EXTERNOS ................... acesso remoto, Chrome, TEF HUB
 Log-Message "LOG" "  SUPORTE E DIAGNÓSTICO ...... impressoras, rede, SQL, backup, XMLs e reparos do Windows"
 Log-Message "LOG" "  Passe o mouse sobre um botão para ver o que ele faz antes de clicar."
 Log-Message "LOG" "---------------------------------------------------------------"
-Log-Message "LOG" "NOVO NA v5.1"
-Log-Message "SUCESSO" "  Telas se ajustam ao monitor: em tela pequena tudo encolhe junto, sem cortar campo nem botão"
+Log-Message "LOG" "NOVO NA v5.2"
+Log-Message "SUCESSO" "  Em tela pequena o programa inteiro encolhe junto e cabe mais botão sem rolar"
+Log-Message "SUCESSO" "  Lista de notas aceita colar separado por espaço, TAB ou uma por linha (planilha)"
+Log-Message "SUCESSO" "  Ctrl+A seleciona o texto do campo, como em qualquer programa"
 Log-Message "SUCESSO" "  Roda do mouse rola a lista que está embaixo do ponteiro, sem precisar clicar antes"
-Log-Message "SUCESSO" "  XMLs NFC-e: filtro de certificado quando o cliente emite com dois, e colunas que você arrasta"
-Log-Message "SUCESSO" "  XMLs NFC-e: a busca vem desmarcada e BAIXAR TUDO grava a lista inteira"
 Log-Message "LOG" "---------------------------------------------------------------"
 Log-Message "LOG" "Downloads, XMLs, espelhos em PDF e backups ficam em: Área de Trabalho > Arquivos Xmenu"
 Log-Message "LOG" "O registro de cada sessão fica em: C:\Arquivos Xmenu\Logs"
@@ -12426,13 +12465,41 @@ else {
     Log-Message "ERRO" "Feche e abra de novo com o botão direito > Executar como administrador."
 }
 
+# Monitor pequeno: o miolo do programa (Log, botao grande e a lista de botoes)
+# encolhe junto, para caber mais botao sem precisar rolar. O cabecalho fica de fora:
+# ele ja tem o proprio ajuste e o texto dele e desenhado na mao, com fonte propria.
+$ajustarEscalaPrincipal = {
+    # Roda antes de a janela aparecer, para ela ja abrir pronta: $screen e a area util
+    # da tela, medida no inicio do programa
+    $areaTela = $screen
+    # 1200x900 e o tamanho em que a tela foi desenhada
+    $fator = [Math]::Min(([double]$areaTela.Width / 1200), ([double]$areaTela.Height / 900))
+    $fator = [Math]::Max(0.72, [Math]::Min(1.0, $fator))
+    if ($fator -ge 0.995) { return }
+    $form.SuspendLayout()
+    try {
+        Set-EscalaControles $layout ([single]$fator) 7.0
+        foreach ($rs in $layout.RowStyles) {
+            if ($rs.SizeType -eq [System.Windows.Forms.SizeType]::Absolute) { $rs.Height = [single][Math]::Round($rs.Height * $fator) }
+        }
+        $foot.Height = [int][Math]::Round($foot.Height * $fator)
+        Set-EscalaControles $foot ([single]$fator) 7.0
+    }
+    finally { $form.ResumeLayout() }
+    Log-Message "INFO" "Tela de $($areaTela.Width)x$($areaTela.Height): programa ajustado para $([int][Math]::Round($fator * 100))%, com botões menores"
+}
+
 $form.Add_Shown({
         $this.ActiveControl = $null
         # Desenha a janela primeiro e so depois le o hardware do cabecalho
         $this.Refresh()
         try { Enable-RodaDoMouse | Out-Null } catch {}
         try { Set-JanelaAdaptavel $this | Out-Null } catch {}
+        try { Enable-SelecionarTudo $this } catch {}
         try { & $preencheHardware } catch {}
         try { & $ajustarJanelaAoCabecalho } catch {}
     })
+
+# Tela pequena: encolhe o miolo antes de mostrar a janela
+try { & $ajustarEscalaPrincipal } catch {}
 [void]$form.ShowDialog()
