@@ -1,5 +1,5 @@
 ﻿# =============================================================================
-# PREPARADOR XMENU v5.2
+# PREPARADOR XMENU v5.3
 # Visual: Dashboard Moderno
 # Correcoes:
 #   - CRITICO: Removido DoEvents do loop de evento de download (causava crash).
@@ -7278,13 +7278,104 @@ function Get-MacDeIP {
     return ""
 }
 
+# Nome do fabricante em formato curto: a base publica devolve a razao social inteira
+# ("Xiamen Hanin Electronic Technology Co., Ltd"), que nao cabe na coluna e nao diz
+# nada ao tecnico. Os apelidos sao os nomes que aparecem na nota fiscal do cliente.
+function Format-NomeFabricante {
+    param([string]$Nome)
+    $t = "$Nome".Trim()
+    if ($t -eq "") { return "" }
+    # Quem fabrica para as marcas do PDV brasileiro
+    $apelidos = [ordered]@{
+        'hanin|hprt'                  = 'HPRT / ELGIN'
+        'elgin'                       = 'ELGIN'
+        'bematech|logic\s*controls'   = 'BEMATECH'
+        'epson|seiko'                 = 'EPSON'
+        'daruma|urano'                = 'DARUMA'
+        'tanca'                       = 'TANCA'
+        'sweda'                       = 'SWEDA'
+        'gertec'                      = 'GERTEC'
+        'control\s*id'                = 'CONTROL ID'
+        'zebra'                       = 'ZEBRA'
+        'star micronics'              = 'STAR'
+        'xprinter|xiamen rongta|rongta' = 'XPRINTER / RONGTA'
+        'hewlett|hp inc'              = 'HP'
+        'brother'                     = 'BROTHER'
+        'canon'                       = 'CANON'
+        'ricoh'                       = 'RICOH'
+        'lexmark'                     = 'LEXMARK'
+        'kyocera'                     = 'KYOCERA'
+        'samsung'                     = 'SAMSUNG'
+        'intelbras'                   = 'INTELBRAS'
+        'tp-?link'                    = 'TP-LINK'
+        'd-?link'                     = 'D-LINK'
+        'mercusys'                    = 'MERCUSYS'
+        'ubiquiti'                    = 'UBIQUITI'
+        'mikrotik|routerboard'        = 'MIKROTIK'
+        'huawei'                      = 'HUAWEI'
+        'zte'                         = 'ZTE'
+        'askey|arris|technicolor|sagemcom|fiberhome' = 'MODEM DA OPERADORA'
+        'realtek'                     = 'REALTEK (rede)'
+        'intel'                       = 'INTEL (rede)'
+        'asrock'                      = 'ASROCK (placa-mãe)'
+        'asustek|asus'                = 'ASUS'
+        'gigabyte'                    = 'GIGABYTE'
+        'micro-?star|msi'             = 'MSI'
+        'dell'                        = 'DELL'
+        'lenovo'                      = 'LENOVO'
+        'apple'                       = 'APPLE'
+        'xiaomi'                      = 'XIAOMI'
+        'raspberry'                   = 'RASPBERRY PI'
+        'vmware|virtualbox|oracle|microsoft corp' = 'MÁQUINA VIRTUAL'
+    }
+    foreach ($k in $apelidos.Keys) { if ($t -match "(?i)$k") { return $apelidos[$k] } }
+
+    # Sem apelido: tira o juridiques e fica com as duas primeiras palavras
+    $t = $t -replace '(?i),?\s*\b(co\.?|company|corp\.?|corporation|inc\.?|incorporated|ltda?\.?|limited|technolog(y|ies)|electronics?|systems?|s\.?a\.?|gmbh|llc|group|international)\b', ' '
+    $t = ($t -replace '[,\.]', ' ' -replace '\s{2,}', ' ').Trim()
+    $palavras = @($t -split ' ' | Where-Object { $_ -ne '' })
+    if ($palavras.Count -gt 2) { $t = ($palavras[0..1] -join ' ') }
+    if ($t -eq "") { return "" }
+    return $t.ToUpper()
+}
+
+# Fabricante pelo MAC na base publica (api.macvendors.com), so quando o OUI nao esta
+# na lista de baixo. Guarda o que ja perguntou e desiste rapido: sem internet, ou com
+# o site fora do ar, o scan continua igual, so sem o nome.
+function Get-FabricanteOnline {
+    param([string]$Oui)
+    if ($null -eq $Script:CacheOui) { $Script:CacheOui = @{} }
+    if ($Script:CacheOui.ContainsKey($Oui)) { return $Script:CacheOui[$Oui] }
+    if ($Script:OuiSemInternet) { return "" }
+    $nome = ""
+    try {
+        $req = [System.Net.HttpWebRequest]::Create("https://api.macvendors.com/$Oui")
+        $req.Timeout = 2500
+        $req.ReadWriteTimeout = 2500
+        $req.UserAgent = "PreparadorXMenu"
+        $resp = $req.GetResponse()
+        $sr = New-Object System.IO.StreamReader($resp.GetResponseStream())
+        $nome = Format-NomeFabricante ($sr.ReadToEnd())
+        $sr.Close(); $resp.Close()
+    }
+    catch {
+        # 404 = OUI sem dono conhecido (nao adianta insistir); falha de rede desliga a consulta
+        if ("$($_.Exception.Message)" -notmatch '404') { $Script:OuiSemInternet = $true }
+    }
+    $Script:CacheOui[$Oui] = $nome
+    return $nome
+}
+
 function Get-VendorName {
-    param($IP, $ArpTable, $Mac = $null)
+    param($IP, $ArpTable, $Mac = $null, [switch]$SemInternet)
     try {
         $macAddr = if ($Mac) { $Mac } else { Get-MacDeIP $IP $ArpTable }
         if ($macAddr -match '([0-9a-fA-F:]{17})') {
-            $oui = $macAddr.Substring(0, 8)
+            $oui = $macAddr.Substring(0, 8).ToUpper()
             $vendors = @{
+                # Impressoras que a Elgin, a Bematech e as revendas vendem como termicas
+                "6C:C1:47" = "HPRT / ELGIN"; "00:15:32" = "HPRT / ELGIN"; "AC:8F:F8" = "HPRT / ELGIN"
+                "00:19:0F" = "XPRINTER / RONGTA"; "00:1B:5B" = "XPRINTER / RONGTA"
                 "00:26:AB" = "EPSON"; "00:00:48" = "EPSON"; "FC:BA:B1" = "EPSON"
                 "64:EB:8C" = "EPSON"; "A4:EE:57" = "EPSON"
                 "00:0B:AB" = "ELGIN"; "00:00:5E" = "ELGIN"; "00:0B:E0" = "DIEXA"
@@ -7303,12 +7394,111 @@ function Get-VendorName {
                 "08:00:27" = "VIRTUALBOX"; "00:15:5D" = "HYPER-V"; "00:50:56" = "VMWARE"
                 "3C:2A:F4" = "BROTHER"; "9C:5A:44" = "MULTILASER"; "00:1F:3B" = "INTEL"
                 "DC:A6:32" = "RASPBERRY PI"; "B8:27:EB" = "RASPBERRY PI"
+                # Placas de rede e placas-mae que aparecem nos PDVs
+                "00:E0:4C" = "REALTEK (rede)"; "52:54:00" = "MÁQUINA VIRTUAL"
+                "9C:6B:00" = "ASROCK (placa-mãe)"; "5C:CD:5B" = "INTEL (rede)"
+                "00:1B:21" = "INTEL (rede)"; "A0:36:9F" = "INTEL (rede)"; "3C:97:0E" = "INTEL (rede)"
+                "D8:CB:8A" = "MSI"; "1C:1B:0D" = "GIGABYTE"; "50:E5:49" = "GIGABYTE"
+                "2C:F0:5D" = "ASUS"; "AC:22:0B" = "ASUS"; "08:62:66" = "ASUS"
+                "F4:8E:38" = "D-LINK"; "C4:E9:84" = "TP-LINK"; "AC:84:C6" = "TP-LINK"
+                "D8:47:32" = "TP-LINK"; "00:31:92" = "TP-LINK"; "9C:53:22" = "MERCUSYS"
+                "4C:5E:0C" = "MIKROTIK"; "18:FD:74" = "MIKROTIK"; "24:A4:3C" = "UBIQUITI"
+                "E8:DE:27" = "INTELBRAS"; "58:10:8C" = "INTELBRAS"; "9C:A5:13" = "INTELBRAS"
             }
             if ($vendors.ContainsKey($oui)) { return $vendors[$oui] }
+            # Fora da lista: pergunta a base publica uma vez por fabricante
+            if (-not $SemInternet) {
+                $online = Get-FabricanteOnline $oui
+                if ("$online" -ne "") { return $online }
+            }
         }
         return "Desconhecido"
     }
     catch { return "Desconhecido" }
+}
+
+# Modelo do equipamento na rede, sem imprimir nada. Duas fontes seguras:
+#   SNMP (UDP 161): a maioria das impressoras de rede responde com marca e modelo
+#   Pagina web (porta 80): o titulo costuma trazer o modelo
+# De proposito NAO usa a porta 9100: mandar PJL para uma termica ESC/POS sai
+# impresso em papel, e o tecnico ia varrer a rede e imprimir lixo em toda impressora.
+function Get-ModeloDeRede {
+    param([string]$IP, $PortasAbertas = @(), [int]$TimeoutMs = 900)
+    $descr = Get-SnmpDescricao -IP $IP -TimeoutMs $TimeoutMs
+    if ("$descr" -ne "") { return $descr }
+    if (@($PortasAbertas) -contains 80) {
+        try {
+            $req = [System.Net.HttpWebRequest]::Create("http://$IP/")
+            $req.Timeout = $TimeoutMs + 600
+            $req.ReadWriteTimeout = $TimeoutMs + 600
+            $req.AllowAutoRedirect = $true
+            $req.UserAgent = "PreparadorXMenu"
+            $resp = $req.GetResponse()
+            $sr = New-Object System.IO.StreamReader($resp.GetResponseStream())
+            $html = $sr.ReadToEnd()
+            $sr.Close(); $resp.Close()
+            $m = [regex]::Match($html, '(?is)<title[^>]*>(.*?)</title>')
+            if ($m.Success) {
+                $titulo = ($m.Groups[1].Value -replace '\s+', ' ').Trim()
+                # Titulo generico nao ajuda ninguem ("Success", "Login", "Index")
+                $generico = '(?i)^(index|home|login|logon|bem.vindo|welcome|untitled|success|ok|error|erro|404|redirect|document|page|p.gina|admin|configura..o|settings|status|web|server|servidor|dispositivo|device|printer|impressora)\.?$'
+                $temNumero = ($titulo -match '\d')
+                $duasPalavras = (@($titulo -split '\s+' | Where-Object { $_ -ne '' }).Count -ge 2)
+                if ($titulo -ne "" -and $titulo.Length -le 60 -and $titulo -notmatch $generico -and ($temNumero -or $duasPalavras)) { return $titulo }
+            }
+        }
+        catch {}
+    }
+    return ""
+}
+
+# SNMP v1 GET do sysDescr (1.3.6.1.2.1.1.1.0), community "public". O pacote e montado
+# na mao porque o Windows nao tem cliente SNMP; se o equipamento nao responder, o
+# socket fecha no timeout e a varredura segue.
+function Get-SnmpDescricao {
+    param([string]$IP, [int]$TimeoutMs = 900)
+    $udp = $null
+    try {
+        $comunidade = [System.Text.Encoding]::ASCII.GetBytes("public")
+        $oid = [byte[]]@(0x2B, 0x06, 0x01, 0x02, 0x01, 0x01, 0x01, 0x00)
+        $varbind = [byte[]]@(0x30, ($oid.Length + 4), 0x06, $oid.Length) + $oid + [byte[]]@(0x05, 0x00)
+        $varbinds = [byte[]]@(0x30, $varbind.Length) + $varbind
+        $pduCorpo = [byte[]]@(0x02, 0x01, 0x01, 0x02, 0x01, 0x00, 0x02, 0x01, 0x00) + $varbinds
+        $pdu = [byte[]]@(0xA0, $pduCorpo.Length) + $pduCorpo
+        $corpo = [byte[]]@(0x02, 0x01, 0x00, 0x04, $comunidade.Length) + $comunidade + $pdu
+        $msg = [byte[]]@(0x30, $corpo.Length) + $corpo
+
+        $udp = New-Object System.Net.Sockets.UdpClient
+        $udp.Client.ReceiveTimeout = $TimeoutMs
+        $udp.Client.SendTimeout = $TimeoutMs
+        [void]$udp.Send($msg, $msg.Length, $IP, 161)
+        $ep = New-Object System.Net.IPEndPoint([System.Net.IPAddress]::Any, 0)
+        $resp = $udp.Receive([ref]$ep)
+
+        # Acha o OID na resposta e le o valor logo depois (0x04 = texto)
+        for ($i = 0; $i -lt ($resp.Length - $oid.Length - 4); $i++) {
+            if ($resp[$i] -ne 0x06 -or $resp[$i + 1] -ne $oid.Length) { continue }
+            $bate = $true
+            for ($j = 0; $j -lt $oid.Length; $j++) { if ($resp[$i + 2 + $j] -ne $oid[$j]) { $bate = $false; break } }
+            if (-not $bate) { continue }
+            $p = $i + 2 + $oid.Length
+            if ($resp[$p] -ne 0x04) { break }
+            $tam = $resp[$p + 1]; $ini = $p + 2
+            # Comprimento longo vem em 1 ou 2 bytes extras
+            if ($tam -band 0x80) {
+                $qtd = $tam -band 0x7F
+                $tam = 0
+                for ($k = 0; $k -lt $qtd; $k++) { $tam = ($tam * 256) + $resp[$p + 2 + $k] }
+                $ini = $p + 2 + $qtd
+            }
+            if ($tam -le 0 -or ($ini + $tam) -gt $resp.Length) { break }
+            $texto = [System.Text.Encoding]::UTF8.GetString($resp, $ini, $tam)
+            return (($texto -replace '[\r\n\t]+', ' ') -replace '\s{2,}', ' ').Trim()
+        }
+        return ""
+    }
+    catch { return "" }
+    finally { if ($null -ne $udp) { try { $udp.Close() } catch {} } }
 }
 
 # Testa varias portas ao mesmo tempo (bem mais rapido que uma de cada vez)
@@ -7425,7 +7615,7 @@ function Show-PrinterScanner {
         Format-ToolListView $lv
         [void]$lv.Columns.Add("IP", 120)
         [void]$lv.Columns.Add("Tipo", 150)
-        [void]$lv.Columns.Add("Fabricante", 120)
+        [void]$lv.Columns.Add("Fabricante / Modelo", 230)
         [void]$lv.Columns.Add("Nome / Host", 180)
         [void]$lv.Columns.Add("MAC", 140)
         [void]$lv.Columns.Add("Servicos", 160)
@@ -7596,12 +7786,25 @@ function Show-PrinterScanner {
                             elseif ($ehPC) { $tipo = "COMPUTADOR" }
                             elseif ($ehWeb) { $tipo = "ROTEADOR/DISP. WEB" }
 
+                            # Impressora e equipamento de rede costumam dizer o modelo por SNMP
+                            # ou no titulo da pagina web. Quando diz, o modelo vale mais que a
+                            # marca solta: "TM-T20X" ajuda mais o tecnico que "EPSON".
+                            $modelo = ""
+                            if (-not $ehLocal -and ($ehImp -or $ehWeb -or $ehGw)) {
+                                $modelo = Get-ModeloDeRede -IP $ip -PortasAbertas $abertas -TimeoutMs 700
+                            }
+                            $fabTexto = $fab
+                            if ("$modelo" -ne "") {
+                                if ($fab -ne "Desconhecido" -and $modelo -notmatch "(?i)$([regex]::Escape(($fab -split ' ')[0]))") { $fabTexto = "$modelo ($fab)" }
+                                else { $fabTexto = $modelo }
+                            }
+
                             $servicos = (($abertas | ForEach-Object { Get-NomePorta $_ }) -join ", ")
 
                             $Script:ScannerTodos += [PSCustomObject]@{
                                 IP         = $ip
                                 Tipo       = $tipo
-                                Fabricante = $fab
+                                Fabricante = $fabTexto
                                 Host       = $host_
                                 Mac        = $(if ($mac) { $mac } else { "-" })
                                 Servicos   = $(if ($servicos) { $servicos } else { "-" })
@@ -11300,9 +11503,21 @@ function Open-Selector {
     [void]$fSel.Controls.Add($lbl)
 
     $cb = New-Object System.Windows.Forms.ComboBox
-    $cb.Location = '20,45'; $cb.Width = 340; $cb.DropDownStyle = 'DropDownList'; $cb.FlatStyle = 'Flat'
+    $cb.Location = '20,45'; $cb.Width = 265; $cb.DropDownStyle = 'DropDownList'; $cb.FlatStyle = 'Flat'
     $cb.BackColor = [System.Drawing.Color]::FromArgb(50, 50, 60); $cb.ForeColor = 'White'
-    
+
+    # Copiar o link do ZIP: as vezes a revenda baixa direto, sem o preparador. Fica
+    # discreto ao lado da lista porque quase nao e usado. Versao que mora no
+    # repositorio interno nao tem link para repassar.
+    $btnLink = New-Object System.Windows.Forms.Button
+    $btnLink.Text = "copiar link"; $btnLink.Location = '291,44'; $btnLink.Size = '69,24'
+    $btnLink.FlatStyle = 'Flat'; $btnLink.FlatAppearance.BorderSize = 1
+    $btnLink.FlatAppearance.BorderColor = [System.Drawing.Color]::FromArgb(70, 70, 80)
+    $btnLink.BackColor = [System.Drawing.Color]::FromArgb(45, 45, 52); $btnLink.ForeColor = [System.Drawing.Color]::FromArgb(190, 190, 195)
+    $btnLink.Font = New-Object System.Drawing.Font("Segoe UI", 7.5)
+    $btnLink.Cursor = 'Hand'
+    [void]$fSel.Controls.Add($btnLink)
+
     $versions = @()
     if ($Type -eq "PDV") {
         $versions += @{Name = "NetPDV v1.3.67.0"; Url = "https://netcontroll.com.br/util/instaladores/netpdv/1.3/67/0/NetPDV.zip"; File = "NetPDV_1.3.67.0.zip" }
@@ -11359,6 +11574,26 @@ function Open-Selector {
             $fSel.Close()
         })
     [void]$fSel.Controls.Add($btn)
+
+    $btnLink.Add_Click({
+            $sel = $versions[$cb.SelectedIndex]
+            $url = "$($sel.Url)"
+            if ($url -match '(?i)github\.com|githubusercontent\.com') {
+                [System.Windows.Forms.MessageBox]::Show(
+                    "Esta versão fica no repositório interno do preparador, e esse link não pode ser repassado.`r`n`r`nUse uma versão com link oficial (netcontroll.com.br) ou baixe aqui e mande o arquivo.",
+                    "Copiar link", "OK", "Information") | Out-Null
+                return
+            }
+            try { Set-Clipboard -Value $url -ErrorAction Stop }
+            catch { [System.Windows.Forms.Clipboard]::SetText($url) }
+            Log-Message "INFO" "Link copiado: $($sel.Name)"
+            $btnLink.Text = "copiado!"
+            $volta = New-Object System.Windows.Forms.Timer
+            $volta.Interval = 1500
+            $volta.Tag = $btnLink
+            $volta.Add_Tick({ $this.Stop(); $this.Tag.Text = "copiar link"; $this.Dispose() })
+            $volta.Start()
+        })
 
     # Checkbox de deploy automatico (visivel apenas para PDV e LinkXMenu)
     $chkDeploy = $null
@@ -11833,7 +12068,7 @@ $formWidth = if ($screen.Width -lt 1200) { $screen.Width - 50 } else { 1200 }
 $formHeight = if ($screen.Height -lt 900) { $screen.Height - 50 } else { 900 }
 
 $form = New-Object System.Windows.Forms.Form
-$form.Text = "Preparador XMenu – Suporte Técnico v5.2"
+$form.Text = "Preparador XMenu – Suporte Técnico v5.3"
 $form.Size = New-Object System.Drawing.Size($formWidth, $formHeight)
 $form.StartPosition = "CenterScreen"
 $form.BackColor = [System.Drawing.Color]::FromArgb(25, 25, 30); $form.ForeColor = 'White'
@@ -12439,7 +12674,7 @@ $bClock.Add_Click({ Invoke-ClockSync })
 [void]$tbl.Controls.Add($bClock)
 
 # Mensagem de abertura: explica o programa para quem abre pela primeira vez
-Log-Message "INFO" "Preparador XMenu v5.2 - preparo e suporte de computadores com XMenu e NetPDV"
+Log-Message "INFO" "Preparador XMenu v5.3 - preparo e suporte de computadores com XMenu e NetPDV"
 Log-Message "LOG" "==============================================================="
 Log-Message "LOG" "COMO USAR"
 Log-Message "LOG" "  PREPARAR AMBIENTE WINDOWS .. ajusta energia, UAC e desempenho do PC num clique"
@@ -12449,11 +12684,11 @@ Log-Message "LOG" "  EXTERNOS ................... acesso remoto, Chrome, TEF HUB
 Log-Message "LOG" "  SUPORTE E DIAGNÓSTICO ...... impressoras, rede, SQL, backup, XMLs e reparos do Windows"
 Log-Message "LOG" "  Passe o mouse sobre um botão para ver o que ele faz antes de clicar."
 Log-Message "LOG" "---------------------------------------------------------------"
-Log-Message "LOG" "NOVO NA v5.2"
-Log-Message "SUCESSO" "  Em tela pequena o programa inteiro encolhe junto e cabe mais botão sem rolar"
+Log-Message "LOG" "NOVO NA v5.3"
+Log-Message "SUCESSO" "  Scanner de rede: mostra a marca e, quando o aparelho responde, o modelo da impressora"
+Log-Message "SUCESSO" "  Versões (NetPDV, Link XMenu, Concentrador): botão para copiar o link do ZIP"
 Log-Message "SUCESSO" "  Lista de notas aceita colar separado por espaço, TAB ou uma por linha (planilha)"
-Log-Message "SUCESSO" "  Ctrl+A seleciona o texto do campo, como em qualquer programa"
-Log-Message "SUCESSO" "  Roda do mouse rola a lista que está embaixo do ponteiro, sem precisar clicar antes"
+Log-Message "SUCESSO" "  Em tela pequena o programa inteiro encolhe junto e cabe mais botão sem rolar"
 Log-Message "LOG" "---------------------------------------------------------------"
 Log-Message "LOG" "Downloads, XMLs, espelhos em PDF e backups ficam em: Área de Trabalho > Arquivos Xmenu"
 Log-Message "LOG" "O registro de cada sessão fica em: C:\Arquivos Xmenu\Logs"
