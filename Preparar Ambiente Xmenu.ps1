@@ -1,5 +1,5 @@
 ﻿# =============================================================================
-# PREPARADOR XMENU v5.11
+# PREPARADOR XMENU v5.12
 # Visual: Dashboard Moderno
 # Correcoes:
 #   - CRITICO: Removido DoEvents do loop de evento de download (causava crash).
@@ -1384,7 +1384,7 @@ function Read-XmlValoresLinha {
 }
 
 function Get-XmlDbValor {
-    # Le uma coluna do SqlDataReader devolvendo $null no lugar de DBNull.
+    # Le uma coluna de uma linha ja carregada (DataRow) ou do SqlDataReader.
     #
     # Nao usa GetOrdinal de proposito: em servidor com collation que diferencia
     # maiuscula de minuscula (ou acento), ele pode nao achar a coluna e derrubar a
@@ -1396,7 +1396,16 @@ function Get-XmlDbValor {
         # PowerShell 4 (Windows Server 2012 R2) as vezes entrega o leitor dentro de um
         # array de um elemento: sem isso, toda coluna vinha vazia e a nota perdia o numero
         if ($Reader -is [System.Array] -and $Reader.Length -gt 0) { $Reader = $Reader[0] }
-        # Linha ja lida inteira (Read-XmlValoresLinha): e o caminho normal na busca
+        # Linha ja carregada em memoria (DataRow): caminho normal da busca. Nao depende
+        # de leitor, de ordem de coluna nem de posicao - e o que faz a busca funcionar
+        # tambem no cliente cujo leitor devolvia a linha com todas as colunas vazias.
+        if ($Reader -is [System.Data.DataRow]) {
+            if (-not $Reader.Table.Columns.Contains($Coluna)) { return $null }
+            $v = $Reader[$Coluna]
+            if ($null -eq $v -or $v -is [System.DBNull]) { return $null }
+            return $v
+        }
+        # Linha ja lida inteira (Read-XmlValoresLinha)
         if ($null -ne $Script:XmlValoresLinha) {
             if ($Script:XmlValoresLinha.ContainsKey($Coluna)) { return $Script:XmlValoresLinha[$Coluna] }
             return $null
@@ -3528,9 +3537,11 @@ function Show-XmlDownloader {
         $lerLinha = {
             param($rd, [bool]$MontarProc, [bool]$IncluirCanc)
 
-            # Toda a linha vem de uma vez, na ordem das colunas: e o que faz a leitura
-            # funcionar tambem no SQL antigo do cliente (ver Read-XmlValoresLinha)
-            $Script:XmlValoresLinha = Read-XmlValoresLinha $rd
+            # Vindo como DataRow (o caminho normal da busca), os valores ja estao em
+            # memoria e nao ha o que preparar. Vindo como leitor, le a linha inteira
+            # de uma vez, na ordem das colunas.
+            if ($rd -is [System.Data.DataRow]) { $Script:XmlValoresLinha = $null }
+            else { $Script:XmlValoresLinha = Read-XmlValoresLinha $rd }
 
             $dataE = Get-XmlDbValor $rd "DataEmissao"
             if ($null -eq $dataE) { $dataE = Get-XmlDbValor $rd "LogDataEmissao" }
@@ -3653,7 +3664,37 @@ function Show-XmlDownloader {
 
         # Le todas as linhas de uma consulta para a lista, com a janela respondendo
         # enquanto chegam. Devolve quantas linhas vieram.
+        # Carrega o resultado inteiro numa tabela em memoria (SqlDataAdapter) e so depois
+        # percorre as linhas. E o caminho mais solido do ADO.NET: nada depende de leitor
+        # aberto, de ordem de coluna nem de posicao da linha. Foi o que resolveu o
+        # cliente com SQL Server 2008 R2, onde o leitor entregava a linha com TODAS as
+        # colunas vazias (a nota existia e a busca dizia "NAO ENCONTRADA").
         $lerParaLista = {
+            param($Cmd, $Lista)
+            $tabela = New-Object System.Data.DataTable
+            $adaptador = New-Object System.Data.SqlClient.SqlDataAdapter $Cmd
+            $f.UseWaitCursor = $true
+            try {
+                [void]$adaptador.Fill($tabela)
+            }
+            finally {
+                $f.UseWaitCursor = $false
+                try { $adaptador.Dispose() } catch {}
+            }
+            $n = 0
+            foreach ($linhaTab in $tabela.Rows) {
+                $Lista.Add((& $lerLinha $linhaTab $true $true))
+                $n++
+                if ($n % 200 -eq 0) {
+                    [System.Windows.Forms.Application]::DoEvents()
+                    if ($Script:XmlCancelar) { throw "Busca cancelada." }
+                }
+            }
+            return $n
+        }
+
+        # Leitura pelo leitor, ainda usada por telas que vao lendo aos poucos
+        $lerParaListaLeitor = {
             param($Cmd, $Lista)
             $rd = & $executarLeitor $Cmd -Cancelavel
             if ($rd -is [System.Array]) { $rd = $rd[0] }
@@ -12407,7 +12448,7 @@ $formWidth = if ($screen.Width -lt 1200) { $screen.Width - 50 } else { 1200 }
 $formHeight = if ($screen.Height -lt 900) { $screen.Height - 50 } else { 900 }
 
 $form = New-Object System.Windows.Forms.Form
-$form.Text = "Preparador XMenu – Suporte Técnico v5.11"
+$form.Text = "Preparador XMenu – Suporte Técnico v5.12"
 $form.Size = New-Object System.Drawing.Size($formWidth, $formHeight)
 $form.StartPosition = "CenterScreen"
 $form.BackColor = [System.Drawing.Color]::FromArgb(25, 25, 30); $form.ForeColor = 'White'
@@ -13013,7 +13054,7 @@ $bClock.Add_Click({ Invoke-ClockSync })
 [void]$tbl.Controls.Add($bClock)
 
 # Mensagem de abertura: explica o programa para quem abre pela primeira vez
-Log-Message "INFO" "Preparador XMenu v5.11 - preparo e suporte de computadores com XMenu e NetPDV"
+Log-Message "INFO" "Preparador XMenu v5.12 - preparo e suporte de computadores com XMenu e NetPDV"
 Log-Message "LOG" "==============================================================="
 Log-Message "LOG" "COMO USAR"
 Log-Message "LOG" "  PREPARAR AMBIENTE WINDOWS .. ajusta energia, UAC e desempenho do PC num clique"
@@ -13023,8 +13064,8 @@ Log-Message "LOG" "  EXTERNOS ................... acesso remoto, Chrome, TEF HUB
 Log-Message "LOG" "  SUPORTE E DIAGNÓSTICO ...... impressoras, rede, SQL, backup, XMLs e reparos do Windows"
 Log-Message "LOG" "  Passe o mouse sobre um botão para ver o que ele faz antes de clicar."
 Log-Message "LOG" "---------------------------------------------------------------"
-Log-Message "LOG" "NOVO NA v5.11"
-Log-Message "SUCESSO" "  XMLs NFC-e: corrigida a leitura da linha que fazia a nota sumir em PC com SQL antigo"
+Log-Message "LOG" "NOVO NA v5.12"
+Log-Message "SUCESSO" "  XMLs NFC-e: a busca carrega o resultado em memória - acha a nota em qualquer PC"
 Log-Message "SUCESSO" "  O registro (log) passa a ser gravado também em Arquivos Xmenu > Logs"
 Log-Message "SUCESSO" "  XMLs NFC-e: em PC antigo, a busca refaz a consulta sem parâmetros quando não vem nada"
 Log-Message "SUCESSO" "  Corrigido: arquivo do último servidor ilegível deixava o campo Servidor com lixo"
