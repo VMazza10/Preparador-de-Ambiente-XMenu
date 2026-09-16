@@ -1,5 +1,5 @@
 ﻿# =============================================================================
-# PREPARADOR XMENU v5.10
+# PREPARADOR XMENU v5.11
 # Visual: Dashboard Moderno
 # Correcoes:
 #   - CRITICO: Removido DoEvents do loop de evento de download (causava crash).
@@ -130,10 +130,19 @@ function Log-Message {
 
         # Gravação em arquivo de log
         try {
-            $logPath = "C:\Arquivos Xmenu\Logs"
-            if (!(Test-Path $logPath)) { New-Item -ItemType Directory -Path $logPath -Force | Out-Null }
-            $logFile = Join-Path $logPath "log_preparar_ambiente_$((Get-Date).ToString('yyyy-MM-dd')).txt"
-            "[$((Get-Date).ToString('HH:mm:ss'))] [$Tag] $Msg" | Out-File -FilePath $logFile -Append -Encoding UTF8
+            $linhaLog = "[$((Get-Date).ToString('HH:mm:ss'))] [$Tag] $Msg"
+            $nomeLog = "log_preparar_ambiente_$((Get-Date).ToString('yyyy-MM-dd')).txt"
+            # Grava nos dois lugares: em C:\Arquivos Xmenu\Logs, como sempre, e junto dos
+            # downloads na Area de Trabalho, que e onde o tecnico acha o arquivo rapido
+            $destinos = @("C:\Arquivos Xmenu\Logs")
+            if ("$($Script:DownloadFolder)" -ne "") { $destinos += (Join-Path $Script:DownloadFolder "Logs") }
+            foreach ($pasta in $destinos) {
+                try {
+                    if (!(Test-Path $pasta)) { New-Item -ItemType Directory -Path $pasta -Force | Out-Null }
+                    $linhaLog | Out-File -FilePath (Join-Path $pasta $nomeLog) -Append -Encoding UTF8
+                }
+                catch {}
+            }
         }
         catch {}
         
@@ -1351,6 +1360,29 @@ function ConvertTo-FaixaTexto {
     return ($partes -join ", ")
 }
 
+# Le a linha inteira de uma vez, coluna por coluna, na ordem em que vieram.
+#
+# Esta e a forma segura: em cliente com SQL Server 2008 R2 o leitor so entregava o
+# valor quando as colunas eram pedidas em ordem crescente. O programa lia a data
+# (coluna 8) antes do numero da nota (coluna 2), e a nota voltava vazia - a busca
+# dizia "NAO ENCONTRADA" para uma nota que estava no banco. Lendo tudo de uma vez,
+# em ordem, funciona em qualquer versao, e ainda fica mais rapido.
+function Read-XmlValoresLinha {
+    param($Reader)
+    $valores = @{}
+    try {
+        if ($Reader -is [System.Array] -and $Reader.Length -gt 0) { $Reader = $Reader[0] }
+        $qtd = $Reader.FieldCount
+        for ($k = 0; $k -lt $qtd; $k++) {
+            $nome = "$($Reader.GetName($k))"
+            if ($Reader.IsDBNull($k)) { $valores[$nome] = $null }
+            else { $valores[$nome] = $Reader.GetValue($k) }
+        }
+    }
+    catch { return $null }
+    return $valores
+}
+
 function Get-XmlDbValor {
     # Le uma coluna do SqlDataReader devolvendo $null no lugar de DBNull.
     #
@@ -1364,6 +1396,11 @@ function Get-XmlDbValor {
         # PowerShell 4 (Windows Server 2012 R2) as vezes entrega o leitor dentro de um
         # array de um elemento: sem isso, toda coluna vinha vazia e a nota perdia o numero
         if ($Reader -is [System.Array] -and $Reader.Length -gt 0) { $Reader = $Reader[0] }
+        # Linha ja lida inteira (Read-XmlValoresLinha): e o caminho normal na busca
+        if ($null -ne $Script:XmlValoresLinha) {
+            if ($Script:XmlValoresLinha.ContainsKey($Coluna)) { return $Script:XmlValoresLinha[$Coluna] }
+            return $null
+        }
         # Mapa montado pelo proprio laco de leitura, valido so durante aquela consulta
         # (e apagado no fim dela). Sem isso, sobra o GetOrdinal, que ja deixou de achar
         # a coluna em cliente com SQL antigo e a nota vinha sem numero.
@@ -3491,6 +3528,10 @@ function Show-XmlDownloader {
         $lerLinha = {
             param($rd, [bool]$MontarProc, [bool]$IncluirCanc)
 
+            # Toda a linha vem de uma vez, na ordem das colunas: e o que faz a leitura
+            # funcionar tambem no SQL antigo do cliente (ver Read-XmlValoresLinha)
+            $Script:XmlValoresLinha = Read-XmlValoresLinha $rd
+
             $dataE = Get-XmlDbValor $rd "DataEmissao"
             if ($null -eq $dataE) { $dataE = Get-XmlDbValor $rd "LogDataEmissao" }
             if ($null -eq $dataE) { $dataE = Get-XmlDbValor $rd "data" }
@@ -3605,6 +3646,8 @@ function Show-XmlDownloader {
                 }
                 if ($null -ne $dataCanc) { $item.DataCancelamento = $dataCanc }
             }
+            # Os valores valem so para esta linha
+            $Script:XmlValoresLinha = $null
             return $item
         }
 
@@ -3636,6 +3679,7 @@ function Show-XmlDownloader {
             finally {
                 $rd.Close()
                 $Script:XmlMapaAtual = $null
+                $Script:XmlValoresLinha = $null
             }
             return $n
         }
@@ -12363,7 +12407,7 @@ $formWidth = if ($screen.Width -lt 1200) { $screen.Width - 50 } else { 1200 }
 $formHeight = if ($screen.Height -lt 900) { $screen.Height - 50 } else { 900 }
 
 $form = New-Object System.Windows.Forms.Form
-$form.Text = "Preparador XMenu – Suporte Técnico v5.10"
+$form.Text = "Preparador XMenu – Suporte Técnico v5.11"
 $form.Size = New-Object System.Drawing.Size($formWidth, $formHeight)
 $form.StartPosition = "CenterScreen"
 $form.BackColor = [System.Drawing.Color]::FromArgb(25, 25, 30); $form.ForeColor = 'White'
@@ -12969,7 +13013,7 @@ $bClock.Add_Click({ Invoke-ClockSync })
 [void]$tbl.Controls.Add($bClock)
 
 # Mensagem de abertura: explica o programa para quem abre pela primeira vez
-Log-Message "INFO" "Preparador XMenu v5.10 - preparo e suporte de computadores com XMenu e NetPDV"
+Log-Message "INFO" "Preparador XMenu v5.11 - preparo e suporte de computadores com XMenu e NetPDV"
 Log-Message "LOG" "==============================================================="
 Log-Message "LOG" "COMO USAR"
 Log-Message "LOG" "  PREPARAR AMBIENTE WINDOWS .. ajusta energia, UAC e desempenho do PC num clique"
@@ -12979,8 +13023,9 @@ Log-Message "LOG" "  EXTERNOS ................... acesso remoto, Chrome, TEF HUB
 Log-Message "LOG" "  SUPORTE E DIAGNÓSTICO ...... impressoras, rede, SQL, backup, XMLs e reparos do Windows"
 Log-Message "LOG" "  Passe o mouse sobre um botão para ver o que ele faz antes de clicar."
 Log-Message "LOG" "---------------------------------------------------------------"
-Log-Message "LOG" "NOVO NA v5.10"
-Log-Message "SUCESSO" "  XMLs NFC-e: busca sem resultado registra no log o que a conexão está vendo no banco"
+Log-Message "LOG" "NOVO NA v5.11"
+Log-Message "SUCESSO" "  XMLs NFC-e: corrigida a leitura da linha que fazia a nota sumir em PC com SQL antigo"
+Log-Message "SUCESSO" "  O registro (log) passa a ser gravado também em Arquivos Xmenu > Logs"
 Log-Message "SUCESSO" "  XMLs NFC-e: em PC antigo, a busca refaz a consulta sem parâmetros quando não vem nada"
 Log-Message "SUCESSO" "  Corrigido: arquivo do último servidor ilegível deixava o campo Servidor com lixo"
 Log-Message "SUCESSO" "  Zoom só em monitor pequeno de verdade (até 1024x640); nos demais nada muda"
