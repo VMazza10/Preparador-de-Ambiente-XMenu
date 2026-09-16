@@ -1,6 +1,6 @@
 ﻿# =============================================================================
 # PREPARADOR XMENU - VERSAO REVENDA
-# Baseado na v5.3
+# Baseado na v5.4
 # Alteracoes Revenda:
 #   - Wallpaper: fundo_revenda.png
 #   - Removido: Atalhos de Suporte e Pasta Netcontroll
@@ -11483,21 +11483,26 @@ function Open-Selector {
     $lbl = New-Object System.Windows.Forms.Label; $lbl.Text = "Selecione da Lista:"; $lbl.Location = '20,20'; $lbl.AutoSize = $true
     [void]$fSel.Controls.Add($lbl)
 
+    # Copiar o link do ZIP: as vezes a revenda baixa direto, sem o preparador. So no
+    # NetPDV e no Link XMenu, que ficam no site oficial. Concentrador, Tablet e Totem
+    # moram no repositorio interno: nao ha link para repassar, entao nem aparece botao.
+    $temLink = ($Type -eq "PDV" -or $Type -eq "LinkXMenu")
+
     $cb = New-Object System.Windows.Forms.ComboBox
-    $cb.Location = '20,45'; $cb.Width = 265; $cb.DropDownStyle = 'DropDownList'; $cb.FlatStyle = 'Flat'
+    $cb.Location = '20,45'; $cb.Width = $(if ($temLink) { 265 } else { 340 }); $cb.DropDownStyle = 'DropDownList'; $cb.FlatStyle = 'Flat'
     $cb.BackColor = [System.Drawing.Color]::FromArgb(50, 50, 60); $cb.ForeColor = 'White'
 
-    # Copiar o link do ZIP: as vezes a revenda baixa direto, sem o preparador. Fica
-    # discreto ao lado da lista porque quase nao e usado. Versao que mora no
-    # repositorio interno nao tem link para repassar.
-    $btnLink = New-Object System.Windows.Forms.Button
-    $btnLink.Text = "copiar link"; $btnLink.Location = '291,44'; $btnLink.Size = '69,24'
-    $btnLink.FlatStyle = 'Flat'; $btnLink.FlatAppearance.BorderSize = 1
-    $btnLink.FlatAppearance.BorderColor = [System.Drawing.Color]::FromArgb(70, 70, 80)
-    $btnLink.BackColor = [System.Drawing.Color]::FromArgb(45, 45, 52); $btnLink.ForeColor = [System.Drawing.Color]::FromArgb(190, 190, 195)
-    $btnLink.Font = New-Object System.Drawing.Font("Segoe UI", 7.5)
-    $btnLink.Cursor = 'Hand'
-    [void]$fSel.Controls.Add($btnLink)
+    $btnLink = $null
+    if ($temLink) {
+        $btnLink = New-Object System.Windows.Forms.Button
+        $btnLink.Text = "copiar link"; $btnLink.Location = '291,44'; $btnLink.Size = '69,24'
+        $btnLink.FlatStyle = 'Flat'; $btnLink.FlatAppearance.BorderSize = 1
+        $btnLink.FlatAppearance.BorderColor = [System.Drawing.Color]::FromArgb(70, 70, 80)
+        $btnLink.BackColor = [System.Drawing.Color]::FromArgb(45, 45, 52); $btnLink.ForeColor = [System.Drawing.Color]::FromArgb(190, 190, 195)
+        $btnLink.Font = New-Object System.Drawing.Font("Segoe UI", 7.5)
+        $btnLink.Cursor = 'Hand'
+        [void]$fSel.Controls.Add($btnLink)
+    }
 
     $versions = @()
     if ($Type -eq "PDV") {
@@ -11556,25 +11561,29 @@ function Open-Selector {
         })
     [void]$fSel.Controls.Add($btn)
 
-    $btnLink.Add_Click({
-            $sel = $versions[$cb.SelectedIndex]
-            $url = "$($sel.Url)"
-            if ($url -match '(?i)github\.com|githubusercontent\.com') {
-                [System.Windows.Forms.MessageBox]::Show(
-                    "Esta versão fica no repositório interno do preparador, e esse link não pode ser repassado.`r`n`r`nUse uma versão com link oficial (netcontroll.com.br) ou baixe aqui e mande o arquivo.",
-                    "Copiar link", "OK", "Information") | Out-Null
-                return
-            }
-            try { Set-Clipboard -Value $url -ErrorAction Stop }
-            catch { [System.Windows.Forms.Clipboard]::SetText($url) }
-            Log-Message "INFO" "Link copiado: $($sel.Name)"
-            $btnLink.Text = "copiado!"
-            $volta = New-Object System.Windows.Forms.Timer
-            $volta.Interval = 1500
-            $volta.Tag = $btnLink
-            $volta.Add_Tick({ $this.Stop(); $this.Tag.Text = "copiar link"; $this.Dispose() })
-            $volta.Start()
-        })
+    if ($null -ne $btnLink) {
+        $btnLink.Add_Click({
+                $sel = $versions[$cb.SelectedIndex]
+                $url = "$($sel.Url)"
+                # Trava de seguranca: link do repositorio interno nunca vai para a area
+                # de transferencia, mesmo que um dia entre na lista de um tipo com botao
+                if ($url -match '(?i)github\.com|githubusercontent\.com') {
+                    [System.Windows.Forms.MessageBox]::Show(
+                        "Esta versão fica no repositório interno do preparador, e esse link não pode ser repassado.`r`n`r`nBaixe aqui e mande o arquivo.",
+                        "Copiar link", "OK", "Information") | Out-Null
+                    return
+                }
+                try { Set-Clipboard -Value $url -ErrorAction Stop }
+                catch { [System.Windows.Forms.Clipboard]::SetText($url) }
+                Log-Message "INFO" "Link copiado: $($sel.Name)"
+                $btnLink.Text = "copiado!"
+                $volta = New-Object System.Windows.Forms.Timer
+                $volta.Interval = 1500
+                $volta.Tag = $btnLink
+                $volta.Add_Tick({ $this.Stop(); $this.Tag.Text = "copiar link"; $this.Dispose() })
+                $volta.Start()
+            })
+    }
 
     # Checkbox de deploy automatico (visivel apenas para PDV e LinkXMenu)
     $chkDeploy = $null
@@ -11997,7 +12006,7 @@ $formWidth = if ($screen.Width -lt 1000) { 900 } else { 1000 }
 $formHeight = if ($screen.Height -lt 800) { 700 } else { 800 }
 
 $form = New-Object System.Windows.Forms.Form
-$form.Text = "Preparador XMenu – Suporte Técnico v5.3 - REVENDA"
+$form.Text = "Preparador XMenu – Suporte Técnico v5.4 - REVENDA"
 $form.Size = New-Object System.Drawing.Size($formWidth, $formHeight)
 $form.StartPosition = "CenterScreen"
 $form.BackColor = [System.Drawing.Color]::FromArgb(25, 25, 30); $form.ForeColor = 'White'
@@ -12600,7 +12609,7 @@ $bClock.Add_Click({ Invoke-ClockSync })
 [void]$tbl.Controls.Add($bClock)
 
 # Mensagem de abertura: explica o programa para quem abre pela primeira vez
-Log-Message "INFO" "Preparador XMenu v5.3 - REVENDA - preparo e suporte de computadores com XMenu e NetPDV"
+Log-Message "INFO" "Preparador XMenu v5.4 - REVENDA - preparo e suporte de computadores com XMenu e NetPDV"
 Log-Message "LOG" "==============================================================="
 Log-Message "LOG" "COMO USAR"
 Log-Message "LOG" "  PREPARAR AMBIENTE WINDOWS .. ajusta energia, UAC e desempenho do PC num clique"
@@ -12610,9 +12619,9 @@ Log-Message "LOG" "  EXTERNOS ................... acesso remoto, Chrome, TEF HUB
 Log-Message "LOG" "  SUPORTE E DIAGNÓSTICO ...... impressoras, rede, SQL, backup, XMLs e reparos do Windows"
 Log-Message "LOG" "  Passe o mouse sobre um botão para ver o que ele faz antes de clicar."
 Log-Message "LOG" "---------------------------------------------------------------"
-Log-Message "LOG" "NOVO NA v5.3"
+Log-Message "LOG" "NOVO NA v5.4"
 Log-Message "SUCESSO" "  Scanner de rede: mostra a marca e, quando o aparelho responde, o modelo da impressora"
-Log-Message "SUCESSO" "  Versões (NetPDV, Link XMenu, Concentrador): botão para copiar o link do ZIP"
+Log-Message "SUCESSO" "  Versões do NetPDV e do Link XMenu: botão para copiar o link do ZIP"
 Log-Message "SUCESSO" "  Lista de notas aceita colar separado por espaço, TAB ou uma por linha (planilha)"
 Log-Message "SUCESSO" "  Em tela pequena o programa inteiro encolhe junto e cabe mais botão sem rolar"
 Log-Message "LOG" "---------------------------------------------------------------"
