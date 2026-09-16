@@ -1,5 +1,5 @@
 ﻿# =============================================================================
-# PREPARADOR XMENU v5.5
+# PREPARADOR XMENU v5.6
 # Visual: Dashboard Moderno
 # Correcoes:
 #   - CRITICO: Removido DoEvents do loop de evento de download (causava crash).
@@ -1361,6 +1361,9 @@ function Get-XmlDbValor {
     # uma vez por leitor, e a busca ignora maiusculas. De quebra fica mais rapido.
     param($Reader, [string]$Coluna)
     try {
+        # PowerShell 4 (Windows Server 2012 R2) as vezes entrega o leitor dentro de um
+        # array de um elemento: sem isso, toda coluna vinha vazia e a nota perdia o numero
+        if ($Reader -is [System.Array] -and $Reader.Length -gt 0) { $Reader = $Reader[0] }
         if (-not [object]::ReferenceEquals($Script:DbMapaLeitor, $Reader)) {
             $Script:DbMapaLeitor = $Reader
             $Script:DbMapaColunas = @{}
@@ -3111,6 +3114,7 @@ function Show-XmlDownloader {
             $cmd.CommandText = "SELECT DISTINCT Serie FROM NFCeTokenID WHERE IDParceiro = @p ORDER BY Serie"
             $par = $cmd.Parameters.Add("@p", [System.Data.SqlDbType]::BigInt); $par.Value = [long]$Parceiro
             $rd = & $executarLeitor $cmd
+            if ($rd -is [System.Array]) { $rd = $rd[0] }
             while ($rd.Read()) {
                 $s = "$($rd['Serie'])"
                 [void]$cmbSerie.Items.Add($s)
@@ -3146,6 +3150,7 @@ function Show-XmlDownloader {
                 $par = $cmd.Parameters.Add("@p", [System.Data.SqlDbType]::BigInt); $par.Value = [long]$Parceiro
                 $ids = @()
                 $rd = & $executarLeitor $cmd
+                if ($rd -is [System.Array]) { $rd = $rd[0] }
                 try { while ($rd.Read()) { $ids += [int]$rd.GetValue(0) } } finally { $rd.Close() }
 
                 if ($ids.Count -gt 1) {
@@ -3158,6 +3163,7 @@ function Show-XmlDownloader {
                             $par = $c2.Parameters.Add("@p", [System.Data.SqlDbType]::BigInt); $par.Value = [long]$Parceiro
                             $par = $c2.Parameters.Add("@s", [System.Data.SqlDbType]::Int); $par.Value = $idServ
                             $rd2 = & $executarLeitor $c2
+                            if ($rd2 -is [System.Array]) { $rd2 = $rd2[0] }
                             try {
                                 if ($rd2.Read()) {
                                     $cert = Get-XmlCertificadoAssinatura "$(Get-XmlDbValor $rd2 'xmlEnvio')"
@@ -3177,6 +3183,7 @@ function Show-XmlDownloader {
                                 $par = $c3.Parameters.Add("@p", [System.Data.SqlDbType]::BigInt); $par.Value = [long]$Parceiro
                                 $par = $c3.Parameters.Add("@s", [System.Data.SqlDbType]::Int); $par.Value = $idServ
                                 $rd3 = & $executarLeitor $c3
+                                if ($rd3 -is [System.Array]) { $rd3 = $rd3[0] }
                                 try {
                                     if ($rd3.Read()) {
                                         $nomeServ = "$(Get-XmlDbValor $rd3 'NomeCertificado')".Trim()
@@ -3330,6 +3337,7 @@ function Show-XmlDownloader {
                 $cmd.CommandTimeout = 30
                 $cmd.CommandText = "SELECT @@VERSION AS versao, DB_NAME() AS banco"
                 $rd = & $executarLeitor $cmd
+                if ($rd -is [System.Array]) { $rd = $rd[0] }
                 $versao = ""; $banco = ""
                 if ($rd.Read()) {
                     $versao = ("$($rd['versao'])" -split "`n")[0].Trim()
@@ -3341,6 +3349,7 @@ function Show-XmlDownloader {
                 $cmd2.CommandTimeout = 30
                 $cmd2.CommandText = "SELECT IDParceiro, COUNT(*) AS notas FROM NFCeTokenID GROUP BY IDParceiro ORDER BY notas DESC"
                 $rd2 = & $executarLeitor $cmd2
+                if ($rd2 -is [System.Array]) { $rd2 = $rd2[0] }
                 $cmbParceiro.Items.Clear()
                 while ($rd2.Read()) { [void]$cmbParceiro.Items.Add("$($rd2['IDParceiro'])") }
                 $rd2.Close()
@@ -3549,6 +3558,7 @@ function Show-XmlDownloader {
         $lerParaLista = {
             param($Cmd, $Lista)
             $rd = & $executarLeitor $Cmd -Cancelavel
+            if ($rd -is [System.Array]) { $rd = $rd[0] }
             $n = 0
             try {
                 while ($rd.Read()) {
@@ -3788,6 +3798,46 @@ function Show-XmlDownloader {
                         }
                         $lidasBloco = & $lerParaLista $cmd $achados
                         Log-Message "INFO" "XMLs: série $serie, parceiro $parceiro - pedi $($bloco.Count) número(s) e o banco devolveu $lidasBloco linha(s)"
+
+                        # Plano B: a consulta de cima usa CTE com ROW_NUMBER, e ja apareceu
+                        # cliente com SQL antigo (2008 R2) em que ela volta vazia mesmo com a
+                        # nota gravada. Aqui vai a versao simples, sem CTE: o log de cada nota
+                        # sai por subconsulta. Se esta achar, a busca continua funcionando e o
+                        # motivo fica registrado no log.
+                        if ($lidasBloco -eq 0) {
+                            $colB = $colunas.Replace("l.LogDataEmissao", "l.DataEmissao AS LogDataEmissao")
+                            $servJoinB = ""
+                            $servSubB = ""
+                            if ($Script:XmlTemServidor) {
+                                $servJoinB = "AND l.IDServidorFiscal = t.IDServidorFiscal "
+                                $servSubB = "AND g2.IDServidorFiscal = t.IDServidorFiscal "
+                            }
+                            $sqlB = "SELECT " + $colB + " FROM NFCeTokenID t LEFT JOIN NFCeTokenIDLog l " +
+                            "ON l.IDParceiro = t.IDParceiro AND l.SerieTokenID = t.Serie AND l.IDTokenID = t.ID " + $servJoinB +
+                            "AND l.ID = (SELECT TOP 1 g2.ID FROM NFCeTokenIDLog g2 WHERE g2.IDParceiro = t.IDParceiro " +
+                            "AND g2.SerieTokenID = t.Serie AND g2.IDTokenID = t.ID " + $servSubB +
+                            "ORDER BY CASE WHEN g2.CodigoRetorno = 100 THEN 0 ELSE 1 END, " +
+                            "CASE WHEN g2.xmlResposta IS NULL THEN 1 ELSE 0 END, g2.ID DESC) " +
+                            "WHERE t.IDParceiro = @parceiro AND t.Serie = @serie AND t.ID IN ($inSql)" + $sb.FiltroT + " ORDER BY t.ID"
+
+                            $cmdB = $cn.CreateCommand()
+                            $cmdB.CommandTimeout = 120
+                            $cmdB.CommandText = $sqlB
+                            $par = $cmdB.Parameters.Add("@parceiro", [System.Data.SqlDbType]::BigInt); $par.Value = $parceiro
+                            $par = $cmdB.Parameters.Add("@serie", [System.Data.SqlDbType]::Int); $par.Value = $serie
+                            & $addServidor $cmdB
+                            for ($i = 0; $i -lt $bloco.Count; $i++) {
+                                $par = $cmdB.Parameters.Add("@n$i", [System.Data.SqlDbType]::BigInt)
+                                $par.Value = [long]$bloco[$i]
+                            }
+                            $lidasB = & $lerParaLista $cmdB $achados
+                            if ($lidasB -gt 0) {
+                                Log-Message "SUCESSO" "XMLs: a consulta simples achou $lidasB nota(s) que a consulta principal não trouxe (banco antigo)"
+                            }
+                            else {
+                                Log-Message "INFO" "XMLs: a consulta simples também não achou essas notas neste parceiro e série"
+                            }
+                        }
                         & $setStatus "Consultando... $($achados.Count) notas lidas" $Script:UiAmarelo
                     }
 
@@ -3819,6 +3869,7 @@ function Show-XmlDownloader {
                             }
                             $onde = @()
                             $rdD = & $executarLeitor $cmdD
+                            if ($rdD -is [System.Array]) { $rdD = $rdD[0] }
                             try { while ($rdD.Read()) { $onde += "parceiro $($rdD.GetValue(0)), série $($rdD.GetValue(1)): $($rdD.GetValue(2)) nota(s)" } }
                             finally { $rdD.Close() }
                             if ($onde.Count -gt 0) {
@@ -3881,6 +3932,7 @@ function Show-XmlDownloader {
                     # Conta antes de buscar. Antes havia um TOP (5000) calado: um mes de
                     # supermercado vinha cortado e a tela dizia que estava tudo certo.
                     $rdTotal = & $executarLeitor (& $novoCmdPeriodo ("SELECT COUNT(*) FROM NFCeTokenID t WHERE " + $filtroPeriodo)) -Cancelavel
+                    if ($rdTotal -is [System.Array]) { $rdTotal = $rdTotal[0] }
                     $totalPeriodo = 0
                     try { if ($rdTotal.Read()) { $totalPeriodo = [int]$rdTotal.GetValue(0) } }
                     finally { $rdTotal.Close() }
@@ -4663,6 +4715,7 @@ function Show-XmlDownloader {
                     }
 
                     $rd = & $executarLeitor $cmd -Cancelavel
+                    if ($rd -is [System.Array]) { $rd = $rd[0] }
                     while ($rd.Read()) {
                         $sv = ""
                         if ($multiEmp) { $sv = "$(Get-XmlDbValor $rd 'IDServidorFiscal')" }
@@ -4771,6 +4824,7 @@ function Show-XmlDownloader {
 
                 $lista = New-Object 'System.Collections.Generic.List[object]'
                 $rd = & $executarLeitor $cmd
+                if ($rd -is [System.Array]) { $rd = $rd[0] }
                 $texto = { param($Coluna) $v = Get-XmlDbValor $rd $Coluna; if ($null -eq $v) { return "" }; return "$v".Trim() }
                 $marcado = { param($Coluna) $v = Get-XmlDbValor $rd $Coluna; return ($null -ne $v -and [bool]$v) }
                 try {
@@ -12162,7 +12216,7 @@ $formWidth = if ($screen.Width -lt 1200) { $screen.Width - 50 } else { 1200 }
 $formHeight = if ($screen.Height -lt 900) { $screen.Height - 50 } else { 900 }
 
 $form = New-Object System.Windows.Forms.Form
-$form.Text = "Preparador XMenu – Suporte Técnico v5.5"
+$form.Text = "Preparador XMenu – Suporte Técnico v5.6"
 $form.Size = New-Object System.Drawing.Size($formWidth, $formHeight)
 $form.StartPosition = "CenterScreen"
 $form.BackColor = [System.Drawing.Color]::FromArgb(25, 25, 30); $form.ForeColor = 'White'
@@ -12768,7 +12822,7 @@ $bClock.Add_Click({ Invoke-ClockSync })
 [void]$tbl.Controls.Add($bClock)
 
 # Mensagem de abertura: explica o programa para quem abre pela primeira vez
-Log-Message "INFO" "Preparador XMenu v5.5 - preparo e suporte de computadores com XMenu e NetPDV"
+Log-Message "INFO" "Preparador XMenu v5.6 - preparo e suporte de computadores com XMenu e NetPDV"
 Log-Message "LOG" "==============================================================="
 Log-Message "LOG" "COMO USAR"
 Log-Message "LOG" "  PREPARAR AMBIENTE WINDOWS .. ajusta energia, UAC e desempenho do PC num clique"
@@ -12778,7 +12832,8 @@ Log-Message "LOG" "  EXTERNOS ................... acesso remoto, Chrome, TEF HUB
 Log-Message "LOG" "  SUPORTE E DIAGNÓSTICO ...... impressoras, rede, SQL, backup, XMLs e reparos do Windows"
 Log-Message "LOG" "  Passe o mouse sobre um botão para ver o que ele faz antes de clicar."
 Log-Message "LOG" "---------------------------------------------------------------"
-Log-Message "LOG" "NOVO NA v5.5"
+Log-Message "LOG" "NOVO NA v5.6"
+Log-Message "SUCESSO" "  XMLs NFC-e: busca com segunda tentativa, para SQL antigo (2008 R2) que não trazia as notas"
 Log-Message "SUCESSO" "  XMLs NFC-e: leitura do banco não depende mais da collation - fim da nota 0 fantasma"
 Log-Message "SUCESSO" "  XMLs NFC-e: busca vazia agora diz onde as notas estão (parceiro e série certos)"
 Log-Message "SUCESSO" "  Scanner de rede: mostra a marca e, quando o aparelho responde, o modelo da impressora"
