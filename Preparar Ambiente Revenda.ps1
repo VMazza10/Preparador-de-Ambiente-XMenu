@@ -1,6 +1,6 @@
 ﻿# =============================================================================
 # PREPARADOR XMENU - VERSAO REVENDA
-# Baseado na v5.4
+# Baseado na v5.5
 # Alteracoes Revenda:
 #   - Wallpaper: fundo_revenda.png
 #   - Removido: Atalhos de Suporte e Pasta Netcontroll
@@ -1351,10 +1351,25 @@ function ConvertTo-FaixaTexto {
 }
 
 function Get-XmlDbValor {
-    # Le uma coluna do SqlDataReader devolvendo $null no lugar de DBNull
+    # Le uma coluna do SqlDataReader devolvendo $null no lugar de DBNull.
+    #
+    # Nao usa GetOrdinal de proposito: em servidor com collation que diferencia
+    # maiuscula de minuscula (ou acento), ele pode nao achar a coluna e derrubar a
+    # leitura da linha inteira - a nota vinha sem numero e virava uma "nota 0" na
+    # lista. Aqui os nomes das colunas do proprio resultado viram um mapa, montado
+    # uma vez por leitor, e a busca ignora maiusculas. De quebra fica mais rapido.
     param($Reader, [string]$Coluna)
     try {
-        $i = $Reader.GetOrdinal($Coluna)
+        if (-not [object]::ReferenceEquals($Script:DbMapaLeitor, $Reader)) {
+            $Script:DbMapaLeitor = $Reader
+            $Script:DbMapaColunas = @{}
+            for ($k = 0; $k -lt $Reader.FieldCount; $k++) {
+                $Script:DbMapaColunas["$($Reader.GetName($k))".ToLowerInvariant()] = $k
+            }
+        }
+        $chave = "$Coluna".ToLowerInvariant()
+        if (-not $Script:DbMapaColunas.ContainsKey($chave)) { return $null }
+        $i = $Script:DbMapaColunas[$chave]
         if ($Reader.IsDBNull($i)) { return $null }
         return $Reader.GetValue($i)
     }
@@ -3430,6 +3445,17 @@ function Show-XmlDownloader {
                 Servidor = Get-XmlDbValor $rd "IDServidorFiscal"
             }
 
+            # Linha veio sem numero: o banco devolveu algo que nao da para ler. Registra
+            # uma vez os nomes das colunas, que e o que diz onde a leitura se perdeu.
+            if ($null -eq $item.Nota -or [long]$item.Nota -le 0) {
+                if (-not $Script:XmlAvisouColunas) {
+                    $Script:XmlAvisouColunas = $true
+                    $cols = @()
+                    try { for ($k = 0; $k -lt $rd.FieldCount; $k++) { $cols += $rd.GetName($k) } } catch {}
+                    Log-Message "ERRO" ("XMLs: linha sem número de nota. O banco devolveu " + @($cols).Count + " coluna(s): " + ($cols -join ', '))
+                }
+            }
+
             $xEnvio = Get-XmlDbValor $rd "xmlEnvio"
             $xResp = Get-XmlDbValor $rd "xmlResposta"
             $xOff = Get-XmlDbValor $rd "xmlEnvioOff"
@@ -3759,8 +3785,50 @@ function Show-XmlDownloader {
                             $par = $cmd.Parameters.Add("@n$i", [System.Data.SqlDbType]::BigInt)
                             $par.Value = [long]$bloco[$i]
                         }
-                        [void](& $lerParaLista $cmd $achados)
+                        $lidasBloco = & $lerParaLista $cmd $achados
+                        Log-Message "INFO" "XMLs: série $serie, parceiro $parceiro - pedi $($bloco.Count) número(s) e o banco devolveu $lidasBloco linha(s)"
                         & $setStatus "Consultando... $($achados.Count) notas lidas" $Script:UiAmarelo
+                    }
+
+                    # Linha sem numero de nota nao existe na NFCeTokenID (a chave primaria
+                    # e IDParceiro + Serie + ID): se aparecer, e lixo de leitura e vai fora,
+                    # senao o tecnico ve uma "nota 0" fantasma na lista.
+                    $fantasmas = @($achados | Where-Object { $null -eq $_.Nota -or [long]$_.Nota -le 0 })
+                    if ($fantasmas.Count -gt 0) {
+                        Log-Message "ERRO" "XMLs: o banco devolveu $($fantasmas.Count) linha(s) sem número de nota; foram descartadas"
+                        $sobraram = @($achados | Where-Object { $null -ne $_.Nota -and [long]$_.Nota -gt 0 })
+                        $achados = New-Object 'System.Collections.Generic.List[object]'
+                        foreach ($a in $sobraram) { $achados.Add($a) }
+                    }
+
+                    # Nada veio do banco: em vez de so dizer "não encontrada", procura os
+                    # mesmos números sem o filtro de parceiro e de série. Quase sempre é o
+                    # Parceiro ou a Série da tela que não batem com o que está no banco.
+                    $Script:XmlDicaBusca = ""
+                    if ($achados.Count -eq 0) {
+                        try {
+                            $amostra = @($fx.Notas | Select-Object -First 50)
+                            $nomesD = @(); for ($i = 0; $i -lt $amostra.Count; $i++) { $nomesD += "@d$i" }
+                            $cmdD = $cn.CreateCommand()
+                            $cmdD.CommandTimeout = 60
+                            $cmdD.CommandText = "SELECT TOP 10 IDParceiro, Serie, qtd = COUNT(*) FROM NFCeTokenID " +
+                            "WHERE ID IN ($($nomesD -join ',')) GROUP BY IDParceiro, Serie ORDER BY COUNT(*) DESC"
+                            for ($i = 0; $i -lt $amostra.Count; $i++) {
+                                $p = $cmdD.Parameters.Add("@d$i", [System.Data.SqlDbType]::BigInt); $p.Value = [long]$amostra[$i]
+                            }
+                            $onde = @()
+                            $rdD = & $executarLeitor $cmdD
+                            try { while ($rdD.Read()) { $onde += "parceiro $($rdD.GetValue(0)), série $($rdD.GetValue(1)): $($rdD.GetValue(2)) nota(s)" } }
+                            finally { $rdD.Close() }
+                            if ($onde.Count -gt 0) {
+                                $Script:XmlDicaBusca = "Esses números existem no banco, mas em outro lugar - " + ($onde -join " | ") + ". Ajuste o Parceiro e a Série aqui em cima."
+                            }
+                            else {
+                                $Script:XmlDicaBusca = "Esses números não existem na tabela NFCeTokenID deste banco, em nenhum parceiro ou série."
+                            }
+                            Log-Message "INFO" "XMLs: busca sem resultado (parceiro $parceiro, série $serie). $($Script:XmlDicaBusca)"
+                        }
+                        catch { Log-Message "ERRO" "XMLs: não consegui conferir onde estão essas notas: $($_.Exception.Message)" }
                     }
 
                     # Numero pedido que nem linha tem na tabela de numeracao. Com mais de um
@@ -4033,7 +4101,13 @@ function Show-XmlDownloader {
                     # Avisa na hora, sem esperar o usuario clicar em BAIXAR a toa
                     $txtSem = ConvertTo-FaixaTexto $semXmlAgora
                     if ("$($Script:XmlFaltantesTexto)" -ne "") { $txtSem = $Script:XmlFaltantesTexto }
-                    & $setStatus ("Nenhuma das $($achados.Count) notas tem XML no banco - " + $txtSem) $Script:UiVermelho
+                    # Com a dica do diagnostico (parceiro/série errados, por exemplo), ela
+                    # vale mais que a lista de números: e o que o técnico precisa fazer
+                    if ("$($Script:XmlDicaBusca)" -ne "") {
+                        & $setStatus $Script:XmlDicaBusca $Script:UiVermelho
+                        [System.Windows.Forms.MessageBox]::Show($Script:XmlDicaBusca, "Baixar XMLs NFC-e", "OK", "Warning") | Out-Null
+                    }
+                    else { & $setStatus ("Nenhuma das $($achados.Count) notas tem XML no banco - " + $txtSem) $Script:UiVermelho }
                 }
                 elseif ($semXmlAgora.Count -gt 0) {
                     $txtSem = ConvertTo-FaixaTexto $semXmlAgora
@@ -12006,7 +12080,7 @@ $formWidth = if ($screen.Width -lt 1000) { 900 } else { 1000 }
 $formHeight = if ($screen.Height -lt 800) { 700 } else { 800 }
 
 $form = New-Object System.Windows.Forms.Form
-$form.Text = "Preparador XMenu – Suporte Técnico v5.4 - REVENDA"
+$form.Text = "Preparador XMenu – Suporte Técnico v5.5 - REVENDA"
 $form.Size = New-Object System.Drawing.Size($formWidth, $formHeight)
 $form.StartPosition = "CenterScreen"
 $form.BackColor = [System.Drawing.Color]::FromArgb(25, 25, 30); $form.ForeColor = 'White'
@@ -12609,7 +12683,7 @@ $bClock.Add_Click({ Invoke-ClockSync })
 [void]$tbl.Controls.Add($bClock)
 
 # Mensagem de abertura: explica o programa para quem abre pela primeira vez
-Log-Message "INFO" "Preparador XMenu v5.4 - REVENDA - preparo e suporte de computadores com XMenu e NetPDV"
+Log-Message "INFO" "Preparador XMenu v5.5 - REVENDA - preparo e suporte de computadores com XMenu e NetPDV"
 Log-Message "LOG" "==============================================================="
 Log-Message "LOG" "COMO USAR"
 Log-Message "LOG" "  PREPARAR AMBIENTE WINDOWS .. ajusta energia, UAC e desempenho do PC num clique"
@@ -12619,9 +12693,10 @@ Log-Message "LOG" "  EXTERNOS ................... acesso remoto, Chrome, TEF HUB
 Log-Message "LOG" "  SUPORTE E DIAGNÓSTICO ...... impressoras, rede, SQL, backup, XMLs e reparos do Windows"
 Log-Message "LOG" "  Passe o mouse sobre um botão para ver o que ele faz antes de clicar."
 Log-Message "LOG" "---------------------------------------------------------------"
-Log-Message "LOG" "NOVO NA v5.4"
+Log-Message "LOG" "NOVO NA v5.5"
+Log-Message "SUCESSO" "  XMLs NFC-e: leitura do banco não depende mais da collation - fim da nota 0 fantasma"
+Log-Message "SUCESSO" "  XMLs NFC-e: busca vazia agora diz onde as notas estão (parceiro e série certos)"
 Log-Message "SUCESSO" "  Scanner de rede: mostra a marca e, quando o aparelho responde, o modelo da impressora"
-Log-Message "SUCESSO" "  Versões do NetPDV e do Link XMenu: botão para copiar o link do ZIP"
 Log-Message "SUCESSO" "  Lista de notas aceita colar separado por espaço, TAB ou uma por linha (planilha)"
 Log-Message "SUCESSO" "  Em tela pequena o programa inteiro encolhe junto e cabe mais botão sem rolar"
 Log-Message "LOG" "---------------------------------------------------------------"
