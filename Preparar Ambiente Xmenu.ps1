@@ -8055,6 +8055,17 @@ function Show-PrinterScanner {
             if ($lv.SelectedItems.Count -gt 0) { return $lv.SelectedItems[0].Text }
             return ""
         }
+        $copiarIpSelecionado = {
+            $ip = & $ipSelecionado
+            if ($ip) {
+                try { Set-Clipboard -Value $ip -ErrorAction Stop }
+                catch { [System.Windows.Forms.Clipboard]::SetText($ip) }
+                $lblStat.Text = "IP copiado: $ip"
+            }
+            else {
+                [System.Windows.Forms.MessageBox]::Show("Selecione um equipamento na lista.", "Copiar IP", "OK", "Information") | Out-Null
+            }
+        }
         [void]$menu.Items.Add("Testar ping continuo", $null, {
                 $ip = & $ipSelecionado
                 if ($ip) { Show-PingTester -InitialIP $ip }
@@ -8068,8 +8079,7 @@ function Show-PrinterScanner {
                 if ($ip) { Start-Process "explorer.exe" "\\$ip" }
             })
         [void]$menu.Items.Add("Copiar IP", $null, {
-                $ip = & $ipSelecionado
-                if ($ip) { Set-Clipboard -Value $ip }
+                & $copiarIpSelecionado
             })
         [void]$menu.Items.Add("Copiar linha inteira", $null, {
                 if ($lv.SelectedItems.Count -gt 0) {
@@ -8262,16 +8272,20 @@ function Show-PrinterScanner {
                 $lblStat.Text = "Interrompendo..."
             })
 
-        New-ToolButton $f "PING NO SELECIONADO" 20 566 200 34 $Script:UiCinza {
+        New-ToolButton $f "PING" 20 566 170 34 $Script:UiCinza {
             if ($lv.SelectedItems.Count -gt 0) { Show-PingTester -InitialIP $lv.SelectedItems[0].Text }
             else { [System.Windows.Forms.MessageBox]::Show("Selecione um equipamento na lista.", "Ping", "OK", "Information") | Out-Null }
         } "Abre o teste de ping no equipamento selecionado" | Out-Null
 
-        New-ToolButton $f "ABRIR NO NAVEGADOR" 230 566 190 34 $Script:UiCinza {
+        New-ToolButton $f "COPIAR IP" 200 566 130 34 $Script:UiVerde {
+            & $copiarIpSelecionado
+        } "Copia o IP do equipamento selecionado" | Out-Null
+
+        New-ToolButton $f "ABRIR NAVEGADOR" 340 566 180 34 $Script:UiCinza {
             if ($lv.SelectedItems.Count -gt 0) { Start-Process "http://$($lv.SelectedItems[0].Text)" }
         } "Abre a pagina de configuracao do equipamento" | Out-Null
 
-        New-ToolButton $f "EXPORTAR CSV" 430 566 160 34 $Script:UiCinza {
+        New-ToolButton $f "EXPORTAR CSV" 530 566 150 34 $Script:UiCinza {
             if ($Script:ScannerTodos.Count -eq 0) {
                 [System.Windows.Forms.MessageBox]::Show("Faca um scan antes de exportar.", "Exportar", "OK", "Information") | Out-Null
                 return
@@ -8287,7 +8301,7 @@ function Show-PrinterScanner {
             }
         } "Salva a lista em planilha na Area de Trabalho" | Out-Null
 
-        New-ToolButton $f "GERENCIAR IMPRESSORAS" 600 566 220 34 $Script:UiAzul {
+        New-ToolButton $f "GERENCIAR IMPRESSORAS" 690 566 210 34 $Script:UiAzul {
             Show-PrinterManager
         } "Abre o gerenciador de impressoras e drivers" | Out-Null
 
@@ -9066,7 +9080,10 @@ function New-ImpressoraLpr {
     $driverInstalado = Install-DriverWindows -Driver $Driver
     $porta = $Servidor + ":" + $Fila
     $jaExistia = ($null -ne (Get-PrinterPort -Name $porta -ErrorAction SilentlyContinue))
-    if (-not $jaExistia) { Add-PrinterPort -Name $porta -LprHostAddress $Servidor -LprQueueName $Fila -ErrorAction Stop }
+    if (-not $jaExistia) {
+        try { Add-PrinterPort -Name $porta -LprHostAddress $Servidor -LprQueueName $Fila -SNMP 0 -LprByteCounting -ErrorAction Stop }
+        catch { Add-PrinterPort -Name $porta -LprHostAddress $Servidor -LprQueueName $Fila -SNMP 0 -ErrorAction Stop }
+    }
     Add-Printer -Name $Nome -DriverName $Driver -PortName $porta -ErrorAction Stop
     return @{ Porta = $porta; Impressora = $Nome; PortaJaExistia = $jaExistia; DriverInstalado = $driverInstalado }
 }
@@ -9091,12 +9108,293 @@ function Install-DriverWindows {
 }
 
 function Send-TesteImpressao {
-    # Folha curta em vez da pagina de teste do Windows, que gasta meio metro de bobina
+    # Teste grafico proprio do Preparador: faixa preta, QR, codigo de barras e dados uteis.
     param([string]$Impressora, [string]$Detalhe = "")
-    $linhas = @("*** TESTE XMENU ***", "", "Impressora: $Impressora")
-    if ($Detalhe -ne "") { $linhas += $Detalhe }
-    $linhas += @("Enviado de: $env:COMPUTERNAME", ("Em: " + (Get-Date).ToString("dd/MM/yyyy HH:mm:ss")), "", "Se esta folha saiu, a impressao esta OK.", "", "", "")
-    $linhas | Out-Printer -Name $Impressora
+    $porta = ""
+    $driver = ""
+    $compart = ""
+    $tipo = ""
+    $ipPorta = ""
+    try {
+        $nomeFiltro = $Impressora -replace "'", "\'"
+        $info = @(Get-WmiObject Win32_Printer -Filter "Name='$nomeFiltro'" -ErrorAction Stop | Select-Object -First 1)
+        if ($info.Count -gt 0) {
+            $porta = "$($info[0].PortName)"
+            $driver = "$($info[0].DriverName)"
+            if ($info[0].Shared -and "$($info[0].ShareName)" -ne "") { $compart = "\\$env:COMPUTERNAME\$($info[0].ShareName)" }
+        }
+    }
+    catch {}
+    $p = "$porta".Trim()
+    if ($p -match '^(\d{1,3}(?:\.\d{1,3}){3}):') { $tipo = "LPR"; $ipPorta = $matches[1] }
+    elseif ($p -match '^IP[_-](\d{1,3}(?:[._-]\d{1,3}){3})') { $tipo = "Rede (IP)"; $ipPorta = ($matches[1] -replace '[_-]', '.') }
+    elseif (Test-EnderecoIpv4 $p) { $tipo = "Rede (IP)"; $ipPorta = $p }
+    elseif ($p -match '^USB\d+$') { $tipo = "USB" }
+    elseif ($p -match '^(COM|LPT)\d+:?$') { $tipo = "Serial/Paralela" }
+    elseif ($p -match '^WSD-') { $tipo = "WSD" }
+    elseif ($p.StartsWith('\\')) { $tipo = "Compartilhada" }
+    elseif ($p -match '^(PORTPROMPT|nul|FILE|SHRFAX|XPSPort):$') { $tipo = "Virtual" }
+    elseif ($p -ne "") { $tipo = "Outra" }
+
+    $criarQr = {
+        param([string]$Texto)
+        if ($Texto -eq "XMENU TESTE OK" -and $null -ne $Script:TesteQrXmenu) { return $Script:TesteQrXmenu }
+        $size = 21
+        $m = New-Object 'bool[,]' $size, $size
+        $res = New-Object 'bool[,]' $size, $size
+        $set = {
+            param([int]$R, [int]$C, [bool]$Dark, [bool]$Reservado = $true)
+            if ($R -lt 0 -or $C -lt 0 -or $R -ge $size -or $C -ge $size) { return }
+            $m[$R, $C] = $Dark
+            if ($Reservado) { $res[$R, $C] = $true }
+        }
+        $finder = {
+            param([int]$R, [int]$C)
+            for ($dr = -1; $dr -le 7; $dr++) {
+                for ($dc = -1; $dc -le 7; $dc++) {
+                    $rr = $R + $dr; $cc = $C + $dc
+                    if ($rr -lt 0 -or $cc -lt 0 -or $rr -ge $size -or $cc -ge $size) { continue }
+                    if ($dr -eq -1 -or $dc -eq -1 -or $dr -eq 7 -or $dc -eq 7) { & $set $rr $cc $false $true }
+                    else {
+                        $dark = ($dr -eq 0 -or $dr -eq 6 -or $dc -eq 0 -or $dc -eq 6 -or ($dr -ge 2 -and $dr -le 4 -and $dc -ge 2 -and $dc -le 4))
+                        & $set $rr $cc $dark $true
+                    }
+                }
+            }
+        }
+        & $finder 0 0; & $finder 0 14; & $finder 14 0
+        for ($i = 8; $i -le 12; $i++) {
+            & $set 6 $i (($i % 2) -eq 0) $true
+            & $set $i 6 (($i % 2) -eq 0) $true
+        }
+        & $set 13 8 $true $true
+        foreach ($p in @(@(8,0),@(8,1),@(8,2),@(8,3),@(8,4),@(8,5),@(8,7),@(8,8),@(7,8),@(5,8),@(4,8),@(3,8),@(2,8),@(1,8),@(0,8))) { & $set $p[0] $p[1] $false $true }
+        for ($c = 13; $c -lt $size; $c++) { & $set 8 $c $false $true }
+        for ($r = 13; $r -lt $size; $r++) { & $set $r 8 $false $true }
+
+        $bytes = [System.Text.Encoding]::ASCII.GetBytes($Texto)
+        if ($bytes.Length -gt 17) { $bytes = [System.Text.Encoding]::ASCII.GetBytes($Texto.Substring(0, 17)) }
+        $bits = New-Object 'System.Collections.Generic.List[int]'
+        $addBits = {
+            param([int]$Valor, [int]$Qtd)
+            for ($bi = $Qtd - 1; $bi -ge 0; $bi--) { [void]$bits.Add(($Valor -shr $bi) -band 1) }
+        }
+        & $addBits 4 4
+        & $addBits $bytes.Length 8
+        foreach ($b in $bytes) { & $addBits ([int]$b) 8 }
+        $capBits = 19 * 8
+        for ($i = 0; $i -lt 4 -and $bits.Count -lt $capBits; $i++) { [void]$bits.Add(0) }
+        while (($bits.Count % 8) -ne 0) { [void]$bits.Add(0) }
+        $data = New-Object 'System.Collections.Generic.List[int]'
+        for ($i = 0; $i -lt $bits.Count; $i += 8) {
+            $v = 0
+            for ($j = 0; $j -lt 8; $j++) { $v = ($v -shl 1) -bor $bits[$i + $j] }
+            [void]$data.Add($v)
+        }
+        $pads = @(0xEC, 0x11)
+        $pi = 0
+        while ($data.Count -lt 19) { [void]$data.Add($pads[$pi % 2]); $pi++ }
+
+        $exp = New-Object int[] 512
+        $log = New-Object int[] 256
+        $x = 1
+        for ($i = 0; $i -lt 255; $i++) {
+            $exp[$i] = $x; $log[$x] = $i
+            $x = $x -shl 1
+            if (($x -band 0x100) -ne 0) { $x = $x -bxor 0x11D }
+        }
+        for ($i = 255; $i -lt 512; $i++) { $exp[$i] = $exp[$i - 255] }
+        $mul = {
+            param([int]$A, [int]$B)
+            if ($A -eq 0 -or $B -eq 0) { return 0 }
+            return $exp[$log[$A] + $log[$B]]
+        }
+        $gen = @(87, 229, 146, 149, 238, 102, 21)
+        $ec = New-Object int[] 7
+        foreach ($d in $data) {
+            $factor = $d -bxor $ec[0]
+            for ($i = 0; $i -lt 6; $i++) { $ec[$i] = $ec[$i + 1] }
+            $ec[6] = 0
+            for ($i = 0; $i -lt 7; $i++) { $ec[$i] = $ec[$i] -bxor (& $mul $gen[$i] $factor) }
+        }
+        $all = @($data) + @($ec)
+        $dataBits = New-Object 'System.Collections.Generic.List[int]'
+        foreach ($cw in $all) { for ($bi = 7; $bi -ge 0; $bi--) { [void]$dataBits.Add(($cw -shr $bi) -band 1) } }
+
+        $bitIndex = 0
+        $up = $true
+        [int]$colIdx = [int]$size - 1
+        while ($colIdx -gt 0) {
+            if ($colIdx -eq 6) { $colIdx-- }
+            for ($k = 0; $k -lt $size; $k++) {
+                $row = if ($up) { $size - 1 - $k } else { $k }
+                [int]$colA = $colIdx
+                [int]$colB = $colIdx - 1
+                foreach ($c in @($colA, $colB)) {
+                    if ($res[$row, $c]) { continue }
+                    $dark = $false
+                    if ($bitIndex -lt $dataBits.Count) { $dark = ([int]$dataBits[$bitIndex] -eq 1) }
+                    if ((($row + $c) % 2) -eq 0) { $dark = -not $dark }
+                    & $set $row $c $dark $true
+                    $bitIndex++
+                }
+            }
+            $up = -not $up
+            $colIdx -= 2
+        }
+        $fmt = "111011111000100"
+        for ($i = 0; $i -lt 15; $i++) {
+            $dark = ($fmt[$i] -eq '1')
+            if ($i -lt 6) { & $set 8 $i $dark $true }
+            elseif ($i -eq 6) { & $set 8 7 $dark $true }
+            elseif ($i -eq 7) { & $set 8 8 $dark $true }
+            elseif ($i -eq 8) { & $set 7 8 $dark $true }
+            else { & $set (14 - $i) 8 $dark $true }
+        }
+        for ($i = 0; $i -lt 8; $i++) { & $set (20 - $i) 8 ($fmt[$i] -eq '1') $true }
+        for ($i = 8; $i -lt 15; $i++) { & $set 8 (6 + $i) ($fmt[$i] -eq '1') $true }
+        $qrObj = [PSCustomObject]@{ Size = $size; Modules = $m; Texto = $Texto }
+        if ($Texto -eq "XMENU TESTE OK") { $Script:TesteQrXmenu = $qrObj }
+        return $qrObj
+    }
+
+    $doc = New-Object System.Drawing.Printing.PrintDocument
+    $doc.DocumentName = "Teste de Impressao XMenu"
+    $doc.PrinterSettings.PrinterName = $Impressora
+    $qrPayload = "XMENU TESTE OK"
+    $barcodePayload = ("XMENU-" + (Get-Date).ToString("HHmmss"))
+    $doc.Add_PrintPage({
+            param($s, $e)
+            $eventArgs = $null
+            foreach ($candidate in @($e, $_, $EventArgs, $args)) {
+                foreach ($item in @($candidate)) {
+                    if ($item -is [System.Drawing.Printing.PrintPageEventArgs]) {
+                        $eventArgs = $item
+                        break
+                    }
+                }
+                if ($null -ne $eventArgs) { break }
+            }
+            if ($null -eq $eventArgs) { throw "Evento de impressão inválido." }
+
+            $g = $eventArgs.Graphics
+            $g.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
+            $g.TextRenderingHint = [System.Drawing.Text.TextRenderingHint]::ClearTypeGridFit
+            $bounds = [System.Drawing.Rectangle]$eventArgs.MarginBounds
+            [int]$pageWidth = $bounds.Width
+            [int]$w = [Math]::Min($pageWidth, 560)
+            if ($w -lt 300) { $w = $pageWidth }
+            [int]$x = [int]$bounds.Left + [int](($pageWidth - $w) / 2)
+            [int]$y = [int]$bounds.Top
+
+            $black = [System.Drawing.Brushes]::Black
+            $white = [System.Drawing.Brushes]::White
+            $ink = New-Object System.Drawing.SolidBrush([System.Drawing.Color]::FromArgb(25, 25, 25))
+            $muted = New-Object System.Drawing.SolidBrush([System.Drawing.Color]::FromArgb(90, 90, 90))
+            $linePen = New-Object System.Drawing.Pen([System.Drawing.Color]::FromArgb(30, 30, 30), 1)
+            $fontTitle = New-Object System.Drawing.Font("Segoe UI", 15, [System.Drawing.FontStyle]::Bold)
+            $fontSub = New-Object System.Drawing.Font("Segoe UI", 8.5, [System.Drawing.FontStyle]::Bold)
+            $fontText = New-Object System.Drawing.Font("Segoe UI", 8.5)
+            $fontMono = New-Object System.Drawing.Font("Consolas", 8.5)
+            $sfCenter = New-Object System.Drawing.StringFormat
+            $sfCenter.Alignment = [System.Drawing.StringAlignment]::Center
+            $sfCenter.LineAlignment = [System.Drawing.StringAlignment]::Center
+
+            $g.FillRectangle($white, $bounds)
+            $g.FillRectangle($black, $x, $y, $w, 74)
+            $g.DrawString("TESTE DE IMPRESSAO", $fontTitle, $white, (New-Object System.Drawing.RectangleF($x, ($y + 10), $w, 28)), $sfCenter)
+            $g.DrawString("PREPARADOR XMENU", $fontSub, $white, (New-Object System.Drawing.RectangleF($x, ($y + 42), $w, 18)), $sfCenter)
+            $y += 88
+
+            $cardH = 116
+            $g.DrawRectangle($linePen, $x, $y, $w, $cardH)
+            $labelW = 96
+            $labelGap = 18
+            $rowH = 19
+            $drawInfo = {
+                param([string]$Label, [string]$Value, [int]$Row)
+                $yy = $y + 10 + ($Row * $rowH)
+                $labelRect = New-Object System.Drawing.RectangleF([float]($x + 14), [float]$yy, [float]$labelW, [float]$rowH)
+                $g.DrawString($Label.ToUpper(), $fontSub, $muted, $labelRect)
+                $txt = "$Value"
+                if ($txt.Trim() -eq "") { $txt = "-" }
+                $valueX = $x + 14 + $labelW + $labelGap
+                $valueRect = New-Object System.Drawing.RectangleF([float]$valueX, [float]$yy, [float]($w - ($valueX - $x) - 14), [float]$rowH)
+                $g.DrawString($txt, $fontText, $ink, $valueRect)
+            }
+            & $drawInfo "Impressora" $Impressora 0
+            & $drawInfo "Tipo" $tipo 1
+            & $drawInfo "Porta" $porta 2
+            & $drawInfo "IP" $ipPorta 3
+            & $drawInfo "Driver" $driver 4
+            if ($compart -ne "") { & $drawInfo "Compart." $compart 5 }
+            $y += $cardH + 16
+
+            $g.FillRectangle($black, $x, $y, $w, 32)
+            $g.DrawString("TESTE DE PRETO 100%", $fontSub, $white, (New-Object System.Drawing.RectangleF($x, $y, $w, 32)), $sfCenter)
+            $y += 46
+
+            $qr = & $criarQr $qrPayload
+            [int]$qrN = $qr.Size
+            $qrModules = $qr.Modules
+            [int]$qrSize = [Math]::Min(150, [int](($w - 30) / 2))
+            [int]$qrX = $x + 12
+            [int]$qrY = $y
+            [int]$module = [Math]::Max(3, [Math]::Floor($qrSize / ($qrN + 8)))
+            [int]$actualQr = $module * ($qrN + 8)
+            $g.FillRectangle($white, $qrX, $qrY, $actualQr, $actualQr)
+            $g.DrawRectangle($linePen, $qrX, $qrY, $actualQr, $actualQr)
+            for ($r = 0; $r -lt $qrN; $r++) {
+                for ($c = 0; $c -lt $qrN; $c++) {
+                    if ($qrModules[$r, $c]) { $g.FillRectangle($black, ([int]($qrX + (($c + 4) * $module))), ([int]($qrY + (($r + 4) * $module))), $module, $module) }
+                }
+            }
+            [int]$tx = $qrX + $actualQr + 18
+            $g.DrawString("QR CODE", $fontSub, $ink, [float]$tx, [float]($qrY + 4))
+            $g.DrawString($qrPayload, $fontMono, $ink, [float]$tx, [float]($qrY + 24))
+            [int]$qrTextW = [Math]::Max(80, ($w - ($tx - $x) - 10))
+            $g.DrawString("Use para conferir nitidez, contraste e leitura por câmera.", $fontText, $muted, (New-Object System.Drawing.RectangleF([float]$tx, [float]($qrY + 46), [float]$qrTextW, [float]58)))
+            $y += $actualQr + 16
+
+            $patterns = @{
+                '0'='nnnwwnwnn'; '1'='wnnwnnnnw'; '2'='nnwwnnnnw'; '3'='wnwwnnnnn'; '4'='nnnwwnnnw'; '5'='wnnwwnnnn'; '6'='nnwwwnnnn'; '7'='nnnwnnwnw'; '8'='wnnwnnwnn'; '9'='nnwwnnwnn'
+                'A'='wnnnnwnnw'; 'B'='nnwnnwnnw'; 'C'='wnwnnwnnn'; 'D'='nnnnwwnnw'; 'E'='wnnnwwnnn'; 'F'='nnwnwwnnn'; 'G'='nnnnnwwnw'; 'H'='wnnnnwwnn'; 'I'='nnwnnwwnn'; 'J'='nnnnwwwnn'
+                'K'='wnnnnnnww'; 'L'='nnwnnnnww'; 'M'='wnwnnnnwn'; 'N'='nnnnwnnww'; 'O'='wnnnwnnwn'; 'P'='nnwnwnnwn'; 'Q'='nnnnnnwww'; 'R'='wnnnnnwwn'; 'S'='nnwnnnwwn'; 'T'='nnnnwnwwn'
+                'U'='wwnnnnnnw'; 'V'='nwwnnnnnw'; 'W'='wwwnnnnnn'; 'X'='nwnnwnnnw'; 'Y'='wwnnwnnnn'; 'Z'='nwwnwnnnn'; '-'='nwnnnnwnw'; '.'='wwnnnnwnn'; ' '='nwwnnnwnn'; '*'='nwnnwnwnn'
+            }
+            $bcText = "*" + (($barcodePayload.ToUpper() -replace '[^A-Z0-9\-. ]', '') ) + "*"
+            $units = 0
+            foreach ($ch in $bcText.ToCharArray()) {
+                $pat = $patterns["$ch"]
+                for ($i = 0; $i -lt $pat.Length; $i++) { $units += $(if ($pat[$i] -eq 'w') { 3 } else { 1 }) }
+                $units += 1
+            }
+            [int]$narrow = [Math]::Max(1, [Math]::Floor(($w - 24) / [Math]::Max(1, $units)))
+            [int]$wide = $narrow * 3
+            [int]$barH = 58
+            [int]$bcX = $x + 12
+            $g.DrawString("CODIGO DE BARRAS", $fontSub, $ink, [float]$bcX, [float]$y)
+            [int]$yyBar = $y + 24
+            foreach ($ch in $bcText.ToCharArray()) {
+                $pat = $patterns["$ch"]
+                for ($i = 0; $i -lt $pat.Length; $i++) {
+                    [int]$bw = if ($pat[$i] -eq 'w') { $wide } else { $narrow }
+                    if (($i % 2) -eq 0) { $g.FillRectangle($black, $bcX, $yyBar, $bw, $barH) }
+                    $bcX += $bw
+                }
+                $bcX += $narrow
+            }
+            $g.DrawString($barcodePayload, $fontMono, $ink, (New-Object System.Drawing.RectangleF($x, ($yyBar + $barH + 4), $w, 18)), $sfCenter)
+            $y = $yyBar + $barH + 32
+
+            $g.DrawLine($linePen, $x, $y, ($x + $w), $y)
+            $y += 10
+            $rodape = "Computador: $env:COMPUTERNAME   Usuario: $env:USERNAME   Data: $((Get-Date).ToString('dd/MM/yyyy HH:mm:ss'))"
+            $g.DrawString($rodape, $fontText, $ink, (New-Object System.Drawing.RectangleF($x, $y, $w, 34)))
+            if ($Detalhe -ne "") { $g.DrawString("Detalhe: $Detalhe", $fontText, $muted, (New-Object System.Drawing.RectangleF($x, ($y + 34), $w, 34))) }
+            $eventArgs.HasMorePages = $false
+        })
+    $doc.Print()
 }
 
 function Test-EnderecoIpv4 {
@@ -9105,6 +9403,113 @@ function Test-EnderecoIpv4 {
     if ($t -notmatch '^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$') { return $false }
     foreach ($i in 1..4) { if ([int]$matches[$i] -gt 255) { return $false } }
     return $true
+}
+
+function New-NomePadraoLpr {
+    param([string]$Fila)
+    $base = "$Fila".Trim()
+    if ($base -eq "") { $base = "IMPRESSORA" }
+    $base = ($base -replace '[_-]+', ' ').Trim().ToUpper()
+    if ($base -notmatch '\bLPR\b') { $base = "$base LPR" }
+    if ($base -notmatch 'COMPARTILHAD') { $base = "$base COMPARTILHADA" }
+    return $base
+}
+
+function Get-IpDePortaImpressora {
+    param([string]$Porta)
+    $p = "$Porta".Trim()
+    if ($p -eq "") { return "" }
+    if (Test-EnderecoIpv4 $p) { return $p }
+    if ($p -match '^IP[_-](\d{1,3}(?:[._-]\d{1,3}){3})') { return ($matches[1] -replace '[_-]', '.') }
+    try {
+        $lpr = @(Get-PortasLpr | Where-Object { $_.Porta -eq $p } | Select-Object -First 1)
+        if ($lpr.Count -gt 0 -and (Test-EnderecoIpv4 $lpr[0].Servidor)) { return $lpr[0].Servidor }
+    }
+    catch {}
+    try {
+        $pp = Get-PrinterPort -Name $p -ErrorAction Stop
+        if ($pp.PrinterHostAddress -and (Test-EnderecoIpv4 "$($pp.PrinterHostAddress)")) { return "$($pp.PrinterHostAddress)" }
+    }
+    catch {}
+    return ""
+}
+
+function Get-PortasInstalacaoImpressora {
+    $lista = @()
+    $usadas = @{}
+    try {
+        foreach ($imp in @(Get-Printer -ErrorAction Stop)) {
+            if ("$($imp.PortName)" -ne "") { $usadas["$($imp.PortName)"] = "$($imp.Name)" }
+        }
+    }
+    catch {}
+
+    try {
+        $portasLprPc = @(Get-NomesPortasMonitor -Monitor "LPR Port")
+        $portasTcpPc = @(Get-NomesPortasMonitor -Monitor "Standard TCP/IP Port")
+        foreach ($p in @(Get-PrinterPort -ErrorAction Stop)) {
+            $nome = "$($p.Name)"
+            if ($nome -eq "" -or $portasLprPc -contains $nome) { continue }
+            $tipo = Get-TipoPortaImpressora -Porta $nome -PortasLpr $portasLprPc -PortasTcp $portasTcpPc
+            if ($tipo -eq "Virtual" -or $tipo -eq "Compartilhada") { continue }
+            $emUso = ""
+            if ($usadas.ContainsKey($nome)) { $emUso = $usadas[$nome] }
+            $lista += [PSCustomObject]@{ Porta = $nome; Tipo = $tipo; Uso = $emUso; Texto = "$nome - $tipo$(if ($emUso) { " (em uso: $emUso)" } else { " (livre)" })" }
+        }
+    }
+    catch {}
+
+    try {
+        foreach ($com in [System.IO.Ports.SerialPort]::GetPortNames()) {
+            $portaCom = "$com"
+            if ($portaCom -notmatch ':$') { $portaCom += ":" }
+            if (@($lista | Where-Object { $_.Porta -eq $portaCom }).Count -gt 0) { continue }
+            $emUso = ""
+            if ($usadas.ContainsKey($portaCom)) { $emUso = $usadas[$portaCom] }
+            $lista += [PSCustomObject]@{ Porta = $portaCom; Tipo = "Serial"; Uso = $emUso; Texto = "$portaCom - Serial$(if ($emUso) { " (em uso: $emUso)" } else { " (livre)" })" }
+        }
+    }
+    catch {}
+
+    return @($lista | Sort-Object @{ Expression = { if ($_.Uso) { 1 } else { 0 } } }, Tipo, Porta)
+}
+
+function New-ImpressoraPortaExistente {
+    param([string]$Nome, [string]$Driver, [string]$Porta)
+    if ($null -ne (Get-Printer -Name $Nome -ErrorAction SilentlyContinue)) {
+        throw "Já existe uma impressora chamada ""$Nome"" neste PC. Escolha outro nome."
+    }
+    $driverInstalado = Install-DriverWindows -Driver $Driver
+    if ($null -eq (Get-PrinterPort -Name $Porta -ErrorAction SilentlyContinue)) {
+        Add-PrinterPort -Name $Porta -ErrorAction Stop
+    }
+    Add-Printer -Name $Nome -DriverName $Driver -PortName $Porta -ErrorAction Stop
+    return @{ Porta = $Porta; Impressora = $Nome; DriverInstalado = $driverInstalado }
+}
+
+function New-ImpressoraTcpRaw {
+    param([string]$IP, [string]$Nome, [string]$Driver, [string]$Porta = "")
+    if ($null -ne (Get-Printer -Name $Nome -ErrorAction SilentlyContinue)) {
+        throw "Já existe uma impressora chamada ""$Nome"" neste PC. Escolha outro nome."
+    }
+    if (-not (Test-EnderecoIpv4 $IP)) { throw "Digite um IP válido, por exemplo 192.168.0.25." }
+    $driverInstalado = Install-DriverWindows -Driver $Driver
+    if ("$Porta".Trim() -eq "") { $Porta = "IP_$IP" }
+    $jaExistia = ($null -ne (Get-PrinterPort -Name $Porta -ErrorAction SilentlyContinue))
+    if (-not $jaExistia) {
+        try { Add-PrinterPort -Name $Porta -PrinterHostAddress $IP -PortNumber 9100 -SNMP 0 -ErrorAction Stop }
+        catch { Add-PrinterPort -Name $Porta -PrinterHostAddress $IP -PortNumber 9100 -ErrorAction Stop }
+    }
+    Add-Printer -Name $Nome -DriverName $Driver -PortName $Porta -ErrorAction Stop
+    return @{ Porta = $Porta; Impressora = $Nome; PortaJaExistia = $jaExistia; DriverInstalado = $driverInstalado }
+}
+
+function New-ImpressoraCompartilhadaWindows {
+    param([string]$Caminho)
+    $c = "$Caminho".Trim()
+    if ($c -notmatch '^\\\\[^\\]+\\[^\\]+') { throw "Digite o caminho no formato \\PC\COMPARTILHAMENTO." }
+    Add-Printer -ConnectionName $c -ErrorAction Stop
+    return @{ Caminho = $c; Impressora = $c }
 }
 
 function Show-PortasLpr {
@@ -9118,10 +9523,10 @@ function Show-PortasLpr {
         # Porta do LPD: sempre 515 no uso real; $Script:LprPorta existe para o teste
         $portaLpd = 515
         if ($Script:LprPorta) { $portaLpd = [int]$Script:LprPorta }
-        $f = New-ToolForm "Portas LPR deste PC" 880 590
+        $f = New-ToolForm "LPR Compartilhada deste PC" 880 590
         $f.MinimumSize = New-Object System.Drawing.Size(880, 590)
 
-        New-ToolLabel $f "PORTAS LPR DESTE COMPUTADOR" 20 14 12 -Negrito | Out-Null
+        New-ToolLabel $f "LPR COMPARTILHADA DESTE COMPUTADOR" 20 14 12 -Negrito | Out-Null
         New-ToolLabel $f "Quando o IP do PC com a impressora USB muda, a porta para de imprimir. Aqui você acha o PC de novo e corrige a porta, sem refazer a impressora." 20 42 9 -Cor $Script:UiSuave -W 830 | Out-Null
 
         $lvLpr = New-Object System.Windows.Forms.ListView
@@ -9138,12 +9543,35 @@ function Show-PortasLpr {
         [void]$lvLpr.Columns.Add("Impressoras", 140)
         [void]$f.Controls.Add($lvLpr)
 
+        $menuLpr = New-Object System.Windows.Forms.ContextMenuStrip
+        $menuLpr.BackColor = $Script:UiCartao
+        $menuLpr.ForeColor = $Script:UiTexto
+        [void]$menuLpr.Items.Add("Copiar IP do PC da impressora", $null, {
+                if ($lvLpr.SelectedItems.Count -eq 0) { return }
+                $ip = "$($lvLpr.SelectedItems[0].Tag.Servidor)"
+                if ($ip -ne "") {
+                    try { Set-Clipboard -Value $ip -ErrorAction Stop }
+                    catch { [System.Windows.Forms.Clipboard]::SetText($ip) }
+                    & $statusLpr "IP copiado: $ip" $Script:UiVerde
+                }
+            })
+        [void]$menuLpr.Items.Add("Copiar porta LPR completa", $null, {
+                if ($lvLpr.SelectedItems.Count -eq 0) { return }
+                $porta = "$($lvLpr.SelectedItems[0].Tag.Porta)"
+                if ($porta -ne "") {
+                    try { Set-Clipboard -Value $porta -ErrorAction Stop }
+                    catch { [System.Windows.Forms.Clipboard]::SetText($porta) }
+                    & $statusLpr "Porta copiada: $porta" $Script:UiVerde
+                }
+            })
+        $lvLpr.ContextMenuStrip = $menuLpr
+
         $btnLprMac = New-ToolButton $f "ATUALIZAR IP PELO MAC" 20 350 220 34 $Script:UiVerde $null "Procura na rede o PC da impressora pelo MAC guardado e corrige a porta para o IP atual dele"
         $btnLprTrocar = New-ToolButton $f "TROCAR IP..." 250 350 140 34 $Script:UiAzul $null "Digitar o IP novo do PC da impressora"
         $btnLprProcurar = New-ToolButton $f "PROCURAR NA REDE" 400 350 180 34 $Script:UiCinza $null "Lista os PCs da rede com o LPD ativo (porta 515) para escolher"
         $btnLprRecarregar = New-ToolButton $f "RECARREGAR" 590 350 130 34 $Script:UiCinza $null "Lê as portas de novo e testa se cada PC responde"
         $btnLprFechar = New-ToolButton $f "FECHAR" 744 350 100 34 $Script:UiCinza $null "Fecha esta janela"
-        $btnLprNova = New-ToolButton $f "NOVA IMPRESSORA LPR" 20 392 220 34 $Script:UiAzul $null "Cria a porta LPR e a impressora neste PC de uma vez, sem o assistente do Windows"
+        $btnLprNova = New-ToolButton $f "NOVA LPR COMPARTILHADA" 20 392 220 34 $Script:UiAzul $null "Cria a porta LPR compartilhada e a impressora neste PC de uma vez, sem o assistente do Windows"
         $btnLprTeste = New-ToolButton $f "IMPRIMIR TESTE" 250 392 140 34 $Script:UiCinza $null "Manda uma folha curta de teste pela impressora que usa a porta selecionada"
         $corRemoverLpr = [System.Drawing.Color]::FromArgb(150, 40, 40)
         $btnLprRemover = New-ToolButton $f "REMOVER PORTA" 400 392 180 34 $corRemoverLpr $null "Apaga a porta selecionada. Só vale para porta que nenhuma impressora usa"
@@ -9238,7 +9666,7 @@ function Show-PortasLpr {
                 if ($semUso.Count -gt 0) { $avisoSemUso = " $($semUso.Count) porta(s) sem impressora: LIMPAR SEM USO apaga." }
                 $pedida = @($lvLpr.Items | Where-Object { $Selecionar -ne "" -and $_.Tag.Porta -eq $Selecionar })
                 if ($lvLpr.Items.Count -eq 0) {
-                    & $statusLpr "Nenhuma porta LPR neste PC. Primeiro adicione a impressora pelo ABRIR ASSISTENTE DO WINDOWS." $Script:UiAmarelo
+                    & $statusLpr "Nenhuma porta LPR compartilhada neste PC. Clique em NOVA LPR COMPARTILHADA para criar." $Script:UiAmarelo
                 }
                 elseif ($semResposta.Count -gt 0) {
                     $semResposta[0].Selected = $true
@@ -9593,10 +10021,10 @@ function Show-PortasLpr {
             return $drvEscolhido
         }
 
-        # Formulario da nova impressora LPR. Devolve Ip / Fila / Nome / Driver ou $null.
+        # Formulario da nova impressora LPR compartilhada. Devolve Ip / Fila / Nome / Driver ou $null.
         $pedirNovaLpr = {
             param([string]$IpInicial = "")
-            $dlg = New-ToolForm "Nova impressora LPR" 540 430
+            $dlg = New-ToolForm "Nova LPR compartilhada" 540 430
             $dlg.FormBorderStyle = 'FixedDialog'
             $dlg.MaximizeBox = $false
             $dlg.MinimizeBox = $false
@@ -9618,8 +10046,8 @@ function Show-PortasLpr {
             $btnNovaAchar = New-ToolButton $dlg "PROCURAR NA REDE" 350 40 150 30 $Script:UiCinza $null "Lista os PCs com o LPD ativo para escolher"
             New-ToolLabel $dlg "Nome do compartilhamento no PC da impressora (fila):" 20 82 9.5 | Out-Null
             $txtNovaFila = & $campoNova 106 320 "IMPRESSORA"
-            New-ToolLabel $dlg "Nome da impressora neste PC:" 20 146 9.5 | Out-Null
-            $txtNovaNome = & $campoNova 170 480 "LPR - IMPRESSORA"
+            New-ToolLabel $dlg "Nome da impressora neste PC (ex.: TOTEM 2 LPR COMPARTILHADA):" 20 146 9.5 | Out-Null
+            $txtNovaNome = & $campoNova 170 480 (New-NomePadraoLpr "IMPRESSORA")
             New-ToolLabel $dlg "Driver (o mesmo instalado no PC da impressora):" 20 210 9.5 | Out-Null
             $cmbNovaDriver = New-Object System.Windows.Forms.ComboBox
             $cmbNovaDriver.Location = New-Object System.Drawing.Point(20, 234)
@@ -9697,7 +10125,7 @@ function Show-PortasLpr {
 
             # O nome acompanha a fila enquanto ninguem mexeu nele
             $Script:LprNomeEditado = $false
-            $txtNovaFila.Add_TextChanged({ if (-not $Script:LprNomeEditado) { $txtNovaNome.Text = "LPR - " + $txtNovaFila.Text.Trim() } })
+            $txtNovaFila.Add_TextChanged({ if (-not $Script:LprNomeEditado) { $txtNovaNome.Text = New-NomePadraoLpr $txtNovaFila.Text } })
             $txtNovaNome.Add_KeyPress({ $Script:LprNomeEditado = $true })
             $btnNovaAchar.Add_Click({
                     $pcsRede = @(& $procurarPcsLpr)
@@ -9734,7 +10162,7 @@ function Show-PortasLpr {
             return $dadosNova
         }
 
-        # Cria porta + impressora; usada pelo NOVA IMPRESSORA LPR e pelo PROCURAR NA REDE
+        # Cria porta + impressora; usada pelo NOVA LPR COMPARTILHADA e pelo PROCURAR NA REDE
         # quando nao ha porta para corrigir.
         $criarNovaLpr = {
                 param([string]$IpInicial = "")
@@ -9794,7 +10222,7 @@ function Show-PortasLpr {
                 $impsPorta = @()
                 try { $impsPorta = @(Get-Printer -ErrorAction Stop | Where-Object { $_.PortName -eq $selLpr.Porta } | ForEach-Object { $_.Name }) } catch {}
                 if ($impsPorta.Count -eq 0) {
-                    & $statusLpr "Nenhuma impressora deste PC usa a porta $($selLpr.Porta). Crie uma com NOVA IMPRESSORA LPR." $Script:UiAmarelo
+                    & $statusLpr "Nenhuma impressora deste PC usa a porta $($selLpr.Porta). Crie uma com NOVA LPR COMPARTILHADA." $Script:UiAmarelo
                     return
                 }
                 & $travarLpr $true
@@ -9863,7 +10291,7 @@ function Show-PrinterManager {
         }
 
         $Script:PrinterManagerForm = New-Object System.Windows.Forms.Form
-        $Script:PrinterManagerForm.Text = "Impressoras: Compartilhamento, LPR e Drivers"; $Script:PrinterManagerForm.Size = "780,650"; $Script:PrinterManagerForm.StartPosition = 'CenterParent'
+        $Script:PrinterManagerForm.Text = "Impressoras: Compartilhamento, LPR Compartilhada e Drivers"; $Script:PrinterManagerForm.Size = "780,650"; $Script:PrinterManagerForm.StartPosition = 'CenterParent'
         $Script:PrinterManagerForm.BackColor = [System.Drawing.Color]::FromArgb(25, 25, 30); $Script:PrinterManagerForm.ForeColor = 'White'
         $Script:PrinterManagerForm.FormBorderStyle = 'FixedDialog'; $Script:PrinterManagerForm.MaximizeBox = $false
 
@@ -9952,7 +10380,7 @@ function Show-PrinterManager {
         $btnTabLocal.BackColor = $tabActiveColor; $btnTabLocal.ForeColor = 'White'
         
         $btnTabLpr = New-Object System.Windows.Forms.Button
-        $btnTabLpr.Text = "USB via LPR (Win 11)"; $btnTabLpr.Size = '210,35'; $btnTabLpr.Location = '220,18'
+        $btnTabLpr.Text = "LPR Compartilhada"; $btnTabLpr.Size = '210,35'; $btnTabLpr.Location = '220,18'
         $btnTabLpr.FlatStyle = 'Flat'; $btnTabLpr.FlatAppearance.BorderSize = 0; $btnTabLpr.Cursor = 'Hand'
         $btnTabLpr.Font = New-Object System.Drawing.Font("Segoe UI", 9.5, [System.Drawing.FontStyle]::Bold)
         $btnTabLpr.BackColor = $tabInactiveColor; $btnTabLpr.ForeColor = 'LightGray'
@@ -10109,7 +10537,7 @@ function Show-PrinterManager {
         # CONTEÚDO DO PAINEL LOCAL (ABA 1)
         # -------------------------------------------------------------
         $lv = New-Object System.Windows.Forms.ListView
-        $lv.Location = '15,15'; $lv.Size = '705,300'
+        $lv.Location = '15,15'; $lv.Size = '705,285'
         $lv.View = 'Details'; $lv.FullRowSelect = $true; $lv.GridLines = $false
         $lv.BackColor = [System.Drawing.Color]::FromArgb(20, 20, 25); $lv.ForeColor = 'WhiteSmoke'
         $lv.BorderStyle = 'None'; $lv.Font = New-Object System.Drawing.Font("Segoe UI", 9.5)
@@ -10155,9 +10583,150 @@ function Show-PrinterManager {
         }
         &$LoadPrinters
 
+        New-ToolLabel $pnlLocal "MANUTENÇÃO" 15 314 8.5 -Negrito -Cor $Script:UiSuave | Out-Null
+        New-ToolLabel $pnlLocal "COMPARTILHAMENTO" 15 381 8.5 -Negrito -Cor $Script:UiSuave | Out-Null
+
+        $ShowInstallPrinterDialog = {
+            $dlg = New-ToolForm "Instalar impressora sem LPR" 620 480
+            $dlg.FormBorderStyle = 'FixedDialog'
+            $dlg.MaximizeBox = $false
+            $dlg.MinimizeBox = $false
+
+            New-ToolLabel $dlg "Tipo de instalação:" 20 18 9.5 | Out-Null
+            $cmbModo = New-Object System.Windows.Forms.ComboBox
+            $cmbModo.Location = '20,42'; $cmbModo.Size = '560,26'
+            $cmbModo.DropDownStyle = 'DropDownList'; $cmbModo.FlatStyle = 'Flat'
+            $cmbModo.BackColor = [System.Drawing.Color]::FromArgb(20, 24, 34); $cmbModo.ForeColor = $Script:UiTexto
+            [void]$cmbModo.Items.Add("Porta existente (USB / COM / LPT / WSD / TCP já criada)")
+            [void]$cmbModo.Items.Add("Rede por IP direto (RAW / JetDirect 9100)")
+            [void]$cmbModo.Items.Add("Compartilhada do Windows (\\PC\NOME)")
+            $cmbModo.SelectedIndex = 0
+            [void]$dlg.Controls.Add($cmbModo)
+
+            $lblNome = New-ToolLabel $dlg "Nome da impressora neste PC:" 20 82 9.5
+            $txtNome = New-Object System.Windows.Forms.TextBox
+            $txtNome.Location = '20,106'; $txtNome.Size = '560,26'
+            $txtNome.BackColor = [System.Drawing.Color]::FromArgb(20, 24, 34); $txtNome.ForeColor = $Script:UiTexto
+            $txtNome.BorderStyle = 'FixedSingle'; $txtNome.Font = New-Object System.Drawing.Font("Segoe UI", 10)
+            $txtNome.Text = "IMPRESSORA USB/REDE"
+            [void]$dlg.Controls.Add($txtNome)
+
+            $lblPorta = New-ToolLabel $dlg "Porta detectada:" 20 146 9.5
+            $cmbPorta = New-Object System.Windows.Forms.ComboBox
+            $cmbPorta.Location = '20,170'; $cmbPorta.Size = '560,26'
+            $cmbPorta.DropDownStyle = 'DropDownList'; $cmbPorta.FlatStyle = 'Flat'
+            $cmbPorta.BackColor = [System.Drawing.Color]::FromArgb(20, 24, 34); $cmbPorta.ForeColor = $Script:UiTexto
+            $cmbPorta.DisplayMember = "Texto"; $cmbPorta.ValueMember = "Porta"
+            foreach ($portaInst in @(Get-PortasInstalacaoImpressora)) { [void]$cmbPorta.Items.Add($portaInst) }
+            if ($cmbPorta.Items.Count -gt 0) { $cmbPorta.SelectedIndex = 0 }
+            [void]$dlg.Controls.Add($cmbPorta)
+
+            $lblIp = New-ToolLabel $dlg "IP da impressora:" 20 146 9.5
+            $txtIp = New-Object System.Windows.Forms.TextBox
+            $txtIp.Location = '20,170'; $txtIp.Size = '240,26'
+            $txtIp.BackColor = [System.Drawing.Color]::FromArgb(20, 24, 34); $txtIp.ForeColor = $Script:UiTexto
+            $txtIp.BorderStyle = 'FixedSingle'; $txtIp.Font = New-Object System.Drawing.Font("Consolas", 10.5)
+            [void]$dlg.Controls.Add($txtIp)
+
+            $lblCompart = New-ToolLabel $dlg "Caminho compartilhado:" 20 146 9.5
+            $txtCompart = New-Object System.Windows.Forms.TextBox
+            $txtCompart.Location = '20,170'; $txtCompart.Size = '560,26'
+            $txtCompart.BackColor = [System.Drawing.Color]::FromArgb(20, 24, 34); $txtCompart.ForeColor = $Script:UiTexto
+            $txtCompart.BorderStyle = 'FixedSingle'; $txtCompart.Font = New-Object System.Drawing.Font("Consolas", 10.5)
+            $txtCompart.Text = "\\PC\IMPRESSORA"
+            [void]$dlg.Controls.Add($txtCompart)
+
+            New-ToolLabel $dlg "Driver:" 20 210 9.5 | Out-Null
+            $cmbDriver = New-Object System.Windows.Forms.ComboBox
+            $cmbDriver.Location = '20,234'; $cmbDriver.Size = '560,26'
+            $cmbDriver.DropDownStyle = 'DropDownList'; $cmbDriver.FlatStyle = 'Flat'
+            $cmbDriver.BackColor = [System.Drawing.Color]::FromArgb(20, 24, 34); $cmbDriver.ForeColor = $Script:UiTexto
+            $driversPc = @()
+            try { $driversPc = @(Get-PrinterDriver -ErrorAction Stop | ForEach-Object { $_.Name }) } catch {}
+            $driversPc = @(@($driversPc) + "Generic / Text Only" | Sort-Object -Unique)
+            foreach ($d in $driversPc) { [void]$cmbDriver.Items.Add($d) }
+            $idxGeneric = $cmbDriver.Items.IndexOf("Generic / Text Only")
+            if ($idxGeneric -ge 0) { $cmbDriver.SelectedIndex = $idxGeneric }
+            elseif ($cmbDriver.Items.Count -gt 0) { $cmbDriver.SelectedIndex = 0 }
+            [void]$dlg.Controls.Add($cmbDriver)
+
+            $lblDicaInst = New-ToolLabel $dlg "Use porta existente para USB/COM/LPT já detectada pelo Windows. Use IP direto para impressoras de rede com porta 9100. Para driver de fabricante, instale pela aba Drivers e volte aqui." 20 274 8.5 -Cor $Script:UiSuave -W 560
+            $lblDicaInst.Height = 54
+
+            $btnCriar = New-ToolButton $dlg "INSTALAR" 380 360 110 34 $Script:UiVerde $null ""
+            $btnCancelar = New-ToolButton $dlg "CANCELAR" 500 360 80 34 $Script:UiCinza $null ""
+
+            $atualizaModo = {
+                $modo = $cmbModo.SelectedIndex
+                $ehPorta = ($modo -eq 0)
+                $ehIp = ($modo -eq 1)
+                $ehCompart = ($modo -eq 2)
+                foreach ($c in @($lblPorta, $cmbPorta)) { $c.Visible = $ehPorta }
+                foreach ($c in @($lblIp, $txtIp)) { $c.Visible = $ehIp }
+                foreach ($c in @($lblCompart, $txtCompart)) { $c.Visible = $ehCompart }
+                foreach ($c in @($lblNome, $txtNome, $cmbDriver)) { $c.Enabled = (-not $ehCompart) }
+                if ($ehIp -and $txtNome.Text -eq "IMPRESSORA USB/REDE") { $txtNome.Text = "IMPRESSORA REDE IP" }
+                if ($ehPorta -and ($txtNome.Text -eq "" -or $txtNome.Text -eq "IMPRESSORA REDE IP")) { $txtNome.Text = "IMPRESSORA USB/REDE" }
+            }
+            $cmbModo.Add_SelectedIndexChanged($atualizaModo)
+            & $atualizaModo
+
+            $btnCriar.Add_Click({
+                    $modo = $cmbModo.SelectedIndex
+                    try {
+                        $dlg.UseWaitCursor = $true
+                        [System.Windows.Forms.Application]::DoEvents()
+                        if ($modo -eq 0) {
+                            if ($cmbPorta.SelectedIndex -lt 0) { throw "Nenhuma porta USB/COM/LPT/TCP foi encontrada. Conecte a impressora ou crie a porta no Windows." }
+                            if ($txtNome.Text.Trim() -eq "") { throw "Dê um nome para a impressora." }
+                            if ($cmbDriver.SelectedIndex -lt 0) { throw "Escolha um driver." }
+                            $portaSel = $cmbPorta.SelectedItem.Porta
+                            $criada = New-ImpressoraPortaExistente -Nome $txtNome.Text.Trim() -Driver "$($cmbDriver.SelectedItem)" -Porta $portaSel
+                            Log-Message "SUCESSO" "Impressora $($criada.Impressora) instalada na porta $($criada.Porta)"
+                            $dlg.Tag = $criada
+                        }
+                        elseif ($modo -eq 1) {
+                            if (-not (Test-EnderecoIpv4 $txtIp.Text)) { throw "Digite um IP válido, por exemplo 192.168.0.25." }
+                            if ($txtNome.Text.Trim() -eq "") { throw "Dê um nome para a impressora." }
+                            if ($cmbDriver.SelectedIndex -lt 0) { throw "Escolha um driver." }
+                            $respondeRaw = (@(Test-PortaVarios -Ips @($txtIp.Text.Trim()) -Porta 9100 -TimeoutMs 1200).Count -gt 0)
+                            if (-not $respondeRaw) {
+                                $r = [System.Windows.Forms.MessageBox]::Show($dlg, "O IP $($txtIp.Text.Trim()) não respondeu na porta 9100 (RAW/JetDirect). Criar mesmo assim?", "Instalar por IP", "YesNo", "Warning")
+                                if ($r -ne [System.Windows.Forms.DialogResult]::Yes) { return }
+                            }
+                            $criada = New-ImpressoraTcpRaw -IP $txtIp.Text.Trim() -Nome $txtNome.Text.Trim() -Driver "$($cmbDriver.SelectedItem)"
+                            Log-Message "SUCESSO" "Impressora $($criada.Impressora) instalada por IP direto na porta $($criada.Porta)"
+                            $dlg.Tag = $criada
+                        }
+                        else {
+                            $criada = New-ImpressoraCompartilhadaWindows -Caminho $txtCompart.Text.Trim()
+                            Log-Message "SUCESSO" "Impressora compartilhada adicionada: $($criada.Caminho)"
+                            $dlg.Tag = $criada
+                        }
+                        $dlg.DialogResult = 'OK'
+                        $dlg.Close()
+                    }
+                    catch {
+                        [System.Windows.Forms.MessageBox]::Show($dlg, "Não foi possível instalar:`r`n`r`n$($_.Exception.Message)", "Instalar impressora", "OK", "Error") | Out-Null
+                    }
+                    finally { $dlg.UseWaitCursor = $false }
+                })
+            $btnCancelar.Add_Click({ $dlg.DialogResult = 'Cancel'; $dlg.Close() })
+            $dlg.AcceptButton = $btnCriar
+            $dlg.CancelButton = $btnCancelar
+            $dlg.Add_Shown({ $txtNome.Focus() | Out-Null; $txtNome.SelectAll() })
+
+            $ok = ($dlg.ShowDialog($Script:PrinterManagerForm) -eq [System.Windows.Forms.DialogResult]::OK)
+            $dlg.Dispose()
+            if ($ok) {
+                &$LoadPrinters
+                [System.Windows.Forms.MessageBox]::Show($Script:PrinterManagerForm, "Impressora instalada. Se quiser, envie um Teste de Impressão pela lista.", "Instalação concluída", "OK", "Information") | Out-Null
+            }
+        }
+
         # Botões de Ação no Painel Local
         $btnRefresh = New-Object System.Windows.Forms.Button
-        $btnRefresh.Text = "Atualizar Lista"; $btnRefresh.Location = '15,330'; $btnRefresh.Size = '130,40'
+        $btnRefresh.Text = "Atualizar Lista"; $btnRefresh.Location = '15,336'; $btnRefresh.Size = '130,34'
         $btnRefresh.BackColor = [System.Drawing.Color]::FromArgb(55, 55, 60); $btnRefresh.FlatStyle = 'Flat'; $btnRefresh.Font = New-Object System.Drawing.Font("Segoe UI", 9.5, [System.Drawing.FontStyle]::Bold)
         $btnRefresh.Cursor = 'Hand'; $btnRefresh.ForeColor = 'White'; $btnRefresh.FlatAppearance.BorderSize = 0
         $btnRefresh.FlatAppearance.MouseOverBackColor = [System.Drawing.Color]::FromArgb(75, 75, 80)
@@ -10166,7 +10735,7 @@ function Show-PrinterManager {
         [void]$pnlLocal.Controls.Add($btnRefresh)
 
         $btnTest = New-Object System.Windows.Forms.Button
-        $btnTest.Text = "Página de Teste"; $btnTest.Location = '155,330'; $btnTest.Size = '140,40'
+        $btnTest.Text = "Teste de Impressão"; $btnTest.Location = '155,336'; $btnTest.Size = '165,34'
         $btnTest.BackColor = [System.Drawing.Color]::FromArgb(55, 55, 60); $btnTest.FlatStyle = 'Flat'; $btnTest.Font = New-Object System.Drawing.Font("Segoe UI", 9.5, [System.Drawing.FontStyle]::Bold)
         $btnTest.Cursor = 'Hand'; $btnTest.ForeColor = 'White'; $btnTest.FlatAppearance.BorderSize = 0
         $btnTest.FlatAppearance.MouseOverBackColor = [System.Drawing.Color]::FromArgb(75, 75, 80)
@@ -10177,18 +10746,31 @@ function Show-PrinterManager {
                 return 
             }
             $pName = $lv.SelectedItems[0].Text
+            $textoOriginalTeste = $btnTest.Text
             try {
-                $wmi = Get-WmiObject Win32_Printer -Filter "Name='$($pName -replace "'", "\'")'"
-                $wmi.PrintTestPage() | Out-Null
-                Log-Message "SUCESSO" "Página de teste enviada para: $pName"
-            } catch {
-                Log-Message "ERRO" "Falha ao imprimir página de teste: $_"
+                $btnTest.Enabled = $false
+                $btnTest.Text = "Enviando..."
+                $btnTest.BackColor = $Script:UiAzul
+                $Script:PrinterManagerForm.UseWaitCursor = $true
+                [System.Windows.Forms.Application]::DoEvents()
+                Send-TesteImpressao -Impressora $pName -Detalhe "Teste enviado pela aba Impressoras Locais"
+                Log-Message "SUCESSO" "Teste do Preparador enviado para: $pName"
+            }
+            catch {
+                Log-Message "ERRO" "Falha ao imprimir teste de impressão: $_"
+                [System.Windows.Forms.MessageBox]::Show("Falha ao enviar o teste:`r`n`r`n$($_.Exception.Message)", "Teste de Impressão", "OK", "Error") | Out-Null
+            }
+            finally {
+                $btnTest.Text = $textoOriginalTeste
+                $btnTest.BackColor = [System.Drawing.Color]::FromArgb(55, 55, 60)
+                $btnTest.Enabled = $true
+                $Script:PrinterManagerForm.UseWaitCursor = $false
             }
         })
         [void]$pnlLocal.Controls.Add($btnTest)
 
         $btnShare = New-Object System.Windows.Forms.Button
-        $btnShare.Text = "Compartilhar"; $btnShare.Location = '305,330'; $btnShare.Size = '130,40'
+        $btnShare.Text = "Compartilhar"; $btnShare.Location = '15,403'; $btnShare.Size = '140,34'
         $btnShare.BackColor = [System.Drawing.Color]::FromArgb(14, 88, 62); $btnShare.FlatStyle = 'Flat'; $btnShare.Font = New-Object System.Drawing.Font("Segoe UI", 9.5, [System.Drawing.FontStyle]::Bold)
         $btnShare.Cursor = 'Hand'; $btnShare.ForeColor = 'White'; $btnShare.FlatAppearance.BorderSize = 0
         $btnShare.FlatAppearance.MouseOverBackColor = [System.Drawing.Color]::FromArgb(20, 112, 80)
@@ -10295,7 +10877,7 @@ function Show-PrinterManager {
         [void]$pnlLocal.Controls.Add($btnShare)
 
         $btnUnshare = New-Object System.Windows.Forms.Button
-        $btnUnshare.Text = "Remover Compart."; $btnUnshare.Location = '445,330'; $btnUnshare.Size = '140,40'
+        $btnUnshare.Text = "Remover Compart."; $btnUnshare.Location = '165,403'; $btnUnshare.Size = '165,34'
         $btnUnshare.BackColor = [System.Drawing.Color]::FromArgb(120, 30, 30); $btnUnshare.FlatStyle = 'Flat'; $btnUnshare.Font = New-Object System.Drawing.Font("Segoe UI", 9.5, [System.Drawing.FontStyle]::Bold)
         $btnUnshare.Cursor = 'Hand'; $btnUnshare.ForeColor = 'White'; $btnUnshare.FlatAppearance.BorderSize = 0
         $btnUnshare.FlatAppearance.MouseOverBackColor = [System.Drawing.Color]::FromArgb(145, 45, 45)
@@ -10319,7 +10901,7 @@ function Show-PrinterManager {
         [void]$pnlLocal.Controls.Add($btnUnshare)
 
         $btnCopyPath = New-Object System.Windows.Forms.Button
-        $btnCopyPath.Text = "Copiar Caminho"; $btnCopyPath.Location = '595,330'; $btnCopyPath.Size = '125,40'
+        $btnCopyPath.Text = "Copiar Caminho"; $btnCopyPath.Location = '340,403'; $btnCopyPath.Size = '155,34'
         $btnCopyPath.BackColor = [System.Drawing.Color]::FromArgb(14, 88, 62); $btnCopyPath.FlatStyle = 'Flat'; $btnCopyPath.Font = New-Object System.Drawing.Font("Segoe UI", 9.5, [System.Drawing.FontStyle]::Bold)
         $btnCopyPath.Cursor = 'Hand'; $btnCopyPath.ForeColor = 'White'; $btnCopyPath.FlatAppearance.BorderSize = 0
         $btnCopyPath.FlatAppearance.MouseOverBackColor = [System.Drawing.Color]::FromArgb(20, 112, 80)
@@ -10346,9 +10928,44 @@ function Show-PrinterManager {
         })
         [void]$pnlLocal.Controls.Add($btnCopyPath)
 
+        $btnCopyPrinterIp = New-Object System.Windows.Forms.Button
+        $btnCopyPrinterIp.Text = "Copiar IP/Porta"; $btnCopyPrinterIp.Location = '505,403'; $btnCopyPrinterIp.Size = '215,34'
+        $btnCopyPrinterIp.BackColor = [System.Drawing.Color]::FromArgb(55, 55, 60); $btnCopyPrinterIp.FlatStyle = 'Flat'; $btnCopyPrinterIp.Font = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold)
+        $btnCopyPrinterIp.Cursor = 'Hand'; $btnCopyPrinterIp.ForeColor = 'White'; $btnCopyPrinterIp.FlatAppearance.BorderSize = 0
+        $btnCopyPrinterIp.FlatAppearance.MouseOverBackColor = [System.Drawing.Color]::FromArgb(75, 75, 80)
+        $btnCopyPrinterIp.Add_Click({
+            if ($lv.SelectedItems.Count -eq 0) {
+                [System.Windows.Forms.MessageBox]::Show("Selecione uma impressora na lista primeiro.", "Copiar IP/Porta", "OK", "Warning") | Out-Null
+                return
+            }
+            $portaSel = "$($lv.SelectedItems[0].Tag.Porta)"
+            $ipPorta = Get-IpDePortaImpressora -Porta $portaSel
+            $valorCopiar = if ($ipPorta -ne "") { $ipPorta } else { $portaSel }
+            if ($valorCopiar -eq "") {
+                [System.Windows.Forms.MessageBox]::Show("Essa impressora não tem porta/IP identificado.", "Copiar IP/Porta", "OK", "Information") | Out-Null
+                return
+            }
+            try { Set-Clipboard -Value $valorCopiar -ErrorAction Stop }
+            catch { [System.Windows.Forms.Clipboard]::SetText($valorCopiar) }
+            Log-Message "INFO" "Impressora: copiado IP/porta $valorCopiar"
+            [System.Windows.Forms.MessageBox]::Show("Copiado para a Área de Transferência:`r`n`r`n$valorCopiar", "IP/Porta copiado", "OK", "Information") | Out-Null
+        })
+        if ($Script:ToolTip) { $Script:ToolTip.SetToolTip($btnCopyPrinterIp, "Copia o IP da porta quando existir; se não tiver IP, copia o nome da porta da impressora.") }
+        [void]$pnlLocal.Controls.Add($btnCopyPrinterIp)
+
+        $btnInstallNoLpr = New-Object System.Windows.Forms.Button
+        $btnInstallNoLpr.Text = "INSTALAR USB/COM/IP SEM LPR"; $btnInstallNoLpr.Location = '15,466'; $btnInstallNoLpr.Size = '230,40'
+        $btnInstallNoLpr.BackColor = [System.Drawing.Color]::FromArgb(25, 90, 120); $btnInstallNoLpr.FlatStyle = 'Flat'; $btnInstallNoLpr.Font = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold)
+        $btnInstallNoLpr.Cursor = 'Hand'; $btnInstallNoLpr.ForeColor = 'White'; $btnInstallNoLpr.FlatAppearance.BorderSize = 0
+        $btnInstallNoLpr.FlatAppearance.MouseOverBackColor = [System.Drawing.Color]::FromArgb(40, 110, 145)
+        $btnInstallNoLpr.Add_Click({ & $ShowInstallPrinterDialog })
+        if ($Script:ToolTip) { $Script:ToolTip.SetToolTip($btnInstallNoLpr, "Instala impressora em porta USB/COM/LPT detectada, IP direto RAW/9100 ou compartilhamento Windows, sem LPR.") }
+        [void]$pnlLocal.Controls.Add($btnInstallNoLpr)
+
         $lblSep = New-Object System.Windows.Forms.Label
-        $lblSep.Text = "________________________________________________________________________________________________________"
-        $lblSep.Location = '15,390'; $lblSep.Size = '705,20'; $lblSep.ForeColor = 'Gray'
+        $lblSep.Text = "INSTALAÇÃO E REDE"
+        $lblSep.Location = '15,444'; $lblSep.Size = '705,20'; $lblSep.ForeColor = $Script:UiSuave
+        $lblSep.Font = New-Object System.Drawing.Font("Segoe UI", 8.5, [System.Drawing.FontStyle]::Bold)
         [void]$pnlLocal.Controls.Add($lblSep)
 
         # Atalho para a janela das portas LPR, ja com a impressora selecionada
@@ -10360,7 +10977,7 @@ function Show-PrinterManager {
             &$LoadPrinters
         }
         $btnLprLocal = New-Object System.Windows.Forms.Button
-        $btnLprLocal.Text = "PORTAS LPR (TROCAR IP)"; $btnLprLocal.Location = '15,420'; $btnLprLocal.Size = '345,45'
+        $btnLprLocal.Text = "LPR COMPARTILHADA"; $btnLprLocal.Location = '255,466'; $btnLprLocal.Size = '220,40'
         $btnLprLocal.BackColor = [System.Drawing.Color]::FromArgb(25, 90, 120); $btnLprLocal.FlatStyle = 'Flat'; $btnLprLocal.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
         $btnLprLocal.Cursor = 'Hand'; $btnLprLocal.ForeColor = 'White'; $btnLprLocal.FlatAppearance.BorderSize = 0
         $btnLprLocal.FlatAppearance.MouseOverBackColor = [System.Drawing.Color]::FromArgb(40, 110, 145)
@@ -10373,7 +10990,7 @@ function Show-PrinterManager {
         [void]$pnlLocal.Controls.Add($btnLprLocal)
 
         $btnSpool = New-Object System.Windows.Forms.Button
-        $btnSpool.Text = "REINICIAR SPOOLER DE IMPRESSÃO"; $btnSpool.Location = '375,420'; $btnSpool.Size = '345,45'
+        $btnSpool.Text = "REINICIAR SPOOLER"; $btnSpool.Location = '485,466'; $btnSpool.Size = '235,40'
         $btnSpool.BackColor = [System.Drawing.Color]::FromArgb(50, 55, 60); $btnSpool.FlatStyle = 'Flat'; $btnSpool.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
         $btnSpool.Cursor = 'Hand'; $btnSpool.ForeColor = 'White'; $btnSpool.FlatAppearance.BorderSize = 0
         $btnSpool.FlatAppearance.MouseOverBackColor = [System.Drawing.Color]::FromArgb(70, 75, 80)
@@ -10387,7 +11004,7 @@ function Show-PrinterManager {
         # CONTEÚDO DO PAINEL LPR/LPD (ABA 2)
         # -------------------------------------------------------------
         $lblLprTitle = New-Object System.Windows.Forms.Label
-        $lblLprTitle.Text = "COMPARTILHAMENTO USB VIA REDE LPR/LPD (Evita Erros 0x00000709 / 0x0000011b)"; $lblLprTitle.Location = '15,15'; $lblLprTitle.Size = '700,25'
+        $lblLprTitle.Text = "IMPRESSORA LPR COMPARTILHADA VIA REDE (Evita Erros 0x00000709 / 0x0000011b)"; $lblLprTitle.Location = '15,15'; $lblLprTitle.Size = '700,25'
         $lblLprTitle.Font = New-Object System.Drawing.Font("Segoe UI", 9.5, [System.Drawing.FontStyle]::Bold)
         $lblLprTitle.ForeColor = [System.Drawing.Color]::Gold
         [void]$pnlLpr.Controls.Add($lblLprTitle)
@@ -10660,13 +11277,13 @@ COLA RÁPIDA - INSTALAR VIA LPR
                     # Sem reiniciar, o Windows ainda nao deixa criar a porta LPR
                     [System.Windows.Forms.MessageBox]::Show(
                         $Script:PrinterManagerForm,
-                        "Monitor LPR instalado, mas o Windows pediu REINICIO para ele valer.`n`nReinicie o computador e depois clique em 'PORTAS LPR: CRIAR, TESTAR E TROCAR IP' para criar a porta e a impressora.",
+                        "Monitor LPR instalado, mas o Windows pediu REINICIO para ele valer.`n`nReinicie o computador e depois clique em 'LPR COMPARTILHADA: CRIAR, TESTAR E TROCAR IP' para criar a porta e a impressora.",
                         "LPR Configurado", "OK", "Warning") | Out-Null
                 }
                 else {
                     [System.Windows.Forms.MessageBox]::Show(
                         $Script:PrinterManagerForm,
-                        "Monitor LPR ativado!`n`nAgora é só criar a porta e a impressora: a tela de nova impressora LPR abre em seguida.",
+                        "Monitor LPR ativado!`n`nAgora é só criar a porta e a impressora: a tela de nova LPR compartilhada abre em seguida.",
                         "LPR Configurado", "OK", "Information") | Out-Null
                     # Abre depois do finally, com o botao ja liberado
                     $abrirNovaLpr = $true
@@ -10699,7 +11316,7 @@ COLA RÁPIDA - INSTALAR VIA LPR
 
         # IP do PC da impressora mudou: lista as portas LPR e corrige sem refazer a impressora
         $btnPortasLpr = New-Object System.Windows.Forms.Button
-        $btnPortasLpr.Text = "PORTAS LPR: CRIAR, TESTAR E TROCAR IP"; $btnPortasLpr.Location = '15,235'; $btnPortasLpr.Size = '315,45'
+        $btnPortasLpr.Text = "LPR COMPARTILHADA: CRIAR E TESTAR"; $btnPortasLpr.Location = '15,235'; $btnPortasLpr.Size = '315,45'
         $btnPortasLpr.BackColor = [System.Drawing.Color]::FromArgb(25, 90, 120); $btnPortasLpr.FlatStyle = 'Flat'; $btnPortasLpr.Font = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold)
         $btnPortasLpr.Cursor = 'Hand'; $btnPortasLpr.ForeColor = 'White'; $btnPortasLpr.FlatAppearance.BorderSize = 0
         $btnPortasLpr.FlatAppearance.MouseOverBackColor = [System.Drawing.Color]::FromArgb(40, 110, 145)
@@ -10712,7 +11329,7 @@ COLA RÁPIDA - INSTALAR VIA LPR
         $txtInstLpr.Location = '15,292'; $txtInstLpr.Size = '315,143'
         $txtInstLpr.ReadOnly = $true; $txtInstLpr.BackColor = [System.Drawing.Color]::FromArgb(25, 25, 30); $txtInstLpr.ForeColor = 'LightYellow'
         $txtInstLpr.BorderStyle = 'None'; $txtInstLpr.Font = New-Object System.Drawing.Font("Segoe UI", 8.5)
-        $txtInstLpr.Text = "AJUDA DE INSTALAÇÃO (LPR):`n1. Criar nova porta -> LPR Port`n2. Servidor: [IP do PC com o cabo USB]`n3. Nome da fila: [Nome Compartilhado] (ex: IMPRESSORA)`n4. Escolha o driver correspondente.`n`nMAIS RÁPIDO: PORTAS LPR > NOVA IMPRESSORA LPR`n(cria a porta e a impressora de uma vez).`n`nSE O IP DO PC DA IMPRESSORA MUDAR:`nPORTAS LPR > ATUALIZAR IP PELO MAC."
+        $txtInstLpr.Text = "AJUDA DE INSTALAÇÃO (LPR COMPARTILHADA):`n1. Servidor: [IP do PC com o cabo USB]`n2. Fila: [Nome Compartilhado] (ex: IMPRESSORA)`n3. Nome sugerido: TOTEM 2 LPR COMPARTILHADA`n4. Escolha o driver correspondente.`n`nMAIS RÁPIDO: LPR COMPARTILHADA > NOVA LPR COMPARTILHADA.`n`nSE O IP DO PC DA IMPRESSORA MUDAR:`nATUALIZAR IP PELO MAC."
         [void]$pnlClientCard.Controls.Add($txtInstLpr)
 
         $Script:PrinterManagerForm.Add_FormClosing({ $Script:PrinterManagerForm = $null })
@@ -11862,6 +12479,100 @@ function Start-Download {
     }
 }
 
+function Get-PdvEdgeExecutable {
+    $paths = @(
+        "C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+        "C:\Program Files\Microsoft\Edge\Application\msedge.exe"
+    )
+    foreach ($p in $paths) {
+        if (Test-Path -LiteralPath $p) { return $p }
+    }
+    try {
+        $cmd = Get-Command "msedge.exe" -ErrorAction Stop
+        if ($cmd.Source -and (Test-Path -LiteralPath $cmd.Source)) { return $cmd.Source }
+    }
+    catch {}
+    return ""
+}
+
+function New-PdvEdgeShortcut {
+    param([string]$DesktopPath = "")
+
+    $edge = Get-PdvEdgeExecutable
+    if ($edge -eq "") { throw "Microsoft Edge não foi encontrado neste computador." }
+
+    if ($DesktopPath -eq "") {
+        $DesktopPath = [Environment]::GetFolderPath('CommonDesktopDirectory')
+        if ($DesktopPath -eq "") { $DesktopPath = [Environment]::GetFolderPath('DesktopDirectory') }
+    }
+    if ($DesktopPath -eq "") { throw "Não foi possível localizar a Área de Trabalho." }
+    if (!(Test-Path -LiteralPath $DesktopPath)) { New-Item -Path $DesktopPath -ItemType Directory -Force | Out-Null }
+
+    $lnkPath = Join-Path $DesktopPath "PDV EDGE.lnk"
+    $pdvDir = "C:\NetControll\NetPDV"
+    $pdvIndex = Join-Path $pdvDir "index.html"
+    $pdvIcon = Join-Path $pdvDir "favicon.ico"
+
+    $shell = New-Object -ComObject WScript.Shell
+    $lnk = $shell.CreateShortcut($lnkPath)
+    $lnk.TargetPath = $edge
+    $lnk.Arguments = "--start-fullscreen --app=file:///C:/NetControll/NetPdv/index.html"
+    $lnk.WorkingDirectory = $pdvDir
+    $lnk.WindowStyle = 3
+    if (Test-Path -LiteralPath $pdvIcon) { $lnk.IconLocation = "$pdvIcon,0" }
+    else { $lnk.IconLocation = "$edge,0" }
+    $lnk.Save()
+
+    return [pscustomobject]@{
+        Path = $lnkPath
+        Edge = $edge
+        PdvIndexExists = (Test-Path -LiteralPath $pdvIndex)
+    }
+}
+
+function Install-PdvEdgeShortcut {
+    param($Button)
+
+    $originalText = $Button.Text
+    $originalBack = $Button.BackColor
+    try {
+        $Button.Text = "Criando atalho..."
+        $Button.Enabled = $false
+        [System.Windows.Forms.Application]::DoEvents()
+
+        try {
+            $info = New-PdvEdgeShortcut
+        }
+        catch {
+            $userDesktop = [Environment]::GetFolderPath('DesktopDirectory')
+            $info = New-PdvEdgeShortcut -DesktopPath $userDesktop
+        }
+
+        Log-Message "SUCESSO" "Atalho PDV EDGE criado: $($info.Path)"
+        $msg = "Atalho PDV EDGE criado na Área de Trabalho:`n`n$($info.Path)"
+        if (-not $info.PdvIndexExists) {
+            $msg += "`n`nAviso: não encontrei C:\NetControll\NetPDV\index.html. O atalho foi criado, mas o PDV precisa estar instalado nessa pasta para abrir."
+        }
+        [System.Windows.Forms.MessageBox]::Show($msg, "PDV EDGE", "OK", "Information") | Out-Null
+        $Button.Text = "✔ $originalText"
+        Set-ButtonDone -Button $Button -Label "ATALHO CRIADO"
+    }
+    catch {
+        Log-Message "ERRO" "Falha ao criar atalho PDV EDGE: $($_.Exception.Message)"
+        [System.Windows.Forms.MessageBox]::Show("Falha ao criar o atalho PDV EDGE:`n`n$($_.Exception.Message)", "PDV EDGE", "OK", "Error") | Out-Null
+        $Button.Text = "Erro"
+        Set-ButtonDone -Button $Button -Label "FALHOU" -Kind 'erro' -Nome $originalText
+    }
+    finally {
+        $Button.Enabled = $true
+        $Button.BackColor = $originalBack
+        Wait-UI 1
+        Clear-ButtonDone -Button $Button
+        $Button.Text = $originalText
+        if ($Script:StatusLabel) { $Script:StatusLabel.Text = "Pronto." }
+    }
+}
+
 function Install-VSPE-Combined {
     param($Button)
     if ($Script:IsDownloading) { 
@@ -12855,6 +13566,9 @@ function Add-Btn {
         # Link resolvido na hora do clique (a Elgin troca a versao sem aviso)
         $b.Add_Click({ Install-TefHub $this })
     }
+    elseif ($U -eq "PDV-EDGE-SHORTCUT") {
+        $b.Add_Click({ Install-PdvEdgeShortcut $this })
+    }
     else {
         $b.Tag = "$U|$F"; $b.Add_Click({ $d = $this.Tag.Split('|'); Start-Download $d[0] $d[1] $this })
     }
@@ -12921,6 +13635,7 @@ $bVspe.Add_Click({ Install-VSPE-Combined $this })
 Add-Btn "TeamViewer Full" "" "https://download.teamviewer.com/download/TeamViewer_Setup_x64.exe" "Teamviewer.exe" -Help "Cliente completo para acesso remoto TeamViewer."
 Add-Btn "AnyDesk" "" "https://download.anydesk.com/AnyDesk.exe" "AnyDesk.exe" -Help "Ferramenta de acesso remoto AnyDesk."
 Add-Btn "Google Chrome" "" "https://github.com/VMazza10/Preparador-de-Ambiente-XMenu/releases/download/Chrome/ChromeSetup.exe" "ChromeSetup.exe" -Help "Instalador online do navegador Google Chrome."
+Add-Btn "PDV EDGE (Criar Atalho)" "" "PDV-EDGE-SHORTCUT" "" -Color $colorBlue -Help "Cria na Área de Trabalho o atalho do NetPDV para abrir pelo Microsoft Edge em modo aplicativo/tela cheia."
 Add-Btn "Revo Uninstaller" "" "https://download.revouninstaller.com/download/revosetup.exe" "revosetup.exe" -Help "Utilitário para desinstalação completa de programas e limpeza de restos."
 Add-Btn "TEF HUB Windows (x86 - sempre a versão atual)" "" "TEFHUB-X86" "" -Help "Consulta o GitHub oficial da Elgin no momento do clique e baixa a versão x86 mais recente do TEF HUB. Não precisa mais trocar o link na mão."
 Add-Btn "Advanced IP Scanner" "" "https://download.advanced-ip-scanner.com/download/files/Advanced_IP_Scanner_2.5.4594.1.exe" "Advanced_IP_Scanner.exe" -Help "Ferramenta de varredura de rede local Advanced IP Scanner."
@@ -12971,7 +13686,7 @@ $colorGray = [System.Drawing.Color]::FromArgb(50, 55, 60)
 $colorCyan = [System.Drawing.Color]::FromArgb(25, 75, 95)
 
 $bPrintMgr = New-Object System.Windows.Forms.Button; $bPrintMgr.Height = 50; $bPrintMgr.Dock = 'Top'
-$bPrintMgr.Text = "Impressoras: Compartilhamento, LPR e Drivers"; $bPrintMgr.Font = New-Object System.Drawing.Font("Segoe UI", 11, [System.Drawing.FontStyle]::Bold)
+$bPrintMgr.Text = "Impressoras: Compart., LPR Compart. e Drivers"; $bPrintMgr.Font = New-Object System.Drawing.Font("Segoe UI", 11, [System.Drawing.FontStyle]::Bold)
 $bPrintMgr.Cursor = 'Hand'
 Format-SupportBtn $bPrintMgr $colorCyan
 $Script:ToolTip.SetToolTip($bPrintMgr, "Gerencia impressoras locais, compartilhamentos e configura rede via protocolo LPR/LPD para corrigir erros no Windows 11.")
