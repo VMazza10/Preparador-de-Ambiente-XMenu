@@ -1,6 +1,6 @@
 ﻿# =============================================================================
 # PREPARADOR XMENU - VERSAO REVENDA
-# Baseado na v5.13
+# Baseado na v5.14
 # Alteracoes Revenda:
 #   - Wallpaper: fundo_revenda.png
 #   - Removido: Atalhos de Suporte e Pasta Netcontroll
@@ -11927,6 +11927,7 @@ function Open-Selector {
 
     $versions = @()
     if ($Type -eq "PDV") {
+        $versions += @{Name = "NetPDV v1.3.68.0"; Url = "https://netcontroll.com.br/util/instaladores/netpdv/1.3/68/0/NetPDV.zip"; File = "NetPDV_1.3.68.0.zip" }
         $versions += @{Name = "NetPDV v1.3.67.0"; Url = "https://netcontroll.com.br/util/instaladores/netpdv/1.3/67/0/NetPDV.zip"; File = "NetPDV_1.3.67.0.zip" }
         $versions += @{Name = "NetPDV v1.3.64.0"; Url = "https://netcontroll.com.br/util/instaladores/netpdv/1.3/64/0/NetPDV.zip"; File = "NetPDV_1.3.64.0.zip" }
         $versions += @{Name = "NetPDV v1.3.63.0"; Url = "https://netcontroll.com.br/util/instaladores/netpdv/1.3/63/0/NetPDV.zip"; File = "NetPDV_1.3.63.0.zip" }
@@ -12427,7 +12428,7 @@ $formWidth = if ($screen.Width -lt 1000) { 900 } else { 1000 }
 $formHeight = if ($screen.Height -lt 800) { 700 } else { 800 }
 
 $form = New-Object System.Windows.Forms.Form
-$form.Text = "Preparador XMenu – Suporte Técnico v5.13 - REVENDA"
+$form.Text = "Preparador XMenu – Suporte Técnico v5.14 - REVENDA"
 $form.Size = New-Object System.Drawing.Size($formWidth, $formHeight)
 $form.StartPosition = "CenterScreen"
 $form.BackColor = [System.Drawing.Color]::FromArgb(25, 25, 30); $form.ForeColor = 'White'
@@ -13030,7 +13031,7 @@ $bClock.Add_Click({ Invoke-ClockSync })
 [void]$tbl.Controls.Add($bClock)
 
 # Mensagem de abertura: explica o programa para quem abre pela primeira vez
-Log-Message "INFO" "Preparador XMenu v5.13 - REVENDA - preparo e suporte de computadores com XMenu e NetPDV"
+Log-Message "INFO" "Preparador XMenu v5.14 - REVENDA - preparo e suporte de computadores com XMenu e NetPDV"
 Log-Message "LOG" "==============================================================="
 Log-Message "LOG" "COMO USAR"
 Log-Message "LOG" "  PREPARAR AMBIENTE WINDOWS .. ajusta energia, UAC e desempenho do PC num clique"
@@ -13040,7 +13041,8 @@ Log-Message "LOG" "  EXTERNOS ................... acesso remoto, Chrome, TEF HUB
 Log-Message "LOG" "  SUPORTE E DIAGNÓSTICO ...... impressoras, rede, SQL, backup, XMLs e reparos do Windows"
 Log-Message "LOG" "  Passe o mouse sobre um botão para ver o que ele faz antes de clicar."
 Log-Message "LOG" "---------------------------------------------------------------"
-Log-Message "LOG" "NOVO NA v5.13"
+Log-Message "LOG" "NOVO NA v5.14"
+Log-Message "SUCESSO" "  NetPDV: versão 1.3.68.0 (ZIP) na lista de versões, já vem selecionada"
 Log-Message "SUCESSO" "  XMLs e Backup: servidor padrão agora é localhost (127.0.0.1 não conectava em algumas máquinas)"
 Log-Message "SUCESSO" "  XMLs e Backup: campo Usuário do SQL (sa ou sa2, ou digite outro) e senha editável"
 Log-Message "SUCESSO" "  XMLs NFC-e: a busca carrega o resultado em memória - acha a nota em qualquer PC"
