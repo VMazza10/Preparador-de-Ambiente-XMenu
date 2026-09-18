@@ -1,5 +1,5 @@
 ﻿# =============================================================================
-# PREPARADOR XMENU v5.12
+# PREPARADOR XMENU v5.13
 # Visual: Dashboard Moderno
 # Correcoes:
 #   - CRITICO: Removido DoEvents do loop de evento de download (causava crash).
@@ -2728,14 +2728,19 @@ function Show-XmlDownloader {
         # conteudo e conferido: ja apareceu cliente com esse arquivo gravado noutra
         # codificacao, e o campo Servidor abria cheio de caractere estranho. Nome de
         # servidor so tem letras, numeros, ponto, traco, barra invertida e virgula (porta).
-        $srvInicial = "127.0.0.1"
+        $srvInicial = "localhost"
+        $usuarioInicial = Get-SqlUsuarioSalvo
         try {
             if (Test-Path $Script:XmlArqServidor) {
                 $lido = "$([System.IO.File]::ReadAllText($Script:XmlArqServidor, [System.Text.Encoding]::UTF8))"
                 $lido = ($lido -split "`n")[0]
                 $lido = ($lido -replace "[`0`r`n]", "").Trim()
-                if ($lido -match '^[A-Za-z0-9._\\,\-]{1,80}$') { $srvInicial = $lido }
-                elseif ($lido -ne "") { Log-Message "ERRO" "XMLs: o arquivo do último servidor estava ilegível; voltando para 127.0.0.1" }
+                if ($lido -match '^[A-Za-z0-9._\\,\-]{1,80}$') {
+                    # Versao antiga gravava 127.0.0.1, que em algumas maquinas nao conecta
+                    if ($lido -eq "127.0.0.1") { $lido = "localhost" }
+                    $srvInicial = $lido
+                }
+                elseif ($lido -ne "") { Log-Message "ERRO" "XMLs: o arquivo do último servidor estava ilegível; voltando para localhost" }
             }
         }
         catch {}
@@ -2817,14 +2822,18 @@ function Show-XmlDownloader {
         $cardConn = & $novoCartao 12 10 960 80
         New-ToolLabel $cardConn "CONEXÃO COM O BANCO" 14 8 10 -Negrito | Out-Null
         New-ToolLabel $cardConn "Servidor:" 14 36 9 -Cor $Script:UiSuave | Out-Null
-        $txtServidor = & $novoCampo $cardConn 78 33 160 $srvInicial
-        New-ToolLabel $cardConn "Senha:" 254 36 9 -Cor $Script:UiSuave | Out-Null
-        $txtSenha = & $novoCampo $cardConn 302 33 120 $senhaPadrao
-        New-ToolLabel $cardConn "Parceiro:" 438 36 9 -Cor $Script:UiSuave | Out-Null
-        $cmbParceiro = & $novaCombo $cardConn 498 33 110
+        $txtServidor = & $novoCampo $cardConn 72 33 140 $srvInicial
+        New-ToolLabel $cardConn "Usuário:" 222 36 9 -Cor $Script:UiSuave | Out-Null
+        $cmbUsuario = & $novaCombo $cardConn 276 33 64 -Editavel
+        foreach ($usr in $Script:SqlUsuariosPadrao) { [void]$cmbUsuario.Items.Add($usr) }
+        $cmbUsuario.Text = $usuarioInicial
+        New-ToolLabel $cardConn "Senha:" 348 36 9 -Cor $Script:UiSuave | Out-Null
+        $txtSenha = & $novoCampo $cardConn 392 33 92 $senhaPadrao
+        New-ToolLabel $cardConn "Parceiro:" 494 36 9 -Cor $Script:UiSuave | Out-Null
+        $cmbParceiro = & $novaCombo $cardConn 552 33 84
         $dicaTestar = "Conecta no banco $bancoPadrao, mostra a versao do SQL e carrega parceiros e series"
-        $btnTestar = New-ToolButton $cardConn "TESTAR CONEXÃO" 624 32 150 27 $Script:UiAzul $null $dicaTestar
-        $btnPendentes = New-ToolButton $cardConn "NOTAS PENDENTES" 786 32 160 27 $Script:UiAmarelo $null "Lista as NFC-e que não subiram: sem autorização da SEFAZ e sem inutilização, com a situação e o motivo (sem resposta, rejeitada, contingência não enviada, ignorada)."
+        $btnTestar = New-ToolButton $cardConn "TESTAR CONEXÃO" 646 32 140 27 $Script:UiAzul $null $dicaTestar
+        $btnPendentes = New-ToolButton $cardConn "NOTAS PENDENTES" 794 32 152 27 $Script:UiAmarelo $null "Lista as NFC-e que não subiram: sem autorização da SEFAZ e sem inutilização, com a situação e o motivo (sem resposta, rejeitada, contingência não enviada, ignorada)."
         $lblConn = New-ToolLabel $cardConn "Informe o servidor e clique em TESTAR CONEXÃO." 14 60 9 -Cor $Script:UiSuave -W 930
         # Certificado: so aparece quando o banco emite com mais de um (IDServidorFiscal).
         # Raro, mas nesses clientes as duas empresas usam a mesma serie e os numeros se repetem.
@@ -2976,8 +2985,9 @@ function Show-XmlDownloader {
         # Cada campo explica a si mesmo no balao, para nao precisar abrir a ajuda.
         # Fica aqui no fim porque todos os controles ja tem que existir.
         if ($Script:ToolTip) {
-            $Script:ToolTip.SetToolTip($txtServidor, "Onde está o SQL Server. Deixe 127.0.0.1 quando o banco roda na própria máquina; use o IP ou o nome do servidor quando o PDV é terminal. A janela lembra o último usado.")
-            $Script:ToolTip.SetToolTip($txtSenha, "Senha do usuário sa. Nos clientes é sempre netcontroll; só mude se esse cliente tiver senha diferente.")
+            $Script:ToolTip.SetToolTip($txtServidor, "Onde está o SQL Server. Deixe localhost quando o banco roda na própria máquina; use o IP ou o nome do servidor quando o PDV é terminal. A janela lembra o último usado.")
+            $Script:ToolTip.SetToolTip($cmbUsuario, "Usuário do SQL. A maioria dos clientes usa sa; alguns usam sa2. Dá para digitar outro. A janela lembra o último que conectou.")
+            $Script:ToolTip.SetToolTip($txtSenha, "Senha do usuário escolhido. Nos clientes com sa costuma ser netcontroll; quem usa sa2 (ou outro usuário) normalmente tem outra senha - digite aqui.")
             $Script:ToolTip.SetToolTip($cmbParceiro, "Código da loja dentro do banco. Carrega sozinho ao testar a conexão. Quando só existe um, já vem escolhido.")
             $Script:ToolTip.SetToolTip($cmbCert, "Este banco emite NFC-e com mais de um certificado (uma empresa em cada caixa). Escolha de qual empresa são as notas; em Todos, cada empresa sai no seu próprio lote e zip. O nome vem do certificado que assinou as notas.")
             $Script:ToolTip.SetToolTip($rbSerie, "O modo mais usado: você sabe a série e os números das notas que o cliente pediu.")
@@ -3081,15 +3091,13 @@ function Show-XmlDownloader {
         $novaConexao = {
             param([int]$Timeout = 8)
             $srv = "$($txtServidor.Text)".Trim()
-            if ($srv -eq "") { $srv = "127.0.0.1" }
-            # Servidor remoto vai forcado por TCP. Sem protocolo, quando o TCP falha o
-            # SqlClient ainda tenta Named Pipes, que ignora o Connect Timeout: IP
-            # errado levava de 11 a 24 s para dar erro. A propria maquina fica como
-            # esta (memoria compartilhada) e quem ja digitou "tcp:"/"np:" tambem.
-            $local = '^(\.|\(local\)|localhost|127\.0\.0\.1|' + [regex]::Escape($env:COMPUTERNAME) + ')([\\,]|$)'
-            if ($srv -notmatch ':' -and $srv -notmatch $local) { $srv = "tcp:" + $srv }
-            $senha = "$($txtSenha.Text)"
-            $cs = "Server=$srv;Database=$bancoPadrao;User Id=sa;Password=$senha;Connect Timeout=$Timeout;TrustServerCertificate=True"
+            if ($srv -eq "") { $srv = "localhost" }
+            $usuario = "$($cmbUsuario.Text)".Trim()
+            if ($usuario -eq "") { $usuario = "sa" }
+            # New-SqlTextoConexao cuida do TCP forcado para servidor remoto (sem isso, IP
+            # errado levava de 11 a 24 s para dar erro), deixa a propria maquina em
+            # memoria compartilhada e monta a senha com seguranca (aceita ; e aspas)
+            $cs = New-SqlTextoConexao -Servidor $srv -Usuario $usuario -Senha "$($txtSenha.Text)" -Banco $bancoPadrao -Timeout $Timeout
             return (New-Object System.Data.SqlClient.SqlConnection($cs))
         }
 
@@ -3182,7 +3190,10 @@ function Show-XmlDownloader {
             $sql = $Erro
             while ($null -ne $sql -and $sql -isnot [System.Data.SqlClient.SqlException]) { $sql = $sql.InnerException }
             if ($null -eq $sql) { return "$($Erro.Message)" }
-            if ($sql.Number -eq 18456) { return "O SQL em $srv recusou o usuário sa com essa senha." }
+            if ($sql.Number -eq 18456) {
+                $usrRecusado = "$($cmbUsuario.Text)".Trim()
+                return "O SQL em $srv recusou o usuário $usrRecusado com essa senha. Se este cliente usa outro usuário (sa2, por exemplo) ou outra senha, ajuste os campos Usuário e Senha."
+            }
             if ($sql.Number -eq 4060) { return "Conectou em $srv, mas o banco $bancoPadrao não existe nesse SQL." }
             if ($sql.Number -eq 11001) { return "Não achei o servidor ""$srv"" na rede. Confira o nome ou use o IP." }
             if (@(-1, 2, 26, 40, 53, 64, 258, 1225, 10060, 10061, 10065) -contains $sql.Number) {
@@ -3417,7 +3428,7 @@ function Show-XmlDownloader {
                 $btnTestar.Enabled = $false
                 $lblConn.ForeColor = $Script:UiAmarelo
                 $srvTexto = "$($txtServidor.Text)".Trim()
-                if ($srvTexto -eq "") { $srvTexto = "127.0.0.1" }
+                if ($srvTexto -eq "") { $srvTexto = "localhost" }
                 $lblConn.Text = "Conectando em $srvTexto..."
 
                 if ($Auto) { $cn = & $abrirConexao 3 $lblConn } else { $cn = & $abrirConexao 5 $lblConn }
@@ -3461,7 +3472,8 @@ function Show-XmlDownloader {
                     Log-Message "INFO" "XMLs: $versao"
                 }
                 else { $lblConn.Text = "OK - $versao | banco: $banco | parceiros: $($cmbParceiro.Items.Count) | séries: $($cmbSerie.Items.Count)" }
-                Log-Message "SUCESSO" "XMLs: conectado em $($txtServidor.Text) / $banco"
+                Log-Message "SUCESSO" "XMLs: conectado em $($txtServidor.Text) / $banco como $("$($cmbUsuario.Text)".Trim())"
+                Save-SqlUsuario "$($cmbUsuario.Text)"
 
                 # Lembra o servidor para a proxima abertura. Grava direto em UTF-8, sem
                 # passar pelo Out-File: com a codificacao errada o arquivo voltava como
@@ -5635,13 +5647,47 @@ function Show-XmlDownloader {
 # isso a janela roda no servidor e libera a pasta de destino para essa conta.
 # -----------------------------------------------------------------------------
 
+# Usuarios de SQL que aparecem na lista. A maioria dos clientes usa sa; alguns usam
+# sa2 (com outra senha). O campo e editavel: qualquer outro usuario pode ser digitado.
+$Script:SqlUsuariosPadrao = @("sa", "sa2")
+
+function Get-SqlUsuarioSalvo {
+    # Ultimo usuario que conectou. Guarda so o nome do usuario, nunca a senha.
+    $u = "sa"
+    try {
+        $arq = Join-Path $Script:DownloadFolder "sql_ultimo_usuario.txt"
+        if (Test-Path $arq) {
+            $lido = "$([System.IO.File]::ReadAllText($arq, [System.Text.Encoding]::UTF8))"
+            $lido = (($lido -split "`n")[0] -replace "[`0`r`n]", "").Trim()
+            if ($lido -match '^[A-Za-z0-9_.\-]{1,30}$') { $u = $lido }
+        }
+    }
+    catch {}
+    return $u
+}
+
+function Save-SqlUsuario {
+    param([string]$Usuario)
+    try {
+        $u = "$Usuario".Trim()
+        if ($u -match '^[A-Za-z0-9_.\-]{1,30}$') {
+            [System.IO.File]::WriteAllText((Join-Path $Script:DownloadFolder "sql_ultimo_usuario.txt"), $u, (New-Object System.Text.UTF8Encoding($false)))
+        }
+    }
+    catch {}
+}
+
 function New-SqlTextoConexao {
-    # Texto de conexao com o usuario sa. Servidor remoto vai forcado por TCP: sem
-    # protocolo, quando o TCP falha o SqlClient ainda tenta Named Pipes, que ignora
-    # o Connect Timeout (IP errado levava ate 24 s para dar erro).
-    param([string]$Servidor, [string]$Senha, [string]$Banco = "master", [int]$Timeout = 8)
+    # Texto de conexao com o usuario informado (sa por padrao). Servidor remoto vai
+    # forcado por TCP: sem protocolo, quando o TCP falha o SqlClient ainda tenta Named
+    # Pipes, que ignora o Connect Timeout (IP errado levava ate 24 s para dar erro).
+    param([string]$Servidor, [string]$Senha, [string]$Banco = "master", [int]$Timeout = 8, [string]$Usuario = "sa")
     $srv = "$Servidor".Trim()
-    if ($srv -eq "") { $srv = "127.0.0.1" }
+    # "localhost" e nao 127.0.0.1: em algumas maquinas o IP nao conecta e o nome sim
+    # (o nome deixa o SqlClient usar memoria compartilhada quando o SQL e local)
+    if ($srv -eq "") { $srv = "localhost" }
+    $Usuario = "$Usuario".Trim()
+    if ($Usuario -eq "") { $Usuario = "sa" }
     $local = '^(\.|\(local\)|localhost|127\.0\.0\.1|' + [regex]::Escape($env:COMPUTERNAME) + ')([\\,]|$)'
     if ($srv -notmatch ':' -and $srv -notmatch $local) { $srv = "tcp:" + $srv }
     # O builder cuida de senha com ; ou aspas. Pelas chaves: no PowerShell ele e um
@@ -5649,7 +5695,7 @@ function New-SqlTextoConexao {
     $b = New-Object System.Data.SqlClient.SqlConnectionStringBuilder
     $b["Data Source"] = $srv
     $b["Initial Catalog"] = $Banco
-    $b["User ID"] = "sa"
+    $b["User ID"] = $Usuario
     $b["Password"] = $Senha
     $b["Connect Timeout"] = $Timeout
     $b["TrustServerCertificate"] = $true
@@ -5772,7 +5818,7 @@ function Get-BackupErroTexto {
     $sql = $Erro
     while ($null -ne $sql -and $sql -isnot [System.Data.SqlClient.SqlException]) { $sql = $sql.InnerException }
     if ($null -ne $sql) {
-        if ($sql.Number -eq 18456) { return "O SQL Server recusou o usuário sa com essa senha." }
+        if ($sql.Number -eq 18456) { return "O SQL Server recusou esse usuário e senha. Se este cliente usa sa2 (ou outra senha), ajuste os campos Usuário e Senha." }
         if (@(-1, 2, 26, 40, 53, 64, 258, 1225, 10060, 10061, 10065, 11001) -contains $sql.Number) {
             return "Não achei o SQL Server nesta máquina. Confira em Serviços do SQL Server se ele está iniciado."
         }
@@ -6122,10 +6168,21 @@ function Show-BackupBanco {
         $cardConn = & $novoCartao 70 86
         New-ToolLabel $cardConn "CONEXÃO" 14 8 10 -Negrito | Out-Null
         New-ToolLabel $cardConn "Servidor:" 14 38 9 -Cor $Script:UiSuave | Out-Null
-        $txtBkpServidor = & $novoCampo $cardConn 80 35 150 "127.0.0.1"
-        New-ToolLabel $cardConn "Senha:" 246 38 9 -Cor $Script:UiSuave | Out-Null
-        $txtBkpSenha = & $novoCampo $cardConn 294 35 130 "netcontroll"
-        $btnBkpTestar = New-ToolButton $cardConn "TESTAR CONEXÃO" 440 34 150 27 $Script:UiAzul $null "Conecta no SQL Server desta máquina e lista os bancos"
+        $txtBkpServidor = & $novoCampo $cardConn 72 35 130 "localhost"
+        New-ToolLabel $cardConn "Usuário:" 212 38 9 -Cor $Script:UiSuave | Out-Null
+        $cmbBkpUsuario = New-Object System.Windows.Forms.ComboBox
+        $cmbBkpUsuario.Location = New-Object System.Drawing.Point(266, 35)
+        $cmbBkpUsuario.Width = 64
+        $cmbBkpUsuario.DropDownStyle = 'DropDown'
+        $cmbBkpUsuario.FlatStyle = 'Flat'
+        $cmbBkpUsuario.BackColor = [System.Drawing.Color]::FromArgb(20, 24, 34)
+        $cmbBkpUsuario.ForeColor = $Script:UiTexto
+        foreach ($usr in $Script:SqlUsuariosPadrao) { [void]$cmbBkpUsuario.Items.Add($usr) }
+        $cmbBkpUsuario.Text = (Get-SqlUsuarioSalvo)
+        [void]$cardConn.Controls.Add($cmbBkpUsuario)
+        New-ToolLabel $cardConn "Senha:" 340 38 9 -Cor $Script:UiSuave | Out-Null
+        $txtBkpSenha = & $novoCampo $cardConn 384 35 110 "netcontroll"
+        $btnBkpTestar = New-ToolButton $cardConn "TESTAR CONEXÃO" 508 34 150 27 $Script:UiAzul $null "Conecta no SQL Server desta máquina e lista os bancos"
         $lblBkpConn = New-ToolLabel $cardConn "Conectando..." 14 64 9 -Cor $Script:UiSuave -W 700
 
         # O QUE SALVAR
@@ -6174,7 +6231,9 @@ function Show-BackupBanco {
         $lblBkpStatus = New-ToolLabel $f "O banco continua no ar durante o backup: o PDV não trava e ninguém precisa parar de vender." 20 430 9 -Cor $Script:UiSuave -W 724
 
         if ($Script:ToolTip) {
-            $Script:ToolTip.SetToolTip($txtBkpServidor, "Deixe 127.0.0.1: o backup é gravado no disco da máquina do SQL, então o Preparador precisa estar rodando nela.")
+            $Script:ToolTip.SetToolTip($txtBkpServidor, "Deixe localhost: o backup é gravado no disco da máquina do SQL, então o Preparador precisa estar rodando nela.")
+            $Script:ToolTip.SetToolTip($cmbBkpUsuario, "Usuário do SQL. A maioria dos clientes usa sa; alguns usam sa2. Dá para digitar outro.")
+            $Script:ToolTip.SetToolTip($txtBkpSenha, "Senha do usuário escolhido. Com sa costuma ser netcontroll; com sa2 (ou outro usuário) normalmente é outra - digite aqui.")
             $Script:ToolTip.SetToolTip($cmbBkpBanco, "Bancos de usuário desse SQL Server. O netwebpdv já vem escolhido quando existe.")
             $Script:ToolTip.SetToolTip($lblBkpPasta, "Pasta fixa dos backups, dentro de Arquivos Xmenu na Área de Trabalho.")
             $Script:ToolTip.SetToolTip($chkBkpZip, "O .bak tem o tamanho dos dados. Compactado costuma ficar 80 a 90% menor, bom para WeTransfer ou pendrive.")
@@ -6208,7 +6267,7 @@ function Show-BackupBanco {
                 $lblBkpConn.Text = "Conectando..."
                 $limite = 8
                 if ($Auto) { $limite = 3 }
-                $cnTeste = New-Object System.Data.SqlClient.SqlConnection((New-SqlTextoConexao -Servidor $txtBkpServidor.Text -Senha $txtBkpSenha.Text -Timeout $limite))
+                $cnTeste = New-Object System.Data.SqlClient.SqlConnection((New-SqlTextoConexao -Servidor $txtBkpServidor.Text -Usuario $cmbBkpUsuario.Text -Senha $txtBkpSenha.Text -Timeout $limite))
                 Wait-SqlTarefa $cnTeste.OpenAsync()
 
                 $cmdTeste = $cnTeste.CreateCommand()
@@ -6260,6 +6319,8 @@ function Show-BackupBanco {
                 }
                 $lblBkpConn.ForeColor = $Script:UiVerde
                 $lblBkpConn.Text = "OK - $versaoSql | máquina: $maquinaSql | bancos: $($cmbBkpBanco.Items.Count)"
+                # Lembra o usuario que conectou (so o nome, nunca a senha)
+                Save-SqlUsuario "$($cmbBkpUsuario.Text)"
                 $btnBkpFazer.Enabled = $true
             }
             catch {
@@ -6279,7 +6340,7 @@ function Show-BackupBanco {
             if ($Script:BkpOcupado -or "$($cmbBkpBanco.Text)" -eq "") { return }
             $Script:BkpOcupado = $true
             $Script:BkpCancelar = $false
-            $travados = @($btnBkpFazer, $btnBkpTestar, $cmbBkpBanco, $chkBkpZip, $txtBkpServidor, $txtBkpSenha)
+            $travados = @($btnBkpFazer, $btnBkpTestar, $cmbBkpBanco, $chkBkpZip, $txtBkpServidor, $cmbBkpUsuario, $txtBkpSenha)
             foreach ($ctl in $travados) { $ctl.Enabled = $false }
             $btnBkpCancelar.Enabled = $true
             $bancoEscolhido = "$($cmbBkpBanco.Text)"
@@ -6288,7 +6349,7 @@ function Show-BackupBanco {
             Log-Message "INFO" "Backup: iniciando o backup do banco $bancoEscolhido em $($Script:BackupPasta)"
             try {
                 $argsBkp = @{
-                    TextoConexao = (New-SqlTextoConexao -Servidor $txtBkpServidor.Text -Senha $txtBkpSenha.Text -Timeout 15)
+                    TextoConexao = (New-SqlTextoConexao -Servidor $txtBkpServidor.Text -Usuario $cmbBkpUsuario.Text -Senha $txtBkpSenha.Text -Timeout 15)
                     Banco        = $bancoEscolhido
                     Pasta        = $Script:BackupPasta
                     Compactar    = $chkBkpZip.Checked
@@ -12448,7 +12509,7 @@ $formWidth = if ($screen.Width -lt 1200) { $screen.Width - 50 } else { 1200 }
 $formHeight = if ($screen.Height -lt 900) { $screen.Height - 50 } else { 900 }
 
 $form = New-Object System.Windows.Forms.Form
-$form.Text = "Preparador XMenu – Suporte Técnico v5.12"
+$form.Text = "Preparador XMenu – Suporte Técnico v5.13"
 $form.Size = New-Object System.Drawing.Size($formWidth, $formHeight)
 $form.StartPosition = "CenterScreen"
 $form.BackColor = [System.Drawing.Color]::FromArgb(25, 25, 30); $form.ForeColor = 'White'
@@ -13054,7 +13115,7 @@ $bClock.Add_Click({ Invoke-ClockSync })
 [void]$tbl.Controls.Add($bClock)
 
 # Mensagem de abertura: explica o programa para quem abre pela primeira vez
-Log-Message "INFO" "Preparador XMenu v5.12 - preparo e suporte de computadores com XMenu e NetPDV"
+Log-Message "INFO" "Preparador XMenu v5.13 - preparo e suporte de computadores com XMenu e NetPDV"
 Log-Message "LOG" "==============================================================="
 Log-Message "LOG" "COMO USAR"
 Log-Message "LOG" "  PREPARAR AMBIENTE WINDOWS .. ajusta energia, UAC e desempenho do PC num clique"
@@ -13064,13 +13125,11 @@ Log-Message "LOG" "  EXTERNOS ................... acesso remoto, Chrome, TEF HUB
 Log-Message "LOG" "  SUPORTE E DIAGNÓSTICO ...... impressoras, rede, SQL, backup, XMLs e reparos do Windows"
 Log-Message "LOG" "  Passe o mouse sobre um botão para ver o que ele faz antes de clicar."
 Log-Message "LOG" "---------------------------------------------------------------"
-Log-Message "LOG" "NOVO NA v5.12"
+Log-Message "LOG" "NOVO NA v5.13"
+Log-Message "SUCESSO" "  XMLs e Backup: servidor padrão agora é localhost (127.0.0.1 não conectava em algumas máquinas)"
+Log-Message "SUCESSO" "  XMLs e Backup: campo Usuário do SQL (sa ou sa2, ou digite outro) e senha editável"
 Log-Message "SUCESSO" "  XMLs NFC-e: a busca carrega o resultado em memória - acha a nota em qualquer PC"
 Log-Message "SUCESSO" "  O registro (log) passa a ser gravado também em Arquivos Xmenu > Logs"
-Log-Message "SUCESSO" "  XMLs NFC-e: em PC antigo, a busca refaz a consulta sem parâmetros quando não vem nada"
-Log-Message "SUCESSO" "  Corrigido: arquivo do último servidor ilegível deixava o campo Servidor com lixo"
-Log-Message "SUCESSO" "  Zoom só em monitor pequeno de verdade (até 1024x640); nos demais nada muda"
-Log-Message "SUCESSO" "  XMLs NFC-e: busca com segunda tentativa, para SQL antigo (2008 R2) que não trazia as notas"
 Log-Message "SUCESSO" "  XMLs NFC-e: busca vazia agora diz onde as notas estão (parceiro e série certos)"
 Log-Message "SUCESSO" "  Scanner de rede: mostra a marca e, quando o aparelho responde, o modelo da impressora"
 Log-Message "SUCESSO" "  Lista de notas aceita colar separado por espaço, TAB ou uma por linha (planilha)"
