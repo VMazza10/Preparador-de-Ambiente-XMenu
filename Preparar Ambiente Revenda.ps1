@@ -1,6 +1,6 @@
 ﻿# =============================================================================
 # PREPARADOR XMENU - VERSAO REVENDA
-# Baseado na v5.31
+# Baseado na v5.32
 # Alteracoes Revenda:
 #   - Wallpaper: fundo_revenda.png
 #   - Removido: Atalhos de Suporte e Pasta Netcontroll
@@ -6314,6 +6314,19 @@ function Show-DbSwapNetWebPdv {
         $btnAtualizar.Anchor = 'Bottom,Left'
         $btnFechar = New-ToolButton $f "FECHAR" 820 678 120 36 $Script:UiCinza { $f.Close() }
         $btnFechar.Anchor = 'Bottom,Right'
+        # Depois da troca: roda o AjustesInstalacao (Atualizar Banco) e abre o Concentrador. Vem marcada.
+        $chkPosTroca = New-Object System.Windows.Forms.CheckBox
+        $chkPosTroca.Text = "Atualizar banco e abrir o Concentrador"
+        $chkPosTroca.Checked = $true
+        $chkPosTroca.Font = New-Object System.Drawing.Font("Segoe UI", 9.5, [System.Drawing.FontStyle]::Bold)
+        $chkPosTroca.ForeColor = $Script:UiTexto
+        $chkPosTroca.BackColor = [System.Drawing.Color]::Transparent
+        $chkPosTroca.UseMnemonic = $false
+        $chkPosTroca.Cursor = 'Hand'
+        $chkPosTroca.SetBounds(440, 684, 285, 24)
+        $chkPosTroca.Anchor = 'Bottom,Left'
+        [void]$f.Controls.Add($chkPosTroca)
+        if ($Script:ToolTip) { $Script:ToolTip.SetToolTip($chkPosTroca, "Depois de trocar o banco, o Preparador abre o AjustesInstalacao.exe da pasta NetControll, clica em Atualizar Banco, espera terminar (a janela fecha sozinha) e abre o Concentrador.exe.`r`nDesmarque para fazer isso manualmente.") }
 
         $txtSrv.TabIndex = 0
         $cmbUsr.TabIndex = 1
@@ -6339,7 +6352,9 @@ function Show-DbSwapNetWebPdv {
         $setOcupado = {
             param([bool]$Ocupado)
             $Script:DbSwapOcupado = $Ocupado
-            foreach ($ctl in @($btnLocalizar, $btnTrocar, $btnAtualizar, $btnFechar, $txtSrv, $cmbUsr, $txtSenha, $txtBanco, $txtRaiz, $txtNovaRaiz, $lv)) {
+            # A lista fica habilitada de proposito: desabilitada, a area vazia dela ficava cinza-clara (e a atualizacao do Ajustes leva minutos).
+            # Mexer nela durante a operacao e inofensivo: o $trocar e o cartao do banco novo conferem $Script:DbSwapOcupado.
+            foreach ($ctl in @($btnLocalizar, $btnTrocar, $btnAtualizar, $btnFechar, $txtSrv, $cmbUsr, $txtSenha, $txtBanco, $txtRaiz, $txtNovaRaiz)) {
                 if ($ctl) { $ctl.Enabled = -not $Ocupado }
             }
             if (-not $Ocupado) {
@@ -6667,6 +6682,81 @@ SELECT
                 if ($zipLeitura) { try { $zipLeitura.Dispose() } catch {} }
             }
         }
+        # Depois da troca: roda o AjustesInstalacao (clica em Atualizar Banco), espera ele terminar e abre o Concentrador.
+        # Se algo sair do previsto, avisa o motivo e NAO abre o Concentrador: a troca do banco ja foi feita e continua valendo.
+        $posTroca = {
+            $pasta = "$($txtRaiz.Text)".Trim()
+            & $setOcupado $true
+            try {
+                $lblStatus.ForeColor = $Script:UiAmarelo
+                $lblStatus.Text = "Atualizando o banco: AjustesInstalacao em andamento..."
+                & $addLog "Abrindo o AjustesInstalacao e clicando em Atualizar Banco..."
+                $timeoutSeg = if ($Script:AjustesTimeoutSeg) { [int]$Script:AjustesTimeoutSeg } else { 1200 }
+                $esperaSeg = if ($Script:AjustesEsperaBotaoSeg) { [int]$Script:AjustesEsperaBotaoSeg } else { 40 }
+                $resAjustes = @(Invoke-AtualizarBancoAjustes -PastaNetControll $pasta -TimeoutSeg $timeoutSeg -EsperaBotaoSeg $esperaSeg -AoProgresso { param($seg) $lblStatus.Text = "Atualizando o banco: AjustesInstalacao em andamento ($seg s)..." })
+                $resAjustes = $resAjustes[$resAjustes.Count - 1]
+                if ($resAjustes.Status -eq 'Concluido') {
+                    & $addLog "AjustesInstalacao concluído em $($resAjustes.Segundos) s."
+                    $concentradorExe = Join-Path $pasta "Concentrador.exe"
+                    $abriu = $false
+                    $motivoNaoAbriu = ""
+                    if (Get-Process -Name "Concentrador" -ErrorAction SilentlyContinue) {
+                        $abriu = $true
+                        & $addLog "O Concentrador já estava aberto."
+                    }
+                    elseif (-not (Test-Path -LiteralPath $concentradorExe)) { $motivoNaoAbriu = "Não encontrei o Concentrador.exe em $pasta." }
+                    else {
+                        try {
+                            $psiConc = New-Object System.Diagnostics.ProcessStartInfo
+                            $psiConc.FileName = $concentradorExe
+                            $psiConc.WorkingDirectory = $pasta
+                            $psiConc.UseShellExecute = $true
+                            [void][System.Diagnostics.Process]::Start($psiConc)
+                            $abriu = $true
+                            & $addLog "Concentrador aberto."
+                        }
+                        catch { $motivoNaoAbriu = "$($_.Exception.Message)" }
+                    }
+                    if ($abriu) {
+                        $lblStatus.ForeColor = $Script:UiVerde
+                        $lblStatus.Text = "Banco trocado, atualizado e Concentrador aberto."
+                        try {
+                            [void](Show-AvisoDestaque -Dono $f -Titulo "Atualização do banco" -Manchete "BANCO ATUALIZADO E CONCENTRADOR ABERTO" -Resumo "O AjustesInstalacao terminou em $($resAjustes.Segundos) segundo(s) e o Concentrador foi aberto." -Tipo 'ok' `
+                                    -Itens @(@{ Tipo = 'ok'; Titulo = 'BANCO ATUALIZADO'; Texto = 'O Preparador clicou em Atualizar Banco no AjustesInstalacao e esperou a barra terminar.' }) -TextoSim "OK")
+                        }
+                        catch { [System.Windows.Forms.MessageBox]::Show("Banco atualizado e Concentrador aberto.", "Atualização do banco", "OK", "Information") | Out-Null }
+                    }
+                    else {
+                        & $addLog "AVISO: banco atualizado, mas o Concentrador não abriu: $motivoNaoAbriu"
+                        $lblStatus.ForeColor = $Script:UiAmarelo
+                        $lblStatus.Text = "Banco atualizado, mas o Concentrador não abriu: $motivoNaoAbriu"
+                        try {
+                            [void](Show-AvisoDestaque -Dono $f -Titulo "Atualização do banco" -Manchete "BANCO ATUALIZADO, MAS O CONCENTRADOR NÃO ABRIU" -Resumo "O AjustesInstalacao terminou normalmente. Abra o Concentrador manualmente." -Tipo 'aviso' `
+                                    -Itens @(@{ Tipo = 'alerta'; Titulo = 'O QUE ACONTECEU'; Texto = "$motivoNaoAbriu" }) -TextoSim "OK")
+                        }
+                        catch { [System.Windows.Forms.MessageBox]::Show("Banco atualizado, mas o Concentrador não abriu: $motivoNaoAbriu", "Atualização do banco", "OK", "Warning") | Out-Null }
+                    }
+                }
+                else {
+                    # Se o clique automatico nao deu certo, o Ajustes fica aberto na tela para o tecnico terminar na mao
+                    $textoComoSeguir = if ($resAjustes.Status -in @('SemBotao', 'Dialogo', 'Timeout')) { 'O AjustesInstalacao ficou aberto na tela: termine nele (botão Atualizar Banco) e depois abra o Concentrador. O Concentrador não foi aberto.' } else { 'Abra o AjustesInstalacao, clique em Atualizar Banco e depois abra o Concentrador. O Concentrador não foi aberto.' }
+                    & $addLog "AVISO: a atualização automática não terminou ($($resAjustes.Status)): $($resAjustes.Mensagem)"
+                    $lblStatus.ForeColor = $Script:UiAmarelo
+                    $lblStatus.Text = "Banco trocado. A atualização automática não terminou: $($resAjustes.Mensagem)"
+                    try {
+                        [void](Show-AvisoDestaque -Dono $f -Titulo "Atualização do banco" -Manchete "A ATUALIZAÇÃO AUTOMÁTICA NÃO TERMINOU" -Resumo "A troca do banco já foi feita e está certa. Falta só concluir o AjustesInstalacao." -Tipo 'aviso' `
+                                -Itens @(@{ Tipo = 'alerta'; Titulo = 'O QUE ACONTECEU'; Texto = "$($resAjustes.Mensagem)" }, @{ Tipo = 'info'; Titulo = 'COMO SEGUIR'; Texto = $textoComoSeguir }) -TextoSim "ENTENDI")
+                    }
+                    catch { [System.Windows.Forms.MessageBox]::Show("A atualização automática não terminou.`r`n`r`n$($resAjustes.Mensagem)`r`n`r`nA troca do banco já foi feita. Termine no AjustesInstalacao e abra o Concentrador.", "Atualização do banco", "OK", "Warning") | Out-Null }
+                }
+            }
+            catch {
+                & $addLog "ERRO no passo depois da troca: $($_.Exception.Message)"
+                $lblStatus.ForeColor = $Script:UiVermelho
+                $lblStatus.Text = "Banco trocado. Erro ao atualizar o banco automaticamente: $($_.Exception.Message)"
+            }
+            finally { & $setOcupado $false }
+        }
         $trocar = {
             if ($Script:DbSwapOcupado -or $lv.SelectedItems.Count -eq 0 -or $null -eq $Script:DbSwapAtual) { return }
             $cand = $lv.SelectedItems[0].Tag
@@ -6741,6 +6831,9 @@ SELECT
                 }
                 else { $itensAviso += @{ Tipo = 'info'; Titulo = ''; Texto = 'Se algum programa NetControll estiver aberto, ele será fechado automaticamente.' } }
                 $itensAviso += @{ Tipo = 'ok'; Titulo = 'BACKUP AUTOMÁTICO DO BANCO ANTIGO'; Texto = "O banco e o log atuais serão guardados juntos em um ZIP validado em: $pastaBackupData" }
+                if ($chkPosTroca.Checked) {
+                    $itensAviso += @{ Tipo = 'info'; Titulo = 'DEPOIS DA TROCA (AUTOMÁTICO)'; Texto = 'O Preparador abre o AjustesInstalacao, clica em Atualizar Banco, espera terminar e abre o Concentrador. Para fazer isso manualmente, cancele e desmarque a caixa da tela.' }
+                }
                 $detalheAtual = "Banco $(Format-TamanhoBanco $atual.MdfKb) + log $(Format-TamanhoBanco $atual.LdfKb)`r`n$($atual.Banco)"
                 if ($atual.Data) { $detalheAtual += ("`r`nAlterado em {0:dd/MM/yyyy HH:mm}" -f $atual.Data) }
                 $detalheNovo = ("Banco $(Format-TamanhoBanco $cand.MdfKb) + log $(Format-TamanhoBanco $cand.LdfKb)`r`nVersão de {0:dd/MM/yyyy HH:mm}`r`n$($cand.Pasta)" -f $cand.Data)
@@ -6766,6 +6859,7 @@ SELECT
             $oldLdfBackup = ""
             $copiouNovo = $false
             $desanexouAtual = $false
+            $trocaConcluida = $false
             try {
                 & $closeBancoApps
 
@@ -6854,6 +6948,7 @@ SELECT
                     & $addLog "AVISO: não foi possível criar o ZIP ($($compactacao.Erro)). Os dois arquivos foram mantidos em $backupDir."
                 }
                 & $addLog "Banco trocado com sucesso. Backup antigo: $backupDestinoFinal"
+                $trocaConcluida = $true
                 $lblStatus.ForeColor = $Script:UiVerde
                 $lblStatus.Text = "Banco trocado com sucesso. Backup em $backupDestinoFinal"
                 try {
@@ -6916,6 +7011,11 @@ SELECT
             finally {
                 if ($cn) { try { $cn.Close() } catch {} }
                 & $setOcupado $false
+            }
+            # Fora do try da troca de proposito: uma falha aqui nunca pode acionar o desfazer de uma troca que deu certo
+            if ($trocaConcluida -and $chkPosTroca.Checked) {
+                try { & $posTroca }
+                catch { & $addLog "ERRO no passo depois da troca: $($_.Exception.Message)" }
             }
         }
 
@@ -7483,7 +7583,9 @@ function Show-SqlIndexAdvisor {
         $setOcupado = {
             param([bool]$Ocupado)
             $Script:IdxOcupado = $Ocupado
-            foreach ($ctl in @($btnIdxTestar, $btnIdxBuscar, $btnIdxTop, $btnIdxLimpar, $btnIdxCopiar, $btnIdxAplicar, $btnIdxAplicarTodos, $cmbIdxBanco, $txtIdxServidor, $cmbIdxUsuario, $txtIdxSenha, $lvIdx)) {
+            # A lista fica habilitada de proposito: desabilitada, a area vazia dela ficava cinza-clara.
+            # Marcar linhas durante a criacao dos indices e inofensivo: a lista de alvos ja foi fechada antes de comecar.
+            foreach ($ctl in @($btnIdxTestar, $btnIdxBuscar, $btnIdxTop, $btnIdxLimpar, $btnIdxCopiar, $btnIdxAplicar, $btnIdxAplicarTodos, $cmbIdxBanco, $txtIdxServidor, $cmbIdxUsuario, $txtIdxSenha)) {
                 if ($ctl) { $ctl.Enabled = -not $Ocupado }
             }
             if (-not $Ocupado) {
@@ -9799,6 +9901,232 @@ function Show-AvisoDestaque {
     }
     finally { $f.Dispose() }
 }
+
+# -----------------------------------------------------------------------------
+# DEPOIS DA TROCA DO BANCO: ATUALIZAR O BANCO (AjustesInstalacao) E ABRIR O CONCENTRADOR
+# Manualmente o tecnico abria o AjustesInstalacao.exe, clicava em "Atualizar Banco", esperava a
+# barra terminar (a janela fecha sozinha) e so entao abria o Concentrador. Aqui o Preparador
+# faz o mesmo: abre o Ajustes na pasta NetControll, clica no botao por ele e espera o programa
+# fechar. Nao mexe no banco por conta propria: quem atualiza e o proprio Ajustes.
+# Se algo sair do previsto (sem o exe, sem o botao, aviso na tela, demora demais) devolve o
+# motivo e NAO abre o Concentrador: a troca do banco ja foi feita e fica como esta.
+# Compila so quando e usado (mesmo padrao do RodaDoMouse).
+# -----------------------------------------------------------------------------
+function Enable-AjustesUi {
+    if ("AjustesUi" -as [type]) { return $true }
+    if ($Script:AjustesUiFalhou) { return $false }
+    try {
+        Add-Type -ReferencedAssemblies System.Windows.Forms, System.Drawing -TypeDefinition @'
+using System;
+using System.Collections.Generic;
+using System.Runtime.InteropServices;
+using System.Text;
+
+public static class AjustesUi
+{
+    private delegate bool EnumProc(IntPtr h, IntPtr l);
+    [DllImport("user32.dll")] private static extern bool EnumWindows(EnumProc p, IntPtr l);
+    [DllImport("user32.dll")] private static extern bool EnumChildWindows(IntPtr pai, EnumProc p, IntPtr l);
+    [DllImport("user32.dll")] private static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern int GetWindowText(IntPtr h, StringBuilder s, int max);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern int GetClassName(IntPtr h, StringBuilder s, int max);
+    [DllImport("user32.dll")] private static extern bool IsWindowVisible(IntPtr h);
+    [DllImport("user32.dll")] private static extern bool IsWindowEnabled(IntPtr h);
+    [DllImport("user32.dll")] private static extern bool PostMessage(IntPtr h, uint m, IntPtr w, IntPtr l);
+
+    private static string Texto(IntPtr h)
+    {
+        StringBuilder sb = new StringBuilder(512);
+        GetWindowText(h, sb, 512);
+        return sb.ToString();
+    }
+
+    private static string Classe(IntPtr h)
+    {
+        StringBuilder sb = new StringBuilder(256);
+        GetClassName(h, sb, 256);
+        return sb.ToString();
+    }
+
+    private static List<IntPtr> Topo(uint pid)
+    {
+        List<IntPtr> lista = new List<IntPtr>();
+        EnumWindows(delegate(IntPtr h, IntPtr x)
+        {
+            uint p;
+            GetWindowThreadProcessId(h, out p);
+            if (p == pid && IsWindowVisible(h)) { lista.Add(h); }
+            return true;
+        }, IntPtr.Zero);
+        return lista;
+    }
+
+    private static List<IntPtr> Filhos(IntPtr pai)
+    {
+        List<IntPtr> lista = new List<IntPtr>();
+        EnumChildWindows(pai, delegate(IntPtr h, IntPtr x) { lista.Add(h); return true; }, IntPtr.Zero);
+        return lista;
+    }
+
+    private static string Limpa(string t)
+    {
+        return (t ?? "").Replace("&", "").Trim().ToLowerInvariant();
+    }
+
+    // Botao (em qualquer janela do processo) cujo texto contem o trecho; ignora o & do atalho
+    public static IntPtr AchaBotao(int pid, string trecho)
+    {
+        string alvo = Limpa(trecho);
+        foreach (IntPtr topo in Topo((uint)pid))
+        {
+            foreach (IntPtr f in Filhos(topo))
+            {
+                if (Classe(f).ToUpperInvariant().Contains("BUTTON") && Limpa(Texto(f)).Contains(alvo)) { return f; }
+            }
+        }
+        return IntPtr.Zero;
+    }
+
+    public static bool Habilitado(IntPtr h)
+    {
+        return h != IntPtr.Zero && IsWindowEnabled(h) && IsWindowVisible(h);
+    }
+
+    // Clique assincrono (PostMessage): o Ajustes faz o trabalho dentro do clique, e um clique
+    // sincrono prenderia o Preparador ate ele terminar
+    public static void Clica(IntPtr h)
+    {
+        PostMessage(h, 0x00F5, IntPtr.Zero, IntPtr.Zero);
+    }
+
+    // Texto de caixas de aviso (MessageBox) abertas pelo processo; vazio se nao ha nenhuma
+    public static string Dialogos(int pid)
+    {
+        List<string> partes = new List<string>();
+        foreach (IntPtr topo in Topo((uint)pid))
+        {
+            if (Classe(topo) != "#32770") { continue; }
+            List<string> textos = new List<string>();
+            string titulo = Texto(topo);
+            foreach (IntPtr f in Filhos(topo))
+            {
+                string c = Classe(f);
+                string t = Texto(f).Trim();
+                if (c == "Static" && t.Length > 0) { textos.Add(t); }
+            }
+            partes.Add((titulo.Length > 0 ? titulo + ": " : "") + string.Join(" ", textos.ToArray()));
+        }
+        return string.Join(" | ", partes.ToArray());
+    }
+
+    // O que o processo mostra na tela (titulo das janelas e botoes), para mensagens de erro
+    public static string Resumo(int pid)
+    {
+        List<string> partes = new List<string>();
+        foreach (IntPtr topo in Topo((uint)pid))
+        {
+            List<string> botoes = new List<string>();
+            foreach (IntPtr f in Filhos(topo))
+            {
+                if (Classe(f).ToUpperInvariant().Contains("BUTTON") && Texto(f).Trim().Length > 0) { botoes.Add(Texto(f).Trim()); }
+            }
+            partes.Add("janela \"" + Texto(topo) + "\" com os botoes: " + (botoes.Count > 0 ? string.Join(", ", botoes.ToArray()) : "(nenhum)"));
+        }
+        return partes.Count > 0 ? string.Join("; ", partes.ToArray()) : "nenhuma janela visivel";
+    }
+}
+'@
+        return $true
+    }
+    catch {
+        $Script:AjustesUiFalhou = $true
+        Log-Message "ERRO" "Ajustes: não consegui preparar o clique automático ($($_.Exception.Message))"
+        return $false
+    }
+}
+
+# Devolve @{ Status; Mensagem; Segundos }. Status:
+#   Concluido = o Ajustes fechou sozinho depois do clique (barra terminou)
+#   SemExe / SemBotao / Dialogo / Timeout / Erro = nao concluiu; Mensagem explica o que aconteceu
+function Invoke-AtualizarBancoAjustes {
+    param(
+        [string]$PastaNetControll,
+        [int]$TimeoutSeg = 1200,
+        [int]$EsperaBotaoSeg = 40,
+        [scriptblock]$AoProgresso = $null
+    )
+    $r = [pscustomobject]@{ Status = 'Erro'; Mensagem = ''; Segundos = 0 }
+    $exe = Join-Path "$PastaNetControll" "AjustesInstalacao.exe"
+    if (-not (Test-Path -LiteralPath $exe)) {
+        $r.Status = 'SemExe'
+        $r.Mensagem = "Não encontrei o AjustesInstalacao.exe em $PastaNetControll."
+        return $r
+    }
+    if (-not (Enable-AjustesUi)) { $r.Mensagem = "Não consegui preparar o clique automático (veja o log do programa)."; return $r }
+    $proc = $null
+    try {
+        $psi = New-Object System.Diagnostics.ProcessStartInfo
+        $psi.FileName = $exe
+        $psi.WorkingDirectory = "$PastaNetControll"
+        $psi.UseShellExecute = $true
+        $proc = [System.Diagnostics.Process]::Start($psi)
+        $relogio = [System.Diagnostics.Stopwatch]::StartNew()
+
+        # 1) espera a janela abrir e o botao ficar disponivel
+        $btn = [IntPtr]::Zero
+        while ($relogio.Elapsed.TotalSeconds -lt $EsperaBotaoSeg) {
+            if ($proc.HasExited) { $r.Mensagem = "O AjustesInstalacao fechou antes de eu conseguir clicar em Atualizar Banco."; return $r }
+            $btn = [AjustesUi]::AchaBotao($proc.Id, "atualizar banco")
+            if ([AjustesUi]::Habilitado($btn)) { break }
+            $btn = [IntPtr]::Zero
+            [System.Windows.Forms.Application]::DoEvents()
+            Start-Sleep -Milliseconds 300
+        }
+        if ($btn -eq [IntPtr]::Zero) {
+            $r.Status = 'SemBotao'
+            $r.Mensagem = "Não achei o botão Atualizar Banco no AjustesInstalacao (vi: $([AjustesUi]::Resumo($proc.Id))). Ele ficou aberto na tela: clique em Atualizar Banco."
+            return $r
+        }
+        Start-Sleep -Milliseconds 500
+        [AjustesUi]::Clica($btn)
+
+        # 2) espera terminar: a janela fecha sozinha quando a barra acaba
+        $inicio = $relogio.Elapsed.TotalSeconds
+        $ultimoDialogo = 0
+        while (-not $proc.HasExited) {
+            $seg = [int]($relogio.Elapsed.TotalSeconds - $inicio)
+            if ($relogio.Elapsed.TotalSeconds - $inicio -gt $TimeoutSeg) {
+                $r.Status = 'Timeout'
+                $tempoTexto = if ($TimeoutSeg -ge 60) { "$([int]($TimeoutSeg / 60)) minuto(s)" } else { "$TimeoutSeg segundo(s)" }
+                $r.Mensagem = "O AjustesInstalacao ainda estava rodando depois de $tempoTexto. Ele continua aberto: espere terminar ou veja a tela dele."
+                return $r
+            }
+            # Aviso aberto pelo Ajustes (erro ou pergunta): entrega para o tecnico em vez de esperar em vao
+            if ($seg -ge ($ultimoDialogo + 2)) {
+                $ultimoDialogo = $seg
+                $dlg = "$([AjustesUi]::Dialogos($proc.Id))"
+                if ($dlg -ne "") {
+                    $r.Status = 'Dialogo'
+                    $r.Mensagem = "O AjustesInstalacao mostrou um aviso e está esperando você: $dlg"
+                    return $r
+                }
+            }
+            if ($null -ne $AoProgresso) { try { & $AoProgresso $seg } catch {} }
+            [System.Windows.Forms.Application]::DoEvents()
+            Start-Sleep -Milliseconds 300
+        }
+        $r.Status = 'Concluido'
+        $r.Segundos = [int]($relogio.Elapsed.TotalSeconds - $inicio)
+        return $r
+    }
+    catch {
+        $r.Status = 'Erro'
+        $r.Mensagem = "$($_.Exception.Message)"
+        return $r
+    }
+    finally { if ($null -ne $proc) { $proc.Dispose() } }
+}
+
 
 
 # -----------------------------------------------------------------------------
@@ -14933,6 +15261,15 @@ function Start-Download {
                 $Button.Text = "✔ $originalText"
                 Set-ButtonDone -Button $Button -Label "BAIXADO"
             }
+            elseif ($Script:DownloadSomenteSalvar) {
+                # So salvar (ex.: PDV 5.0, que ainda nao foi lancado): abre a pasta com o arquivo selecionado e NAO executa nada
+                Log-Message "SUCESSO" "Arquivo salvo em: $destPath"
+                try { Start-Process -FilePath "explorer.exe" -ArgumentList "/select,`"$destPath`"" } catch { Log-Message "ERRO" "Nao consegui abrir a pasta: $($_.Exception.Message)" }
+                $Button.Text = "Baixado"
+                Wait-UI 1.5
+                $Button.Text = "✔ $originalText"
+                Set-ButtonDone -Button $Button -Label "BAIXADO"
+            }
             else {
                 Log-Message "EXEC" "Executando instalador..."
                 # WorkingDirectory na pasta de downloads: instaladores auto-extraiveis (WinRAR SFX)
@@ -15133,7 +15470,7 @@ function Install-SqlManual {
 
 function Open-Selector {
     param($Type, $Button)
-    $height = if ($Type -eq "PDV" -or $Type -eq "LinkXMenu") { 380 } else { 220 }
+    $height = if ($Type -eq "PDV") { 415 } elseif ($Type -eq "LinkXMenu") { 380 } else { 220 }
 
     $fSel = New-Object System.Windows.Forms.Form
     $fSel.Text = "Versoes - $Type"; $fSel.Size = "400,$height"; $fSel.StartPosition = 'CenterParent'
@@ -15273,7 +15610,7 @@ function Open-Selector {
         [void]$fSel.Controls.Add($lblPre); [void]$fSel.Controls.Add($txtMan); [void]$fSel.Controls.Add($lblPos)
 
         $btnMan = New-Object System.Windows.Forms.Button
-        $btnMan.Text = "BAIXAR MANUAL"; $btnMan.Location = '180,178'; $btnMan.Size = '180,30'
+        $btnMan.Text = "BAIXAR MANUAL"; $btnMan.Location = '162,178'; $btnMan.Size = '123,30'; $btnMan.Font = New-Object System.Drawing.Font("Segoe UI", 8, [System.Drawing.FontStyle]::Bold)
         $btnMan.BackColor = [System.Drawing.Color]::FromArgb(46, 204, 113); $btnMan.ForeColor = 'White'; $btnMan.FlatStyle = 'Flat'
         
         $btnMan.Add_Click({
@@ -15291,7 +15628,31 @@ function Open-Selector {
                 else { [System.Windows.Forms.MessageBox]::Show("Digite apenas o numero da versao (Ex: 62 ou 16)", "Erro", "OK", "Warning") | Out-Null }
             })
         [void]$fSel.Controls.Add($btnMan)
-
+        # Copiar o link da versao digitada (mesma ideia do "copiar link" de cima, para a versao manual)
+        $btnManLink = New-Object System.Windows.Forms.Button
+        $btnManLink.Text = "copiar link"; $btnManLink.Location = '291,181'; $btnManLink.Size = '69,24'
+        $btnManLink.FlatStyle = 'Flat'; $btnManLink.FlatAppearance.BorderSize = 1
+        $btnManLink.FlatAppearance.BorderColor = [System.Drawing.Color]::FromArgb(70, 70, 80)
+        $btnManLink.BackColor = [System.Drawing.Color]::FromArgb(45, 45, 52); $btnManLink.ForeColor = [System.Drawing.Color]::FromArgb(190, 190, 195)
+        $btnManLink.Font = New-Object System.Drawing.Font("Segoe UI", 7.5)
+        $btnManLink.Cursor = 'Hand'
+        $btnManLink.Add_Click({
+                $v = $txtMan.Text.Trim()
+                if ($v -match '^\d+$') {
+                    $url = if ($Type -eq "PDV") { "https://netcontroll.com.br/util/instaladores/netpdv/1.3/$v/0/NetPDV.zip" } else { "http://netcontroll.com.br/util/instaladores/LinkXMenu/10/$v/LinkXMenu.zip" }
+                    try { Set-Clipboard -Value $url -ErrorAction Stop }
+                    catch { [System.Windows.Forms.Clipboard]::SetText($url) }
+                    Log-Message "INFO" "Link copiado (versao manual): $url"
+                    $btnManLink.Text = "copiado!"
+                    $voltaMan = New-Object System.Windows.Forms.Timer
+                    $voltaMan.Interval = 1500
+                    $voltaMan.Tag = $btnManLink
+                    $voltaMan.Add_Tick({ $this.Stop(); $this.Tag.Text = "copiar link"; $this.Dispose() })
+                    $voltaMan.Start()
+                }
+                else { [System.Windows.Forms.MessageBox]::Show("Digite apenas o numero da versao (Ex: 62 ou 16)", "Erro", "OK", "Warning") | Out-Null }
+            })
+        [void]$fSel.Controls.Add($btnManLink)
         # Separador e Checkbox de deploy
         $sep2 = New-Object System.Windows.Forms.Label; $sep2.Text = "__________________________________________________"
         $sep2.Location = '20,218'; $sep2.AutoSize = $true; $sep2.ForeColor = 'Gray'
@@ -15310,6 +15671,153 @@ function Open-Selector {
         [void]$fSel.Controls.Add($lblDest)
     }
 
+    # Aba "Versão 5.0": o PDV novo (ainda nao lancado) fica separado das versoes 1.3. As funcoes sao as mesmas da
+    # aba 1.3 (lista, copiar link, baixar e versao manual), mas os arquivos da 5.0 nao sao ZIP (instalador, exe e apk):
+    # so baixa e abre a pasta com o arquivo selecionado, sem executar nada e sem mexer em C:\netcontroll\NetPDV.
+    if ($Type -eq "PDV") {
+        $corFundoAba = [System.Drawing.Color]::FromArgb(30, 30, 30)
+        $tabs = New-Object System.Windows.Forms.TabControl
+        $tabs.Location = '0,0'
+        $tabs.Size = $fSel.ClientSize
+        $tabs.Anchor = 'Top,Bottom,Left,Right'
+        $tabs.DrawMode = 'OwnerDrawFixed'
+        $tabs.SizeMode = 'Fixed'
+        $tabs.ItemSize = New-Object System.Drawing.Size(130, 28)
+        $tabs.Font = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold)
+        $tabs.Add_DrawItem({
+                param($s, $e)
+                $sel = ($e.Index -eq $s.SelectedIndex)
+                $cor = if ($sel) { [System.Drawing.Color]::FromArgb(14, 88, 62) } else { [System.Drawing.Color]::FromArgb(45, 45, 52) }
+                $br = New-Object System.Drawing.SolidBrush($cor)
+                $e.Graphics.FillRectangle($br, $e.Bounds)
+                $br.Dispose()
+                [System.Windows.Forms.TextRenderer]::DrawText($e.Graphics, $s.TabPages[$e.Index].Text, $s.Font, $e.Bounds, [System.Drawing.Color]::White, [System.Windows.Forms.TextFormatFlags]'HorizontalCenter, VerticalCenter')
+            })
+        $pg13 = New-Object System.Windows.Forms.TabPage; $pg13.Text = "Versão 1.3"
+        $pg50 = New-Object System.Windows.Forms.TabPage; $pg50.Text = "Versão 5.0"
+        foreach ($pg in @($pg13, $pg50)) { $pg.UseVisualStyleBackColor = $false; $pg.BackColor = $corFundoAba; $pg.ForeColor = 'White' }
+        # A aba 1.3 e tudo o que ja estava montado na janela, sem mudar nada
+        foreach ($ctl in @($fSel.Controls | ForEach-Object { $_ })) { $fSel.Controls.Remove($ctl); [void]$pg13.Controls.Add($ctl) }
+
+        $versions50 = @(
+            @{ Name = "NetPDV-setup.exe (instalador) - v5.0.0.11"; Arquivo = "NetPDV-setup.exe"; Versao = "5.0.0.11" },
+            @{ Name = "NetPDV.exe (executável) - v5.0.0.11"; Arquivo = "NetPDV.exe"; Versao = "5.0.0.11" },
+            @{ Name = "NetPDV.apk (Android) - v5.0.0.11"; Arquivo = "NetPDV.apk"; Versao = "5.0.0.11" }
+        )
+        $urlPdv50 = { param($ver, $arq) "http://netcontroll.com.br/util/instaladores/Apps/$ver/xmenu-pdv/$arq" }
+        $nomeArq50 = { param($ver, $arq) $base = [System.IO.Path]::GetFileNameWithoutExtension($arq); $ext = [System.IO.Path]::GetExtension($arq); "${base}_$ver$ext" }
+
+        $lbl50 = New-Object System.Windows.Forms.Label; $lbl50.Text = "Selecione da Lista:"; $lbl50.Location = '20,20'; $lbl50.AutoSize = $true
+        [void]$pg50.Controls.Add($lbl50)
+        $cb50 = New-Object System.Windows.Forms.ComboBox
+        $cb50.Location = '20,45'; $cb50.Width = 265; $cb50.DropDownStyle = 'DropDownList'; $cb50.FlatStyle = 'Flat'
+        $cb50.BackColor = [System.Drawing.Color]::FromArgb(50, 50, 60); $cb50.ForeColor = 'White'
+        foreach ($v50 in $versions50) { [void]$cb50.Items.Add($v50.Name) }
+        $cb50.SelectedIndex = 0
+        [void]$pg50.Controls.Add($cb50)
+
+        $btnLink50 = New-Object System.Windows.Forms.Button
+        $btnLink50.Text = "copiar link"; $btnLink50.Location = '291,44'; $btnLink50.Size = '69,24'
+        $btnLink50.FlatStyle = 'Flat'; $btnLink50.FlatAppearance.BorderSize = 1
+        $btnLink50.FlatAppearance.BorderColor = [System.Drawing.Color]::FromArgb(70, 70, 80)
+        $btnLink50.BackColor = [System.Drawing.Color]::FromArgb(45, 45, 52); $btnLink50.ForeColor = [System.Drawing.Color]::FromArgb(190, 190, 195)
+        $btnLink50.Font = New-Object System.Drawing.Font("Segoe UI", 7.5)
+        $btnLink50.Cursor = 'Hand'
+        [void]$pg50.Controls.Add($btnLink50)
+        $btnLink50.Add_Click({
+                $sel = $versions50[$cb50.SelectedIndex]
+                $url = "$(& $urlPdv50 $sel.Versao $sel.Arquivo)"
+                try { Set-Clipboard -Value $url -ErrorAction Stop }
+                catch { [System.Windows.Forms.Clipboard]::SetText($url) }
+                Log-Message "INFO" "Link copiado: $($sel.Name)"
+                $btnLink50.Text = "copiado!"
+                $volta50 = New-Object System.Windows.Forms.Timer
+                $volta50.Interval = 1500
+                $volta50.Tag = $btnLink50
+                $volta50.Add_Tick({ $this.Stop(); $this.Tag.Text = "copiar link"; $this.Dispose() })
+                $volta50.Start()
+            })
+
+        $btn50 = New-Object System.Windows.Forms.Button
+        $btn50.Text = "BAIXAR SELECIONADO"; $btn50.Location = '20,80'; $btn50.Size = '340,35'
+        $btn50.BackColor = [System.Drawing.Color]::FromArgb(14, 88, 62); $btn50.ForeColor = 'White'; $btn50.FlatStyle = 'Flat'
+        $btn50.Add_Click({
+                $sel = $versions50[$cb50.SelectedIndex]
+                $fSel.Tag = @{ Url = (& $urlPdv50 $sel.Versao $sel.Arquivo); File = (& $nomeArq50 $sel.Versao $sel.Arquivo); Name = $sel.Name; Deploy = $false; SomenteSalvar = $true }
+                $fSel.DialogResult = 'OK'
+                $fSel.Close()
+            })
+        [void]$pg50.Controls.Add($btn50)
+
+        $sep50 = New-Object System.Windows.Forms.Label; $sep50.Text = "__________________________________________________"
+        $sep50.Location = '20,125'; $sep50.AutoSize = $true; $sep50.ForeColor = 'Gray'
+        [void]$pg50.Controls.Add($sep50)
+        $lblMan50 = New-Object System.Windows.Forms.Label; $lblMan50.Text = "Ou digite a Versao Manual:"; $lblMan50.Location = '20,155'; $lblMan50.AutoSize = $true
+        [void]$pg50.Controls.Add($lblMan50)
+        $lblPre50 = New-Object System.Windows.Forms.Label; $lblPre50.Text = "5.0."; $lblPre50.Location = '20,183'; $lblPre50.AutoSize = $true; $lblPre50.Font = New-Object System.Drawing.Font("Consolas", 12)
+        [void]$pg50.Controls.Add($lblPre50)
+        $txtMan50 = New-Object System.Windows.Forms.TextBox
+        $txtMan50.Location = '75,180'; $txtMan50.Width = 80; $txtMan50.Text = "0.11"; $txtMan50.MaxLength = 12; $txtMan50.Font = New-Object System.Drawing.Font("Consolas", 10); $txtMan50.TextAlign = 'Center'
+        [void]$pg50.Controls.Add($txtMan50)
+        $btnMan50 = New-Object System.Windows.Forms.Button
+        $btnMan50.Text = "BAIXAR MANUAL"; $btnMan50.Location = '165,178'; $btnMan50.Size = '120,30'; $btnMan50.Font = New-Object System.Drawing.Font("Segoe UI", 8, [System.Drawing.FontStyle]::Bold)
+        $btnMan50.BackColor = [System.Drawing.Color]::FromArgb(46, 204, 113); $btnMan50.ForeColor = 'White'; $btnMan50.FlatStyle = 'Flat'
+        $btnMan50.Add_Click({
+                # O "5.0." e fixo; o resto (ex.: 0.11) e editavel e pode mudar dos dois lados (5.0.0.12, 5.0.1.0...)
+                $v = $txtMan50.Text.Trim()
+                if ($v -match '^\d+\.\d+$') {
+                    $sel = $versions50[$cb50.SelectedIndex]
+                    $verManual = "5.0.$v"
+                    $fSel.Tag = @{ Url = (& $urlPdv50 $verManual $sel.Arquivo); File = (& $nomeArq50 $verManual $sel.Arquivo); Name = "$($sel.Arquivo) v$verManual"; Deploy = $false; SomenteSalvar = $true }
+                    $fSel.DialogResult = 'OK'
+                    $fSel.Close()
+                }
+                else { [System.Windows.Forms.MessageBox]::Show("Digite o final da versao no formato 0.11 (Ex: 0.11 para a 5.0.0.11)", "Erro", "OK", "Warning") | Out-Null }
+            })
+        [void]$pg50.Controls.Add($btnMan50)
+        # Copiar o link da versao digitada (o tipo de arquivo vem da lista de cima)
+        $btnManLink50 = New-Object System.Windows.Forms.Button
+        $btnManLink50.Text = "copiar link"; $btnManLink50.Location = '291,181'; $btnManLink50.Size = '69,24'
+        $btnManLink50.FlatStyle = 'Flat'; $btnManLink50.FlatAppearance.BorderSize = 1
+        $btnManLink50.FlatAppearance.BorderColor = [System.Drawing.Color]::FromArgb(70, 70, 80)
+        $btnManLink50.BackColor = [System.Drawing.Color]::FromArgb(45, 45, 52); $btnManLink50.ForeColor = [System.Drawing.Color]::FromArgb(190, 190, 195)
+        $btnManLink50.Font = New-Object System.Drawing.Font("Segoe UI", 7.5)
+        $btnManLink50.Cursor = 'Hand'
+        $btnManLink50.Add_Click({
+                $v = $txtMan50.Text.Trim()
+                if ($v -match '^\d+\.\d+$') {
+                    $sel = $versions50[$cb50.SelectedIndex]
+                    $url = "$(& $urlPdv50 "5.0.$v" $sel.Arquivo)"
+                    try { Set-Clipboard -Value $url -ErrorAction Stop }
+                    catch { [System.Windows.Forms.Clipboard]::SetText($url) }
+                    Log-Message "INFO" "Link copiado (versao manual): $url"
+                    $btnManLink50.Text = "copiado!"
+                    $voltaMan50 = New-Object System.Windows.Forms.Timer
+                    $voltaMan50.Interval = 1500
+                    $voltaMan50.Tag = $btnManLink50
+                    $voltaMan50.Add_Tick({ $this.Stop(); $this.Tag.Text = "copiar link"; $this.Dispose() })
+                    $voltaMan50.Start()
+                }
+                else { [System.Windows.Forms.MessageBox]::Show("Digite o final da versao no formato 0.11 (Ex: 0.11 para a 5.0.0.11)", "Erro", "OK", "Warning") | Out-Null }
+            })
+        [void]$pg50.Controls.Add($btnManLink50)
+        $lblNota50 = New-Object System.Windows.Forms.Label
+        $lblNota50.Text = "A versão manual baixa o tipo de arquivo escolhido na lista."
+        $lblNota50.Location = '20,214'; $lblNota50.AutoSize = $true; $lblNota50.ForeColor = [System.Drawing.Color]::Gray; $lblNota50.Font = New-Object System.Drawing.Font("Segoe UI", 8)
+        [void]$pg50.Controls.Add($lblNota50)
+
+        $sep502 = New-Object System.Windows.Forms.Label; $sep502.Text = "__________________________________________________"
+        $sep502.Location = '20,232'; $sep502.AutoSize = $true; $sep502.ForeColor = 'Gray'
+        [void]$pg50.Controls.Add($sep502)
+        $lblDest50 = New-Object System.Windows.Forms.Label
+        $lblDest50.Text = "O arquivo é salvo na pasta de downloads e a pasta é aberta.`r`nNada é executado nem instalado."
+        $lblDest50.Location = '20,256'; $lblDest50.AutoSize = $true; $lblDest50.ForeColor = [System.Drawing.Color]::Gray; $lblDest50.Font = New-Object System.Drawing.Font("Segoe UI", 8)
+        [void]$pg50.Controls.Add($lblDest50)
+
+        [void]$tabs.TabPages.Add($pg13)
+        [void]$tabs.TabPages.Add($pg50)
+        [void]$fSel.Controls.Add($tabs)
+    }
     $fSel.Add_Shown({ try { Set-JanelaAdaptavel $this | Out-Null } catch {} })
     [void]$fSel.ShowDialog()
     if ($fSel.DialogResult -eq 'OK' -and $fSel.Tag) {
@@ -15318,8 +15826,9 @@ function Open-Selector {
         
         # Extras da versao escolhida (so algumas tem): o Start-Download coloca na pasta extraida
         $Script:DownloadExtras = $fSel.Tag.Extras
+        $Script:DownloadSomenteSalvar = [bool]$fSel.Tag.SomenteSalvar
         try { Start-Download $fSel.Tag.Url $fSel.Tag.File $Button }
-        finally { $Script:DownloadExtras = $null }
+        finally { $Script:DownloadExtras = $null; $Script:DownloadSomenteSalvar = $false }
 
         # Deploy automatico com backup se checkbox marcado
         if ($Script:DeployMode) {
@@ -15667,7 +16176,7 @@ $formWidth = if ($screen.Width -lt 1000) { 900 } else { 1000 }
 $formHeight = if ($screen.Height -lt 800) { 700 } else { 800 }
 
 $form = New-Object System.Windows.Forms.Form
-$form.Text = "Preparador XMenu – Suporte Técnico v5.31 - REVENDA"
+$form.Text = "Preparador XMenu – Suporte Técnico v5.32 - REVENDA"
 $form.Size = New-Object System.Drawing.Size($formWidth, $formHeight)
 $form.StartPosition = "CenterScreen"
 $form.BackColor = [System.Drawing.Color]::FromArgb(25, 25, 30); $form.ForeColor = 'White'
@@ -16405,7 +16914,7 @@ $bClock.Add_Click({ Invoke-ClockSync })
 [void]$tbl.Controls.Add($bClock)
 
 # Mensagem de abertura: explica o programa para quem abre pela primeira vez
-Log-Message "INFO" "Preparador XMenu v5.31 - REVENDA - preparo e suporte de computadores com XMenu e NetPDV"
+Log-Message "INFO" "Preparador XMenu v5.32 - REVENDA - preparo e suporte de computadores com XMenu e NetPDV"
 Log-Message "LOG" "==============================================================="
 Log-Message "LOG" "COMO USAR"
 Log-Message "LOG" "  PREPARAR AMBIENTE WINDOWS .. ajusta energia, UAC e desempenho do PC num clique"
@@ -16415,7 +16924,9 @@ Log-Message "LOG" "  EXTERNOS ................... acesso remoto, Chrome, TEF HUB
 Log-Message "LOG" "  SUPORTE E DIAGNÓSTICO ...... impressoras, rede, SQL, backup, XMLs e reparos do Windows"
 Log-Message "LOG" "  Passe o mouse sobre um botão para ver o que ele faz antes de clicar."
 Log-Message "LOG" "---------------------------------------------------------------"
-Log-Message "LOG" "NOVO NA v5.31"
+Log-Message "LOG" "NOVO NA v5.32"
+Log-Message "SUCESSO" "  PDV: nova aba Versão 5.0 no seletor do ZIP do PDV (instalador, executável e APK da 5.0.0.11, copiar link e versão manual), só baixa e abre a pasta"
+Log-Message "SUCESSO" "  Banco: depois da troca, o Preparador abre o AjustesInstalacao, clica em Atualizar Banco, espera terminar e abre o Concentrador (caixa marcada por padrão na tela)"
 Log-Message "SUCESSO" "  Banco: telas de Diagnóstico, Trocar Banco e Índices com visual novo (cabeçalho escuro, linhas alternadas, fonte maior e etiquetas de situação)"
 Log-Message "SUCESSO" "  Banco: avisos de confirmação em destaque, com o tamanho do banco atual e do banco novo em fonte grande"
 Log-Message "SUCESSO" "  Banco: aviso da troca lista os programas que serão fechados e exige ciência quando há dados em aberto"
