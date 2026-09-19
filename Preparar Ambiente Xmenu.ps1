@@ -1,5 +1,5 @@
 ﻿# =============================================================================
-# PREPARADOR XMENU v5.15
+# PREPARADOR XMENU v5.16
 # Visual: Dashboard Moderno
 # Correcoes:
 #   - CRITICO: Removido DoEvents do loop de evento de download (causava crash).
@@ -13959,7 +13959,7 @@ $formWidth = if ($screen.Width -lt 1200) { $screen.Width - 50 } else { 1200 }
 $formHeight = if ($screen.Height -lt 900) { $screen.Height - 50 } else { 900 }
 
 $form = New-Object System.Windows.Forms.Form
-$form.Text = "Preparador XMenu – Suporte Técnico v5.15"
+$form.Text = "Preparador XMenu – Suporte Técnico v5.16"
 $form.Size = New-Object System.Drawing.Size($formWidth, $formHeight)
 $form.StartPosition = "CenterScreen"
 $form.BackColor = [System.Drawing.Color]::FromArgb(25, 25, 30); $form.ForeColor = 'White'
@@ -14030,8 +14030,10 @@ $hTitulo.Add_Paint({
         $alturaCredito = [System.Windows.Forms.TextRenderer]::MeasureText($e.Graphics, "$($Script:HeaderCreditoTexto)", $creditoFonte, [System.Drawing.Size]::Empty, [System.Windows.Forms.TextFormatFlags]'NoPadding, SingleLine').Height
         $total = $alturaTitulo + $alturaCredito - 2
         $topo = [Math]::Max(0, [int](($s.ClientSize.Height - $total) / 2))
-        [System.Windows.Forms.TextRenderer]::DrawText($e.Graphics, "Preparador XMenu", $fonteTituloCab, (New-Object System.Drawing.Rectangle(0, $topo, $s.ClientSize.Width, $alturaTitulo + 2)), [System.Drawing.Color]::White, $flags)
-        [System.Windows.Forms.TextRenderer]::DrawText($e.Graphics, "$($Script:HeaderCreditoTexto)", $creditoFonte, (New-Object System.Drawing.Rectangle(2, ($topo + $alturaTitulo - 2), $s.ClientSize.Width - 2, $alturaCredito + 2)), [System.Drawing.Color]::Gold, $flags)
+        $rectTitulo = New-Object System.Drawing.Rectangle -ArgumentList 0, $topo, $s.ClientSize.Width, ($alturaTitulo + 2)
+        $rectCredito = New-Object System.Drawing.Rectangle -ArgumentList 2, ($topo + $alturaTitulo - 2), ($s.ClientSize.Width - 2), ($alturaCredito + 2)
+        [System.Windows.Forms.TextRenderer]::DrawText($e.Graphics, "Preparador XMenu", $fonteTituloCab, $rectTitulo, [System.Drawing.Color]::White, $flags)
+        [System.Windows.Forms.TextRenderer]::DrawText($e.Graphics, "$($Script:HeaderCreditoTexto)", $creditoFonte, $rectCredito, [System.Drawing.Color]::Gold, $flags)
     })
 
 # Os dados de hardware sao lidos logo depois que a janela aparece (no Shown, la no fim):
@@ -14686,7 +14688,7 @@ $bClock.Add_Click({ Invoke-ClockSync })
 [void]$tbl.Controls.Add($bClock)
 
 # Mensagem de abertura: explica o programa para quem abre pela primeira vez
-Log-Message "INFO" "Preparador XMenu v5.15 - preparo e suporte de computadores com XMenu e NetPDV"
+Log-Message "INFO" "Preparador XMenu v5.16 - preparo e suporte de computadores com XMenu e NetPDV"
 Log-Message "LOG" "==============================================================="
 Log-Message "LOG" "COMO USAR"
 Log-Message "LOG" "  PREPARAR AMBIENTE WINDOWS .. ajusta energia, UAC e desempenho do PC num clique"
@@ -14696,7 +14698,7 @@ Log-Message "LOG" "  EXTERNOS ................... acesso remoto, Chrome, TEF HUB
 Log-Message "LOG" "  SUPORTE E DIAGNÓSTICO ...... impressoras, rede, SQL, backup, XMLs e reparos do Windows"
 Log-Message "LOG" "  Passe o mouse sobre um botão para ver o que ele faz antes de clicar."
 Log-Message "LOG" "---------------------------------------------------------------"
-Log-Message "LOG" "NOVO NA v5.15"
+Log-Message "LOG" "NOVO NA v5.16"
 Log-Message "SUCESSO" "  NetPDV: versão 1.3.68.0 (ZIP) na lista de versões, já vem selecionada"
 Log-Message "SUCESSO" "  XMLs e Backup: servidor padrão agora é localhost (127.0.0.1 não conectava em algumas máquinas)"
 Log-Message "SUCESSO" "  XMLs e Backup: campo Usuário do SQL (sa ou sa2, ou digite outro) e senha editável"
