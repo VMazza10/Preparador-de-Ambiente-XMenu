@@ -1,6 +1,6 @@
 ﻿# =============================================================================
 # PREPARADOR XMENU - VERSAO REVENDA
-# Baseado na v5.25
+# Baseado na v5.27
 # Alteracoes Revenda:
 #   - Wallpaper: fundo_revenda.png
 #   - Removido: Atalhos de Suporte e Pasta Netcontroll
@@ -6605,6 +6605,47 @@ SELECT
                 if ($cnSeguranca) { try { $cnSeguranca.Close() } catch {} }
             }
         }
+        $compactarBackup = {
+            param([string]$PastaOrigem, [string]$ArquivoZip, [string]$MdfBackup, [string]$LdfBackup)
+            $zipLeitura = $null
+            try {
+                Add-Type -AssemblyName System.IO.Compression.FileSystem -ErrorAction Stop
+                if (Test-Path -LiteralPath $ArquivoZip) { throw "Já existe um arquivo de backup com esse nome: $ArquivoZip" }
+                [System.IO.Compression.ZipFile]::CreateFromDirectory(
+                    $PastaOrigem,
+                    $ArquivoZip,
+                    [System.IO.Compression.CompressionLevel]::Optimal,
+                    $false)
+
+                $zipLeitura = [System.IO.Compression.ZipFile]::OpenRead($ArquivoZip)
+                $arquivosZip = @($zipLeitura.Entries | Where-Object { -not [string]::IsNullOrWhiteSpace($_.Name) })
+                $nomeMdf = Split-Path $MdfBackup -Leaf
+                $nomeLdf = Split-Path $LdfBackup -Leaf
+                $entradaMdf = $arquivosZip | Where-Object { $_.FullName -eq $nomeMdf } | Select-Object -First 1
+                $entradaLdf = $arquivosZip | Where-Object { $_.FullName -eq $nomeLdf } | Select-Object -First 1
+                $tamanhoMdf = (Get-Item -LiteralPath $MdfBackup).Length
+                $tamanhoLdf = (Get-Item -LiteralPath $LdfBackup).Length
+                if ($arquivosZip.Count -ne 2 -or $null -eq $entradaMdf -or $null -eq $entradaLdf) {
+                    throw "O ZIP não contém exatamente o MDF e o LDF esperados."
+                }
+                if ($entradaMdf.Length -ne $tamanhoMdf -or $entradaLdf.Length -ne $tamanhoLdf) {
+                    throw "O tamanho dos arquivos dentro do ZIP não confere com o backup original."
+                }
+                return [pscustomobject]@{ Sucesso = $true; Erro = "" }
+            }
+            catch {
+                $erroZip = $_.Exception.Message
+                if ($zipLeitura) {
+                    try { $zipLeitura.Dispose() } catch {}
+                    $zipLeitura = $null
+                }
+                if (Test-Path -LiteralPath $ArquivoZip) { Remove-Item -LiteralPath $ArquivoZip -Force -ErrorAction SilentlyContinue }
+                return [pscustomobject]@{ Sucesso = $false; Erro = $erroZip }
+            }
+            finally {
+                if ($zipLeitura) { try { $zipLeitura.Dispose() } catch {} }
+            }
+        }
         $trocar = {
             if ($Script:DbSwapOcupado -or $lv.SelectedItems.Count -eq 0 -or $null -eq $Script:DbSwapAtual) { return }
             $cand = $lv.SelectedItems[0].Tag
@@ -6642,7 +6683,9 @@ SELECT
             }
 
             $resultadoSeguranca = if ($seguranca.Seguro) { "Verificação: nenhuma movimentação ou caixa aberto." } else { $detalheDadosAbertos }
-            $msg = "ATENÇÃO: isso vai desconectar o banco $($atual.Banco), mover os arquivos atuais para backup e colocar o banco selecionado no lugar.`r`n`r`n$resultadoSeguranca`r`n`r`nBanco novo:`r`n$($cand.Mdf)`r`n`r`nDeseja continuar?"
+            $pastaBackupData = Join-Path (Join-Path "$($txtRaiz.Text)" "concentrador") "data"
+            $pastaBackupDia = Join-Path $pastaBackupData ("backup " + (Get-Date).ToString("dd-MM"))
+            $msg = "ATENÇÃO: isso vai desconectar o banco $($atual.Banco), mover os arquivos atuais para backup e colocar o banco selecionado no lugar.`r`n`r`n$resultadoSeguranca`r`n`r`nBanco novo:`r`n$($cand.Mdf)`r`n`r`nBackup: $pastaBackupDia`r`nOs arquivos MDF e LDF serão guardados juntos em um ZIP validado.`r`n`r`nDeseja continuar?"
             if ($cand.Perfil -ne "Banco zero provável") {
                 $msg += "`r`n`r`nAVISO: o tamanho não parece o banco zero padrão.`r`nEsperado aprox.: MDF 24.320 KB e LOG 1.792 KB.`r`nEncontrado: MDF $($cand.MdfKb) KB e LOG $($cand.LdfKb) KB."
             }
@@ -6651,6 +6694,8 @@ SELECT
             & $setOcupado $true
             $cn = $null
             $backupDir = ""
+            $backupZip = ""
+            $backupDestinoFinal = ""
             $oldMdfBackup = ""
             $oldLdfBackup = ""
             $copiouNovo = $false
@@ -6676,8 +6721,21 @@ SELECT
                     }
                 }
 
-                $backupDir = Join-Path (Join-Path "$($txtRaiz.Text)" "BackupBanco") ((Get-Date).ToString("yyyy-MM-dd_HHmmss"))
+                $backupTag = (Get-Date).ToString("dd-MM-yyyy_HH-mm-ss")
+                $backupBase = "Backup NetWebPDV - $backupTag"
+                $backupDir = Join-Path $pastaBackupDia "$backupBase - arquivos"
+                $backupZip = Join-Path $pastaBackupDia "$backupBase.zip"
+                if ((Test-Path -LiteralPath $backupDir) -or (Test-Path -LiteralPath $backupZip)) {
+                    $backupTag = (Get-Date).ToString("dd-MM-yyyy_HH-mm-ss-fff")
+                    $backupBase = "Backup NetWebPDV - $backupTag"
+                    $backupDir = Join-Path $pastaBackupDia "$backupBase - arquivos"
+                    $backupZip = Join-Path $pastaBackupDia "$backupBase.zip"
+                }
+                New-Item -ItemType Directory -Path $pastaBackupData -Force | Out-Null
+                New-Item -ItemType Directory -Path $pastaBackupDia -Force | Out-Null
                 New-Item -ItemType Directory -Path $backupDir -Force | Out-Null
+                & $grantPath $pastaBackupData
+                & $grantPath $pastaBackupDia
                 & $grantPath $backupDir
                 & $grantPath (Split-Path $atual.Mdf)
                 & $grantPath $cand.Pasta
@@ -6692,9 +6750,9 @@ SELECT
                 $desanexouAtual = $true
                 Start-Sleep -Milliseconds 600
 
-                $oldMdfBackup = Join-Path $backupDir (Split-Path $atual.Mdf -Leaf)
-                $oldLdfBackup = Join-Path $backupDir (Split-Path $atual.Ldf -Leaf)
-                & $addLog "Movendo banco atual para backup..."
+                $oldMdfBackup = Join-Path $backupDir "NetWebPDV_$backupTag.mdf"
+                $oldLdfBackup = Join-Path $backupDir "NetWebPDV_log_$backupTag.ldf"
+                & $addLog "Movendo MDF e LDF atuais para o backup em $pastaBackupDia..."
                 Move-Item -LiteralPath $atual.Mdf -Destination $oldMdfBackup -Force
                 Move-Item -LiteralPath $atual.Ldf -Destination $oldLdfBackup -Force
 
@@ -6708,10 +6766,27 @@ SELECT
                 & $addLog "Anexando banco novo..."
                 & $execNonQuery $cn ("CREATE DATABASE " + $nomeDb + " ON (FILENAME = " + (& $sqlLit $atual.Mdf) + "), (FILENAME = " + (& $sqlLit $atual.Ldf) + ") FOR ATTACH")
                 & $execNonQuery $cn "ALTER DATABASE $nomeDb SET MULTI_USER"
-                & $addLog "Banco trocado com sucesso. Backup antigo: $backupDir"
+                $backupDestinoFinal = $backupDir
+                & $addLog "Compactando o MDF e o LDF do banco antigo..."
+                $compactacao = & $compactarBackup $backupDir $backupZip $oldMdfBackup $oldLdfBackup
+                if ($compactacao.Sucesso) {
+                    $backupDestinoFinal = $backupZip
+                    & $addLog "Backup ZIP validado: contém o MDF e o LDF completos."
+                    try { Remove-Item -LiteralPath $backupDir -Recurse -Force -ErrorAction Stop }
+                    catch { & $addLog "AVISO: o ZIP está válido, mas a pasta com os arquivos também foi mantida: $($_.Exception.Message)" }
+                }
+                else {
+                    & $addLog "AVISO: não foi possível criar o ZIP ($($compactacao.Erro)). Os dois arquivos foram mantidos em $backupDir."
+                }
+                & $addLog "Banco trocado com sucesso. Backup antigo: $backupDestinoFinal"
                 $lblStatus.ForeColor = $Script:UiVerde
-                $lblStatus.Text = "Banco trocado com sucesso. Backup em $backupDir"
-                [System.Windows.Forms.MessageBox]::Show("Banco trocado com sucesso.`r`n`r`nBackup do banco antigo:`r`n$backupDir", "Trocar Banco", "OK", "Information") | Out-Null
+                $lblStatus.Text = "Banco trocado com sucesso. Backup em $backupDestinoFinal"
+                try {
+                    Start-Process -FilePath "explorer.exe" -ArgumentList ('"{0}"' -f $pastaBackupDia)
+                    & $addLog "Pasta do backup aberta: $pastaBackupDia"
+                }
+                catch { & $addLog "AVISO: o backup foi concluído, mas não foi possível abrir a pasta: $($_.Exception.Message)" }
+                [System.Windows.Forms.MessageBox]::Show("Banco trocado com sucesso.`r`n`r`nBackup do banco antigo (MDF + LDF):`r`n$backupDestinoFinal", "Trocar Banco", "OK", "Information") | Out-Null
             }
             catch {
                 $erro = $_.Exception.Message
@@ -14666,7 +14741,7 @@ $formWidth = if ($screen.Width -lt 1000) { 900 } else { 1000 }
 $formHeight = if ($screen.Height -lt 800) { 700 } else { 800 }
 
 $form = New-Object System.Windows.Forms.Form
-$form.Text = "Preparador XMenu – Suporte Técnico v5.25 - REVENDA"
+$form.Text = "Preparador XMenu – Suporte Técnico v5.27 - REVENDA"
 $form.Size = New-Object System.Drawing.Size($formWidth, $formHeight)
 $form.StartPosition = "CenterScreen"
 $form.BackColor = [System.Drawing.Color]::FromArgb(25, 25, 30); $form.ForeColor = 'White'
@@ -15402,7 +15477,7 @@ $bClock.Add_Click({ Invoke-ClockSync })
 [void]$tbl.Controls.Add($bClock)
 
 # Mensagem de abertura: explica o programa para quem abre pela primeira vez
-Log-Message "INFO" "Preparador XMenu v5.25 - REVENDA - preparo e suporte de computadores com XMenu e NetPDV"
+Log-Message "INFO" "Preparador XMenu v5.27 - REVENDA - preparo e suporte de computadores com XMenu e NetPDV"
 Log-Message "LOG" "==============================================================="
 Log-Message "LOG" "COMO USAR"
 Log-Message "LOG" "  PREPARAR AMBIENTE WINDOWS .. ajusta energia, UAC e desempenho do PC num clique"
@@ -15412,7 +15487,9 @@ Log-Message "LOG" "  EXTERNOS ................... acesso remoto, Chrome, TEF HUB
 Log-Message "LOG" "  SUPORTE E DIAGNÓSTICO ...... impressoras, rede, SQL, backup, XMLs e reparos do Windows"
 Log-Message "LOG" "  Passe o mouse sobre um botão para ver o que ele faz antes de clicar."
 Log-Message "LOG" "---------------------------------------------------------------"
-Log-Message "LOG" "NOVO NA v5.25"
+Log-Message "LOG" "NOVO NA v5.27"
+Log-Message "SUCESSO" "  Banco: backup da troca salvo em data\backup DD-MM e pasta aberta ao terminar"
+Log-Message "SUCESSO" "  Banco: backup da troca salvo em concentrador\data com MDF e LDF dentro de ZIP validado"
 Log-Message "SUCESSO" "  Banco: movimentação ou caixa aberto gera alerta sem bloqueio automático"
 Log-Message "SUCESSO" "  Banco: ações de índices mais compactas e diretas"
 Log-Message "SUCESSO" "  Banco: verificação operacional repetida antes de desanexar"
