@@ -1,5 +1,5 @@
 ﻿# =============================================================================
-# PREPARADOR XMENU v5.35
+# PREPARADOR XMENU v5.36
 # Visual: Dashboard Moderno
 # Correcoes:
 #   - CRITICO: Removido DoEvents do loop de evento de download (causava crash).
@@ -6165,11 +6165,13 @@ function Invoke-BackupBanco {
 # falha. Aqui os proprios arquivos do banco sao copiados para um .zip: o banco fica OFFLINE
 # so durante a copia (e o SQL solta os arquivos), e o Preparador tenta coloca-lo de volta
 # no fim. Se estava fora do ar, continua fora do ar: o reparo e um passo separado.
+# Tudo que a rotina faz vai para o Log (tela e arquivo), com o prefixo "Backup manual:".
 # -----------------------------------------------------------------------------
 function Get-ArquivosDoBanco {
     # Estado e arquivos (MDF/LDF) de um banco, lidos do master: funciona com o banco fora do ar.
     # Devolve hashtable: Estado / Maquina / Arquivos (Tipo, Caminho, Existe, Bytes) / BytesTotal
-    param($Conexao, [string]$Banco)
+    # -Silencioso: nao escreve no Log o estado e a lista de arquivos (o comando SQL e sempre registrado)
+    param($Conexao, [string]$Banco, [switch]$Silencioso)
     $info = @{ Estado = ""; Maquina = ""; Arquivos = @(); BytesTotal = [long]0 }
     $cmd = $Conexao.CreateCommand()
     $cmd.CommandTimeout = 60
@@ -6177,7 +6179,7 @@ function Get-ArquivosDoBanco {
     "(SELECT state_desc FROM sys.databases WHERE name = @b) AS estado; " +
     "SELECT type_desc, physical_name FROM sys.master_files WHERE database_id = DB_ID(@b) ORDER BY type, file_id"
     [void]$cmd.Parameters.AddWithValue("@b", $Banco)
-    Log-SqlBancoComando "Copia de arquivos do banco" $cmd.CommandText "banco=$Banco"
+    Log-SqlBancoComando "Backup manual" $cmd.CommandText "banco=$Banco"
     $tarefa = $cmd.ExecuteReaderAsync()
     Wait-SqlTarefa $tarefa
     $rd = $tarefa.Result
@@ -6198,6 +6200,14 @@ function Get-ArquivosDoBanco {
     }
     finally { $rd.Close() }
     if ($info.Estado -eq "" -or $info.Arquivos.Count -eq 0) { throw "O banco ""$Banco"" não existe nesse SQL Server." }
+    if (-not $Silencioso) {
+        Log-Message "INFO" "Backup manual: o banco $Banco está $($info.Estado) no SQL Server da máquina $($info.Maquina)"
+        foreach ($arqLido in $info.Arquivos) {
+            if ($arqLido.Existe) { Log-Message "INFO" "Backup manual:   arquivo $($arqLido.Tipo): $($arqLido.Caminho) ($(Format-BytesTexto $arqLido.Bytes))" }
+            else { Log-Message "ERRO" "Backup manual:   arquivo $($arqLido.Tipo): $($arqLido.Caminho) NÃO existe no disco" }
+        }
+        Log-Message "INFO" "Backup manual:   total dos arquivos no disco: $(Format-BytesTexto $info.BytesTotal)"
+    }
     return $info
 }
 
@@ -6217,7 +6227,14 @@ function Invoke-BackupArquivosBanco {
     $arqCancelado = $Cancelado
     $arqAvisa = { param($Etapa, $Pct) if ($null -ne $arqAoProgredir) { $null = & $arqAoProgredir $Etapa $Pct } }
     $arqParar = { ($null -ne $arqCancelado) -and [bool](& $arqCancelado) }
+    $arqLog = { param([string]$Tag, [string]$Texto) Log-Message $Tag ("Backup manual: " + $Texto) }
+    $arqTempo = {
+        param($Intervalo)
+        if ($Intervalo.TotalSeconds -ge 60) { return ("{0}min {1:00}s" -f [int][math]::Floor($Intervalo.TotalMinutes), $Intervalo.Seconds) }
+        return ("{0:N1}s" -f $Intervalo.TotalSeconds)
+    }
     $arqRelogio = [System.Diagnostics.Stopwatch]::StartNew()
+    $relogioOffline = $null
     $cnArq = $null
     $deixeiOffline = $false
     $zipCaminho = ""
@@ -6226,9 +6243,10 @@ function Invoke-BackupArquivosBanco {
 
     try {
         & $arqAvisa "Conectando" -1
+        & $arqLog "INFO" "conectando ao SQL Server para ler os arquivos do banco $Banco"
         $cnArq = New-Object System.Data.SqlClient.SqlConnection($TextoConexao)
         Wait-SqlTarefa $cnArq.OpenAsync()
-        $info = Get-ArquivosDoBanco -Conexao $cnArq -Banco $Banco
+        $info = Get-ArquivosDoBanco -Conexao $cnArq -Banco $Banco -Silencioso
         $res.EstadoAntes = $info.Estado
         if (-not (Test-SqlLocal -MaquinaSql $info.Maquina)) {
             throw "Esse SQL Server está na máquina $($info.Maquina). A cópia dos arquivos precisa ser feita nela: abra o Preparador no servidor."
@@ -6237,30 +6255,52 @@ function Invoke-BackupArquivosBanco {
         if ($existentes.Count -eq 0) { throw "Nenhum arquivo do banco $Banco existe no disco. Não há o que copiar." }
         $res.BytesOrigem = $info.BytesTotal
 
-        if (-not (Test-Path -LiteralPath $Pasta)) { New-Item -ItemType Directory -Path $Pasta -Force | Out-Null }
+        if (-not (Test-Path -LiteralPath $Pasta)) {
+            New-Item -ItemType Directory -Path $Pasta -Force | Out-Null
+            & $arqLog "INFO" "pasta de destino criada: $Pasta"
+        }
         $espaco = Test-EspacoBackup -Pasta $Pasta -Bytes $info.BytesTotal
+        & $arqLog "INFO" "espaço no disco da pasta de destino: livre $(Format-BytesTexto $espaco.Livre), necessário $(Format-BytesTexto $espaco.Precisa) (tamanho dos arquivos + 10% de folga)"
         if (-not $espaco.Ok) { throw $espaco.Texto }
 
-        # Nome: "NetWebPDV - ARQUIVOS - MAQUINA - 19-09-2026 18h30.zip" (nunca repete um que ja exista)
+        # O ID da loja so da para ler com o banco ONLINE: tem que ser antes de deixa-lo offline
+        $lojaZip = ""
+        if ($info.Estado -eq "ONLINE") {
+            & $arqLog "INFO" "lendo o ID da loja (IDParceiro da tabela NFCeTokenID do banco $Banco) para colocar no nome do .zip"
+            $lojaZip = "$(Get-SqlIdLoja -Conexao $cnArq -Banco $Banco)".Trim()
+            if ($lojaZip -ne "") { & $arqLog "INFO" "ID da loja: $lojaZip" }
+            else { & $arqLog "INFO" "não achei o ID da loja nesse banco; o nome do .zip vai sem ele" }
+        }
+        else { & $arqLog "INFO" "o banco está $($info.Estado): não dá para ler o ID da loja, então o nome do .zip vai sem ele" }
+
+        # Nome, igual ao do backup normal: "NetWebPDV - ZIP - Loja 1234 - 19-09-2026 18h30.zip" (nunca repete um que ja exista)
         $nomeBanco = $Banco
         if ($Banco -ieq 'netwebpdv') { $nomeBanco = 'NetWebPDV' }
-        $base = ($nomeBanco + " - ARQUIVOS - " + $env:COMPUTERNAME + " - " + (Get-Date).ToString("dd-MM-yyyy HH'h'mm")) -replace '[\\/:*?"<>|]', '-'
+        $partesNome = @($nomeBanco, "ZIP")
+        if ($lojaZip -ne "") { $partesNome += ("Loja " + $lojaZip) }
+        $partesNome += (Get-Date).ToString("dd-MM-yyyy HH'h'mm")
+        $base = ($partesNome -join " - ") -replace '[\\/:*?"<>|]', '-'
         $zipCaminho = Join-Path $Pasta ($base + ".zip")
         $repeticao = 1
         while (Test-Path -LiteralPath $zipCaminho) { $repeticao++; $zipCaminho = Join-Path $Pasta ($base + " ($repeticao).zip") }
+        & $arqLog "ZIP" "o .zip será criado em: $zipCaminho"
 
         # 1) libera os arquivos: o SQL segura o MDF e o LDF enquanto o banco esta anexado
         if (& $arqParar) { throw "Cópia cancelada." }
         if ($info.Estado -ne "OFFLINE") {
             & $arqAvisa "Deixando o banco offline para liberar os arquivos" -1
+            & $arqLog "INFO" "passo 1 de 4: deixando o banco $Banco offline, para o SQL Server soltar o MDF e o LDF. Quem estiver conectado (PDV, Concentrador) será desconectado."
             $cmdOff = $cnArq.CreateCommand()
             $cmdOff.CommandTimeout = 0
             $cmdOff.CommandText = "ALTER DATABASE $nomeSqlArq SET OFFLINE WITH ROLLBACK IMMEDIATE"
-            Log-SqlBancoComando "Copia de arquivos do banco" $cmdOff.CommandText "banco=$Banco"
+            Log-SqlBancoComando "Backup manual" $cmdOff.CommandText "banco=$Banco"
+            $relogioOffline = [System.Diagnostics.Stopwatch]::StartNew()
             $tarefaOff = $cmdOff.ExecuteNonQueryAsync()
             Wait-SqlTarefa $tarefaOff -IntervaloMs 300
             $deixeiOffline = $true
+            & $arqLog "INFO" "o banco $Banco está offline. O sistema fica travado até o fim da cópia."
         }
+        else { & $arqLog "INFO" "passo 1 de 4: o banco $Banco já está OFFLINE; não é preciso mudar o estado dele." }
 
         # 2) copia para o .zip, com progresso e cancelamento
         Add-Type -AssemblyName System.IO.Compression
@@ -6268,6 +6308,8 @@ function Invoke-BackupArquivosBanco {
         $totalBytes = [long]0
         foreach ($aq in $existentes) { $totalBytes += $aq.Bytes }
         $feitos = [long]0
+        $proximoMarco = 10
+        & $arqLog "ZIP" "passo 2 de 4: copiando $($existentes.Count) arquivo(s), $(Format-BytesTexto $totalBytes) no total, para dentro do .zip (compressão normal, feita pelo próprio Preparador; nenhum programa externo é usado)"
         $fsZip = [System.IO.File]::Open($zipCaminho, [System.IO.FileMode]::Create)
         try {
             $pacote = New-Object System.IO.Compression.ZipArchive($fsZip, [System.IO.Compression.ZipArchiveMode]::Create)
@@ -6275,6 +6317,8 @@ function Invoke-BackupArquivosBanco {
                 foreach ($aq in $existentes) {
                     $nomeArquivo = Split-Path -Leaf $aq.Caminho
                     & $arqAvisa "Copiando $nomeArquivo" 0
+                    & $arqLog "ZIP" "copiando $nomeArquivo ($(Format-BytesTexto $aq.Bytes)) de $($aq.Caminho)"
+                    $relogioArquivo = [System.Diagnostics.Stopwatch]::StartNew()
                     $entrada = $pacote.CreateEntry($nomeArquivo, [System.IO.Compression.CompressionLevel]::Optimal)
                     $entrada.LastWriteTime = [DateTimeOffset](Get-Item -LiteralPath $aq.Caminho).LastWriteTime
                     $saida = $entrada.Open()
@@ -6287,16 +6331,23 @@ function Invoke-BackupArquivosBanco {
                             $feitos += $n
                             [System.Windows.Forms.Application]::DoEvents()
                             if (& $arqParar) { throw "Cópia cancelada." }
+                            $pctGeral = 100.0 * $feitos / [math]::Max($totalBytes, 1)
+                            if ($pctGeral -ge $proximoMarco -and $pctGeral -lt 100) {
+                                & $arqLog "ZIP" "copiando... $([math]::Floor($pctGeral))% ($(Format-BytesTexto $feitos) de $(Format-BytesTexto $totalBytes))"
+                                $proximoMarco = ([math]::Floor($pctGeral / 10) + 1) * 10
+                            }
                             if ($relogioPct.ElapsedMilliseconds -ge 250) {
                                 $relogioPct.Restart()
-                                & $arqAvisa "Copiando $nomeArquivo" ([math]::Round(100.0 * $feitos / [math]::Max($totalBytes, 1), 1))
+                                & $arqAvisa "Copiando $nomeArquivo" ([math]::Round($pctGeral, 1))
                             }
                         }
                     }
                     finally { $leitura.Dispose(); $saida.Dispose() }
                     $res.Arquivos += $nomeArquivo
+                    & $arqLog "ZIP" "$nomeArquivo copiado para o .zip em $(& $arqTempo $relogioArquivo.Elapsed)"
                 }
                 # LEIA-ME dentro do .zip: quem abrir depois entende o que e e como usar
+                & $arqLog "ZIP" "adicionando o LEIA-ME.txt ao .zip (explica o que é e como anexar o banco de volta)"
                 $ausentes = @($info.Arquivos | Where-Object { -not $_.Existe })
                 $linhasLeia = @(
                     "Cópia dos arquivos do banco $Banco",
@@ -6309,6 +6360,7 @@ function Invoke-BackupArquivosBanco {
                 if ($ausentes.Count -gt 0) {
                     $linhasLeia += ""
                     $linhasLeia += "Arquivos que já não existiam no disco e por isso NÃO estão aqui: $((@($ausentes | ForEach-Object { Split-Path -Leaf $_.Caminho })) -join ', ')"
+                    & $arqLog "ERRO" "arquivo(s) que não existiam no disco e ficaram de fora do .zip: $((@($ausentes | ForEach-Object { Split-Path -Leaf $_.Caminho })) -join ', ')"
                 }
                 $linhasLeia += ""
                 $linhasLeia += "Como usar: com o SQL Server parado (ou o banco desanexado), extraia o MDF e o LDF para a pasta de dados e anexe o banco"
@@ -6325,16 +6377,19 @@ function Invoke-BackupArquivosBanco {
             finally { $pacote.Dispose() }
         }
         finally { $fsZip.Dispose() }
+        & $arqLog "ZIP" "arquivo .zip gravado no disco: $(Format-BytesTexto (Get-Item -LiteralPath $zipCaminho).Length)"
 
         # 3) confere o .zip: tamanhos batem e tudo descompacta sem erro
         & $arqAvisa "Conferindo o .zip" 0
+        & $arqLog "INFO" "passo 3 de 4: conferindo o .zip (o tamanho de cada arquivo e a leitura completa, para garantir que descompacta sem erro)"
         $leituraZip = [System.IO.Compression.ZipFile]::OpenRead($zipCaminho)
         try {
             $conferidos = [long]0
             foreach ($aq in $existentes) {
-                $entradaZip = $leituraZip.GetEntry((Split-Path -Leaf $aq.Caminho))
-                if ($null -eq $entradaZip) { throw "O .zip ficou sem o arquivo $(Split-Path -Leaf $aq.Caminho)." }
-                if ($entradaZip.Length -ne $aq.Bytes) { throw "O tamanho de $(Split-Path -Leaf $aq.Caminho) dentro do .zip não confere com o original." }
+                $nomeConferido = Split-Path -Leaf $aq.Caminho
+                $entradaZip = $leituraZip.GetEntry($nomeConferido)
+                if ($null -eq $entradaZip) { throw "O .zip ficou sem o arquivo $nomeConferido." }
+                if ($entradaZip.Length -ne $aq.Bytes) { throw "O tamanho de $nomeConferido dentro do .zip não confere com o original." }
                 $fluxo = $entradaZip.Open()
                 try {
                     $bufLe = New-Object byte[] (4MB)
@@ -6346,6 +6401,7 @@ function Invoke-BackupArquivosBanco {
                 }
                 finally { $fluxo.Dispose() }
                 & $arqAvisa "Conferindo o .zip" ([math]::Round(100.0 * $conferidos / [math]::Max($totalBytes, 1), 1))
+                & $arqLog "INFO" "$nomeConferido conferido no .zip: tamanho igual ao original ($(Format-BytesTexto $aq.Bytes)) e descompactou sem erro"
             }
         }
         finally { $leituraZip.Dispose() }
@@ -6354,37 +6410,47 @@ function Invoke-BackupArquivosBanco {
         $res.ZipBytes = (Get-Item -LiteralPath $zipCaminho).Length
         $zipTerminou = $true
         $res.Ok = $true
+        & $arqLog "SUCESSO" ".zip pronto e conferido: $zipCaminho ($(Format-BytesTexto $res.ZipBytes))"
     }
     catch {
         if ((& $arqParar) -or "$($_.Exception.Message)" -eq "Cópia cancelada.") {
             $res.Cancelado = $true
             $res.Erro = "Cópia cancelada."
+            & $arqLog "CANCEL" "cópia cancelada pelo técnico"
         }
-        else { $res.Erro = "$(Get-TextoErroSql $_.Exception)" }
+        else {
+            $res.Erro = "$(Get-TextoErroSql $_.Exception)"
+            & $arqLog "ERRO" "a cópia falhou: $($res.Erro)"
+        }
     }
     finally {
         # Nada pela metade e o banco nunca fica offline por causa da copia
         if ($zipCaminho -ne "" -and -not $zipTerminou -and (Test-Path -LiteralPath $zipCaminho)) {
+            & $arqLog "INFO" "apagando o .zip incompleto: $zipCaminho"
             for ($tentativa = 0; $tentativa -lt 20 -and (Test-Path -LiteralPath $zipCaminho); $tentativa++) {
                 try { Remove-Item -LiteralPath $zipCaminho -Force -ErrorAction Stop }
                 catch { Start-Sleep -Milliseconds 250 }
             }
+            if (Test-Path -LiteralPath $zipCaminho) { & $arqLog "ERRO" "não consegui apagar o .zip incompleto; apague à mão: $zipCaminho" }
+            else { & $arqLog "INFO" ".zip incompleto apagado" }
         }
         if ($deixeiOffline -and $null -ne $cnArq -and $cnArq.State -eq 'Open') {
             & $arqAvisa "Colocando o banco de volta" -1
+            & $arqLog "INFO" "passo 4 de 4: colocando o banco $Banco de volta ONLINE"
             try {
                 $cmdOn = $cnArq.CreateCommand()
                 $cmdOn.CommandTimeout = 0
                 $cmdOn.CommandText = "ALTER DATABASE $nomeSqlArq SET ONLINE"
-                Log-SqlBancoComando "Copia de arquivos do banco" $cmdOn.CommandText "banco=$Banco"
+                Log-SqlBancoComando "Backup manual" $cmdOn.CommandText "banco=$Banco"
                 $tarefaOn = $cmdOn.ExecuteNonQueryAsync()
                 Wait-SqlTarefa $tarefaOn -IntervaloMs 300
             }
             catch {
-                Log-Message "ERRO" "Backup por arquivos: o banco $Banco não voltou para ONLINE - $(Get-TextoErroSql $_.Exception)"
+                & $arqLog "ERRO" "o banco $Banco não voltou para ONLINE - $(Get-TextoErroSql $_.Exception)"
                 if ($info.Estado -ne "ONLINE") { $res.Aviso = "O banco continua fora do ar, como estava antes." }
                 else { $res.Aviso = "O banco não voltou sozinho para ONLINE: abra o Diagnóstico do Banco." }
             }
+            if ($null -ne $relogioOffline) { & $arqLog "INFO" "tempo com o banco offline: $(& $arqTempo $relogioOffline.Elapsed)" }
         }
         if ($null -ne $cnArq -and $cnArq.State -eq 'Open') {
             try {
@@ -6392,12 +6458,16 @@ function Invoke-BackupArquivosBanco {
                 $cmdEst.CommandTimeout = 30
                 $cmdEst.CommandText = "SELECT state_desc FROM sys.databases WHERE name = @b"
                 [void]$cmdEst.Parameters.AddWithValue("@b", $Banco)
+                Log-SqlBancoComando "Backup manual" $cmdEst.CommandText "banco=$Banco"
                 $res.EstadoDepois = "$($cmdEst.ExecuteScalar())"
+                & $arqLog "INFO" "estado do banco $Banco agora: $($res.EstadoDepois)"
+                if (-not $deixeiOffline) { & $arqLog "INFO" "o Preparador não mudou o estado do banco" }
             }
-            catch {}
+            catch { & $arqLog "ERRO" "não consegui ler o estado do banco no fim: $(Get-TextoErroSql $_.Exception)" }
         }
         if ($null -ne $cnArq) { try { $cnArq.Close() } catch {} }
         $res.Duracao = $arqRelogio.Elapsed
+        & $arqLog "INFO" "tempo total da operação: $(& $arqTempo $res.Duracao)"
     }
     return $res
 }
@@ -7414,13 +7484,13 @@ function Show-BackupBanco {
         $pbBkp.Anchor = 'Top,Left,Right'
         [void]$f.Controls.Add($pbBkp)
 
-        $btnBkpFazer = New-ToolButton $f "FAZER BACKUP" 20 384 168 34 $Script:UiVerde $null "Faz o backup completo, confere se o arquivo restaura e abre a pasta no fim"
+        $btnBkpFazer = New-ToolButton $f "FAZER BACKUP" 20 384 150 34 $Script:UiVerde $null "Faz o backup completo, confere se o arquivo restaura e abre a pasta no fim"
         $btnBkpFazer.Enabled = $false
-        $btnBkpCancelar = New-ToolButton $f "CANCELAR" 194 384 100 34 $Script:UiVermelho $null "Interrompe o backup e apaga o arquivo pela metade"
+        $btnBkpCancelar = New-ToolButton $f "CANCELAR" 176 384 92 34 $Script:UiVermelho $null "Interrompe o backup e apaga o arquivo pela metade"
         $btnBkpCancelar.Enabled = $false
-        $btnBkpArquivos = New-ToolButton $f "COPIAR ARQUIVOS (ZIP)" 300 384 204 34 ([System.Drawing.Color]::FromArgb(176, 112, 16)) $null "Copia os arquivos do banco (MDF e LDF) para um .zip, sem usar o backup do SQL. Serve quando o backup normal falha (banco corrompido, suspeito ou em recuperação pendente). O banco fica offline durante a cópia."
+        $btnBkpArquivos = New-ToolButton $f "BACKUP MANUAL (TRAVA O SISTEMA)" 274 384 228 34 ([System.Drawing.Color]::FromArgb(128, 22, 22)) $null "Backup manual, do jeito antigo: copia os arquivos do banco (MDF e LDF) para um .zip, sem usar o backup do SQL. O SISTEMA TRAVA: o banco fica offline durante a cópia e o PDV e o Concentrador perdem a conexão. Serve quando o backup normal falha (banco corrompido, suspeito ou em recuperação pendente). No fim o Preparador tenta colocar o banco de volta ONLINE."
         $btnBkpArquivos.Enabled = $false
-        $btnBkpPasta = New-ToolButton $f "ABRIR PASTA" 510 384 108 34 $Script:UiCinza $null "Abre a pasta dos backups"
+        $btnBkpPasta = New-ToolButton $f "ABRIR PASTA" 508 384 108 34 $Script:UiCinza $null "Abre a pasta dos backups"
         $btnBkpFechar = New-ToolButton $f "FECHAR" 624 384 120 34 $Script:UiCinza $null "Fecha esta janela"
         $btnBkpFechar.Anchor = 'Top,Right'
         $lblBkpStatus = New-ToolLabel $f "O banco continua no ar durante o backup: o PDV não trava e ninguém precisa parar de vender." 20 430 9 -Cor $Script:UiSuave -W 724
@@ -7433,7 +7503,7 @@ function Show-BackupBanco {
             $Script:ToolTip.SetToolTip($cmbBkpBanco, "Bancos de usuário desse SQL Server. O netwebpdv já vem escolhido quando existe.")
             $Script:ToolTip.SetToolTip($lblBkpPasta, "Pasta fixa dos backups, dentro de Arquivos Xmenu na Área de Trabalho.")
             $Script:ToolTip.SetToolTip($chkBkpZip, "O .bak tem o tamanho dos dados. Compactado costuma ficar 80 a 90% menor, bom para WeTransfer ou pendrive.")
-            $Script:ToolTip.SetToolTip($btnBkpArquivos, "Copia os arquivos do banco (MDF e LDF) para um .zip, sem usar o backup do SQL. Serve quando o backup normal falha (banco corrompido, suspeito ou em recuperação pendente). O banco fica offline durante a cópia e o Preparador tenta colocá-lo de volta no fim.")
+            $Script:ToolTip.SetToolTip($btnBkpArquivos, "Backup manual, do jeito antigo: copia os arquivos do banco (MDF e LDF) para um .zip, sem usar o backup do SQL. O SISTEMA TRAVA: o banco fica offline durante a cópia e o PDV e o Concentrador perdem a conexão. Serve quando o backup normal falha (banco corrompido, suspeito ou em recuperação pendente). No fim o Preparador tenta colocar o banco de volta ONLINE.")
         }
 
         # ---------------------------------------------------------------------
@@ -7457,7 +7527,7 @@ function Show-BackupBanco {
             if ($Script:BkpEstados.ContainsKey($nomeSel)) { $estadoSel = "$($Script:BkpEstados[$nomeSel])" }
             if ($estadoSel -ne "" -and $estadoSel -ne "ONLINE") {
                 $lblBkpStatus.ForeColor = $Script:UiAmarelo
-                $lblBkpStatus.Text = "O banco $nomeSel está ${estadoSel}: o backup do SQL não funciona assim. Use COPIAR ARQUIVOS (ZIP) para guardar os arquivos do banco."
+                $lblBkpStatus.Text = "O banco $nomeSel está ${estadoSel}: o backup do SQL não funciona assim. Use BACKUP MANUAL (TRAVA O SISTEMA) para guardar os arquivos do banco."
                 $Script:BkpMsgEstado = $true
             }
             elseif ($Script:BkpMsgEstado) {
@@ -7648,7 +7718,7 @@ function Show-BackupBanco {
             }
         }
 
-        # ---- COPIAR ARQUIVOS (ZIP): quando o backup do SQL nao funciona (banco corrompido, suspeito, recuperacao pendente...).
+        # ---- BACKUP MANUAL (TRAVA O SISTEMA): quando o backup do SQL nao funciona (banco corrompido, suspeito, recuperacao pendente...).
         # Copia o MDF e o LDF para um .zip (com LEIA-ME), com o banco offline so durante a copia.
         $copiarArquivos = {
             if ($Script:BkpOcupado -or "$($cmbBkpBanco.Text)" -eq "") { return }
@@ -7662,15 +7732,17 @@ function Show-BackupBanco {
             # Aviso em destaque; se ele falhar por qualquer motivo, vale a caixa comum
             $mostraAvisoArq = {
                 param([string]$Manchete, [string]$Resumo, [string]$Tipo, $Itens)
-                try { [void](Show-AvisoDestaque -Dono $f -Titulo "Copiar arquivos do banco" -Manchete $Manchete -Resumo $Resumo -Tipo $Tipo -Itens $Itens -TextoSim "OK") }
+                try { [void](Show-AvisoDestaque -Dono $f -Titulo "Backup manual do banco" -Manchete $Manchete -Resumo $Resumo -Tipo $Tipo -Itens $Itens -TextoSim "OK") }
                 catch {
                     $textoItens = (@($Itens | ForEach-Object { "$($_.Titulo)`r`n$($_.Texto)" }) -join "`r`n`r`n")
-                    [System.Windows.Forms.MessageBox]::Show("$Manchete`r`n`r`n$Resumo`r`n`r`n$textoItens", "Copiar arquivos do banco", "OK", "Warning") | Out-Null
+                    [System.Windows.Forms.MessageBox]::Show("$Manchete`r`n`r`n$Resumo`r`n`r`n$textoItens", "Backup manual do banco", "OK", "Warning") | Out-Null
                 }
             }
+            Log-Message "INFO" "Backup manual: o técnico pediu a cópia dos arquivos do banco $bancoEscolhido (servidor: $($txtBkpServidor.Text), usuário: $($cmbBkpUsuario.Text))"
             try {
                 $lblBkpStatus.ForeColor = $Script:UiAmarelo
                 $lblBkpStatus.Text = "Lendo os arquivos do banco $bancoEscolhido..."
+                Log-Message "INFO" "Backup manual: lendo no SQL Server a situação e os arquivos do banco $bancoEscolhido (ainda nada é alterado)"
                 $textoConArq = New-SqlTextoConexao -Servidor $txtBkpServidor.Text -Usuario $cmbBkpUsuario.Text -Senha $txtBkpSenha.Text -Timeout 15
                 $cnLe = New-Object System.Data.SqlClient.SqlConnection($textoConArq)
                 try {
@@ -7681,7 +7753,8 @@ function Show-BackupBanco {
                 if (-not (Test-SqlLocal -MaquinaSql $infoArq.Maquina)) {
                     & $mostraAvisoArq "A CÓPIA PRECISA SER FEITA NO SERVIDOR DO BANCO" "Nada foi alterado." 'perigo' @(@{ Tipo = 'perigo'; Titulo = 'O SQL SERVER ESTÁ EM OUTRA MÁQUINA'; Texto = "Esse SQL Server está na máquina $($infoArq.Maquina). Os arquivos do banco estão no disco dela: abra o Preparador no servidor." })
                     $lblBkpStatus.ForeColor = $Script:UiSuave
-                    $lblBkpStatus.Text = "Cópia não iniciada: o SQL Server está em outra máquina."
+                    $lblBkpStatus.Text = "Backup manual não iniciado: o SQL Server está em outra máquina."
+                    Log-Message "ERRO" "Backup manual: o SQL Server está na máquina $($infoArq.Maquina), não nesta. Nada foi alterado."
                     return
                 }
                 $existentesArq = @($infoArq.Arquivos | Where-Object { $_.Existe })
@@ -7690,23 +7763,36 @@ function Show-BackupBanco {
                     & $mostraAvisoArq "NENHUM ARQUIVO DO BANCO NO DISCO" "Nada foi alterado." 'perigo' @(@{ Tipo = 'perigo'; Titulo = 'NÃO HÁ O QUE COPIAR'; Texto = "O SQL Server aponta para arquivos que não existem mais: $((@($infoArq.Arquivos | ForEach-Object { $_.Caminho })) -join '; ')" })
                     $lblBkpStatus.ForeColor = $Script:UiVermelho
                     $lblBkpStatus.Text = "Nenhum arquivo do banco existe no disco."
+                    Log-Message "ERRO" "Backup manual: nenhum arquivo do banco $bancoEscolhido existe no disco. Nada foi alterado."
                     return
                 }
                 $espacoArq = Test-EspacoBackup -Pasta $Script:BackupPasta -Bytes $infoArq.BytesTotal
                 if (-not $espacoArq.Ok) {
                     & $mostraAvisoArq "SEM ESPAÇO PARA O .ZIP" "Nada foi alterado." 'perigo' @(@{ Tipo = 'perigo'; Titulo = 'LIBERE ESPAÇO EM DISCO'; Texto = "$($espacoArq.Texto)" })
                     $lblBkpStatus.ForeColor = $Script:UiVermelho
-                    $lblBkpStatus.Text = "Cópia não iniciada: sem espaço em disco."
+                    $lblBkpStatus.Text = "Backup manual não iniciado: sem espaço em disco."
+                    Log-Message "ERRO" "Backup manual: $($espacoArq.Texto) Nada foi alterado."
                     return
                 }
 
+                Log-Message "INFO" "Backup manual: verificações ok (SQL nesta máquina, arquivos no disco, espaço livre). Aguardando a confirmação do técnico: o banco ficará offline durante a cópia."
                 # aviso em destaque com confirmacao
                 $listaArq = (@($existentesArq | ForEach-Object { "$(Split-Path -Leaf $_.Caminho) ($(Format-BytesTexto $_.Bytes))" }) -join "; ")
                 $itensArq = @(
-                    @{ Tipo = 'alerta'; Titulo = 'O BANCO FICA OFFLINE DURANTE A CÓPIA'; Texto = 'O PDV e o Concentrador perdem a conexão até terminar (pode levar alguns minutos). No fim o Preparador tenta colocar o banco de volta ONLINE.' },
+                    @{ Tipo = 'alerta'; Titulo = 'O SISTEMA FICA TRAVADO ATÉ TERMINAR'; Texto = 'O banco fica offline durante a cópia: o PDV e o Concentrador perdem a conexão e ninguém consegue vender nem gravar. Pode levar alguns minutos (depende do tamanho do banco). No fim o Preparador tenta colocar o banco de volta ONLINE.' },
                     @{ Tipo = 'ok'; Titulo = 'O .ZIP FICA EM'; Texto = "$($Script:BackupPasta)`r`nDentro: $listaArq + LEIA-ME.txt" },
                     @{ Tipo = 'info'; Titulo = 'QUANDO USAR'; Texto = 'Serve quando o backup normal falha (banco corrompido, suspeito ou em recuperação pendente). Com o banco saudável, prefira FAZER BACKUP: ele não tira o banco do ar.' }
                 )
+                $abertosArq = @()
+                foreach ($nomeProgArq in @("Concentrador", "NetStart", "NetServidor", "NetTerminal", "NetPrint", "NetPDV", "LinkXMenu", "XMenu")) { if (Get-Process -Name $nomeProgArq -ErrorAction SilentlyContinue) { $abertosArq += $nomeProgArq } }
+                if ($abertosArq.Count -gt 0) {
+                    Log-Message "INFO" "Backup manual: programas do NetControll abertos nesta máquina agora: $($abertosArq -join ', ')"
+                    $itensArq += @{ Tipo = 'alerta'; Titulo = 'PROGRAMAS ABERTOS NESTA MÁQUINA'; Texto = "Abertos agora: $($abertosArq -join ', '). Eles vão perder a conexão com o banco. O ideal é fechá-los antes de continuar (o Preparador não fecha nada sozinho)." }
+                }
+                else {
+                    Log-Message "INFO" "Backup manual: nenhum programa do NetControll aberto nesta máquina"
+                    $itensArq += @{ Tipo = 'info'; Titulo = 'NENHUM PROGRAMA ABERTO NESTA MÁQUINA'; Texto = 'Em outros computadores da rede, o PDV e o Concentrador também ficam sem o banco até terminar.' }
+                }
                 if ($infoArq.Estado -ne "ONLINE") {
                     $itensArq += @{ Tipo = 'alerta'; Titulo = "O BANCO JÁ ESTÁ FORA DO AR ($($infoArq.Estado))"; Texto = 'Se ele já estava assim, continua assim depois da cópia. Depois use REPARAR BANCO (Diagnóstico do Banco).' }
                 }
@@ -7715,27 +7801,29 @@ function Show-BackupBanco {
                 }
                 $confirmouArq = $false
                 try {
-                    $respArq = @(Show-AvisoDestaque -Dono $f -Titulo "Copiar arquivos do banco" -Manchete "VAI COPIAR OS ARQUIVOS DO BANCO $($bancoEscolhido.ToUpper()) PARA UM .ZIP" `
-                            -Resumo "Não usa o backup do SQL: copia os arquivos MDF e LDF direto do disco." -Tipo 'aviso' `
+                    $respArq = @(Show-AvisoDestaque -Dono $f -Titulo "Backup manual do banco" -Manchete "O SISTEMA VAI TRAVAR: BACKUP MANUAL DO BANCO $($bancoEscolhido.ToUpper())" `
+                            -Resumo "É o backup do jeito antigo: copia os arquivos do banco (MDF e LDF) para um .zip. Para isso o banco fica offline e TRAVA o sistema: o PDV e o Concentrador ficam parados até terminar." -Tipo 'perigo' `
                             -Destaque @{ Rotulo = 'situação do banco agora'; Valor = $infoArq.Estado; Detalhe = "Arquivos: $($existentesArq.Count) ($(Format-BytesTexto $infoArq.BytesTotal))" } `
-                            -Itens $itensArq -TextoSim "SIM, COPIAR OS ARQUIVOS" -TextoNao "CANCELAR" -CorSim $Script:UiAzul)
+                            -Itens $itensArq -TextoSim "SIM, FAZER O BACKUP MANUAL" -TextoNao "CANCELAR" -CorSim ([System.Drawing.Color]::FromArgb(128, 22, 22)))
                     $confirmouArq = ($respArq.Count -gt 0 -and $respArq[-1] -eq $true)
                 }
                 catch {
-                    Log-Message "ERRO" "Backup por arquivos: não consegui montar o aviso em destaque ($($_.Exception.Message)); usando a caixa comum."
-                    $confirmouArq = ([System.Windows.Forms.MessageBox]::Show("O banco $bancoEscolhido ficará OFFLINE durante a cópia dos arquivos para um .zip em:`r`n$($Script:BackupPasta)`r`n`r`nContinuar?", "Copiar arquivos do banco", "YesNo", "Warning") -eq [System.Windows.Forms.DialogResult]::Yes)
+                    Log-Message "ERRO" "Backup manual: não consegui montar o aviso em destaque ($($_.Exception.Message)); usando a caixa comum."
+                    $confirmouArq = ([System.Windows.Forms.MessageBox]::Show("O SISTEMA VAI TRAVAR.`r`n`r`nO banco $bancoEscolhido ficará OFFLINE durante o backup manual. Os arquivos serão copiados para um .zip em:`r`n$($Script:BackupPasta)`r`n`r`nContinuar?", "Backup manual do banco", "YesNo", "Warning") -eq [System.Windows.Forms.DialogResult]::Yes)
                 }
                 if (-not $confirmouArq) {
                     $lblBkpStatus.ForeColor = $Script:UiSuave
-                    $lblBkpStatus.Text = "Cópia cancelada. Nada foi alterado."
+                    $lblBkpStatus.Text = "Backup manual cancelado. Nada foi alterado."
+                    Log-Message "CANCEL" "Backup manual: o técnico cancelou no aviso. Nada foi alterado."
                     return
                 }
+                Log-Message "INFO" "Backup manual: o técnico confirmou a cópia"
 
                 # copia
                 $btnBkpCancelar.Enabled = $true
                 $lblBkpStatus.ForeColor = $Script:UiAmarelo
-                $lblBkpStatus.Text = "Copiando os arquivos do banco $bancoEscolhido. O banco fica offline até terminar."
-                Log-Message "INFO" "Backup por arquivos: iniciando a cópia do banco $bancoEscolhido para $($Script:BackupPasta)"
+                $lblBkpStatus.Text = "Backup manual em andamento: copiando os arquivos do banco $bancoEscolhido. O sistema fica travado até terminar."
+                Log-Message "INFO" "Backup manual: iniciando a cópia do banco $bancoEscolhido para $($Script:BackupPasta)"
                 $argsArq = @{
                     TextoConexao = $textoConArq
                     Banco        = $bancoEscolhido
@@ -7761,39 +7849,39 @@ function Show-BackupBanco {
                     $pbBkp.Value = 100
                     $lblBkpEtapa.Text = "Concluído"
                     $duracaoArq = "{0}min {1:00}s" -f [int][math]::Floor($resArq.Duracao.TotalMinutes), $resArq.Duracao.Seconds
-                    $textoFinal = "Arquivos copiados: $(Split-Path -Leaf $resArq.Zip) ($(Format-BytesTexto $resArq.ZipBytes)) | banco agora: $($resArq.EstadoDepois) | $duracaoArq"
+                    $textoFinal = "Backup manual pronto: $(Split-Path -Leaf $resArq.Zip) ($(Format-BytesTexto $resArq.ZipBytes)) | banco agora: $($resArq.EstadoDepois) | $duracaoArq"
                     $corFinal = $Script:UiVerde
                     if ($resArq.Aviso -ne "") { $textoFinal += " | $($resArq.Aviso)"; $corFinal = $Script:UiAmarelo }
-                    Log-Message "SUCESSO" "Backup por arquivos: $textoFinal - $($resArq.Zip)"
+                    Log-Message "SUCESSO" "$textoFinal - $($resArq.Zip)"
                     try { Start-Process "explorer.exe" ("/select,`"" + $resArq.Zip + "`"") } catch {}
                     $itensFim = @(
                         @{ Tipo = 'ok'; Titulo = 'ZIP PRONTO E CONFERIDO'; Texto = "$($resArq.Zip)`r`n$(Format-BytesTexto $resArq.ZipBytes) (arquivos originais: $(Format-BytesTexto $resArq.BytesOrigem))" },
                         @{ Tipo = 'info'; Titulo = 'O QUE ESTÁ DENTRO'; Texto = "$((@($resArq.Arquivos)) -join ', ') e LEIA-ME.txt" }
                     )
-                    if ($resArq.EstadoDepois -eq "ONLINE") { $itensFim += @{ Tipo = 'ok'; Titulo = 'O BANCO VOLTOU ONLINE'; Texto = 'A cópia terminou e o banco já pode ser usado.' } }
+                    if ($resArq.EstadoDepois -eq "ONLINE") { $itensFim += @{ Tipo = 'ok'; Titulo = 'O BANCO VOLTOU ONLINE'; Texto = 'O backup manual terminou e o banco já pode ser usado: o PDV e o Concentrador podem voltar a funcionar.' } }
                     else { $itensFim += @{ Tipo = 'alerta'; Titulo = "O BANCO ESTÁ $($resArq.EstadoDepois)"; Texto = 'Ele não está ONLINE. Se já estava fora do ar antes, é esperado: use REPARAR BANCO (Diagnóstico do Banco).' } }
-                    & $mostraAvisoArq "ARQUIVOS DO BANCO COPIADOS PARA O .ZIP" "A cópia foi conferida: os tamanhos batem e o .zip descompacta sem erro." 'ok' $itensFim
+                    & $mostraAvisoArq "BACKUP MANUAL PRONTO: ARQUIVOS DO BANCO NO .ZIP" "A cópia foi conferida: os tamanhos batem e o .zip descompacta sem erro." 'ok' $itensFim
                 }
                 elseif ($resArq.Cancelado) {
                     $pbBkp.Value = 0
                     $lblBkpEtapa.Text = ""
-                    $textoFinal = "Cópia cancelada. Nenhum .zip pela metade ficou na pasta. Banco agora: $($resArq.EstadoDepois)."
+                    $textoFinal = "Backup manual cancelado. Nenhum .zip pela metade ficou na pasta. Banco agora: $($resArq.EstadoDepois)."
                     $corFinal = $Script:UiAmarelo
-                    Log-Message "CANCEL" "Backup por arquivos: cancelado pelo usuário"
+
                 }
                 else {
                     $pbBkp.Value = 0
                     $lblBkpEtapa.Text = ""
-                    $textoFinal = "Não foi possível copiar os arquivos: $($resArq.Erro)"
+                    $textoFinal = "Não foi possível fazer o backup manual: $($resArq.Erro)"
                     $corFinal = $Script:UiVermelho
-                    Log-Message "ERRO" "Backup por arquivos: $($resArq.Erro)"
-                    & $mostraAvisoArq "NÃO FOI POSSÍVEL COPIAR OS ARQUIVOS" "Nenhum .zip pela metade ficou na pasta." 'erro' @(@{ Tipo = 'perigo'; Titulo = 'O QUE ACONTECEU'; Texto = "$($resArq.Erro)" }, @{ Tipo = 'info'; Titulo = 'O BANCO'; Texto = "Estado agora: $($resArq.EstadoDepois). O Preparador não deixa o banco offline por causa de uma falha na cópia." })
+
+                    & $mostraAvisoArq "NÃO FOI POSSÍVEL FAZER O BACKUP MANUAL" "Nenhum .zip pela metade ficou na pasta." 'erro' @(@{ Tipo = 'perigo'; Titulo = 'O QUE ACONTECEU'; Texto = "$($resArq.Erro)" }, @{ Tipo = 'info'; Titulo = 'O BANCO'; Texto = "Estado agora: $($resArq.EstadoDepois). O Preparador não deixa o banco offline por causa de uma falha na cópia." })
                 }
             }
             catch {
-                $textoFinal = "Não foi possível copiar os arquivos: $(Get-BackupErroTexto -Erro $_.Exception -Pasta $Script:BackupPasta)"
+                $textoFinal = "Não foi possível fazer o backup manual: $(Get-BackupErroTexto -Erro $_.Exception -Pasta $Script:BackupPasta)"
                 $corFinal = $Script:UiVermelho
-                Log-Message "ERRO" "Backup por arquivos: $($_.Exception.Message)"
+                Log-Message "ERRO" "Backup manual: $($_.Exception.Message)"
             }
             finally {
                 foreach ($ctl in $travados) { $ctl.Enabled = $true }
@@ -17058,7 +17146,7 @@ $formWidth = if ($screen.Width -lt 1200) { $screen.Width - 50 } else { 1200 }
 $formHeight = if ($screen.Height -lt 900) { $screen.Height - 50 } else { 900 }
 
 $form = New-Object System.Windows.Forms.Form
-$form.Text = "Preparador XMenu – Suporte Técnico v5.35"
+$form.Text = "Preparador XMenu – Suporte Técnico v5.36"
 $form.Size = New-Object System.Drawing.Size($formWidth, $formHeight)
 $form.StartPosition = "CenterScreen"
 $form.BackColor = [System.Drawing.Color]::FromArgb(25, 25, 30); $form.ForeColor = 'White'
@@ -17799,7 +17887,7 @@ $bClock.Add_Click({ Invoke-ClockSync })
 [void]$tbl.Controls.Add($bClock)
 
 # Mensagem de abertura: explica o programa para quem abre pela primeira vez
-Log-Message "INFO" "Preparador XMenu v5.35 - preparo e suporte de computadores com XMenu e NetPDV"
+Log-Message "INFO" "Preparador XMenu v5.36 - preparo e suporte de computadores com XMenu e NetPDV"
 Log-Message "LOG" "==============================================================="
 Log-Message "LOG" "COMO USAR"
 Log-Message "LOG" "  PREPARAR AMBIENTE WINDOWS .. ajusta energia, UAC e desempenho do PC num clique"
@@ -17809,9 +17897,12 @@ Log-Message "LOG" "  EXTERNOS ................... acesso remoto, Chrome, TEF HUB
 Log-Message "LOG" "  SUPORTE E DIAGNÓSTICO ...... impressoras, rede, SQL, backup, XMLs e reparos do Windows"
 Log-Message "LOG" "  Passe o mouse sobre um botão para ver o que ele faz antes de clicar."
 Log-Message "LOG" "---------------------------------------------------------------"
-Log-Message "LOG" "NOVO NA v5.35"
+Log-Message "LOG" "NOVO NA v5.36"
+Log-Message "SUCESSO" "  Banco: o botão da cópia de arquivos agora se chama BACKUP MANUAL (TRAVA O SISTEMA), como o backup de antigamente: o botão é vermelho escuro e o aviso deixa claro que o sistema trava e mostra os programas do NetControll abertos nesta máquina"
+Log-Message "SUCESSO" "  Banco: o .zip da cópia de arquivos segue o nome do backup, com o ID da loja: NetWebPDV - ZIP - Loja 1234 - data e hora.zip (sem o nome da máquina)"
+Log-Message "SUCESSO" "  Banco: o BACKUP MANUAL (TRAVA O SISTEMA) agora registra no Log cada passo, comando SQL, arquivo copiado, progresso, conferência do .zip e o tempo com o banco offline"
 Log-Message "SUCESSO" "  PDV: nova aba Versão 5.0 no seletor do ZIP do PDV (instalador, executável e APK da 5.0.0.11, copiar link e versão manual): instalador e executável abrem ao baixar, o APK abre a pasta"
-Log-Message "SUCESSO" "  Banco: novo botão COPIAR ARQUIVOS (ZIP) no Backup do Banco: guarda o MDF e o LDF num .zip quando o backup do SQL falha (banco corrompido ou suspeito); a lista do Backup passa a mostrar bancos fora do ar"
+Log-Message "SUCESSO" "  Banco: novo botão BACKUP MANUAL (TRAVA O SISTEMA) no Backup do Banco: guarda o MDF e o LDF num .zip quando o backup do SQL falha (banco corrompido ou suspeito); a lista do Backup passa a mostrar bancos fora do ar"
 Log-Message "SUCESSO" "  Banco: novo botão REPARAR BANCO no Diagnóstico (copia os arquivos, modo emergência se estiver suspeito, REPAIR_ALLOW_DATA_LOSS e conferência); bancos suspeitos agora aparecem na lista"
 Log-Message "SUCESSO" "  Banco: a busca do banco novo usa as subpastas das versões (3 mais recentes), ignora pastas de backup e aceita log de 1.792 KB ou 4.672 KB como banco zero"
 Log-Message "SUCESSO" "  Banco: o passo automático responde Sim à pergunta do Ajustes (Deseja mesmo rodar o script da versão atual instalada?)"
