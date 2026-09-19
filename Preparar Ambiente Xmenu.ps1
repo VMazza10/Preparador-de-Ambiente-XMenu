@@ -6555,8 +6555,8 @@ function Show-SqlIndexAdvisor {
         [void]$f.Controls.Add($lvIdx)
 
         $txtIdxSql = New-Object System.Windows.Forms.TextBox
-        $txtIdxSql.Location = New-Object System.Drawing.Point(20, 452)
-        $txtIdxSql.Size = New-Object System.Drawing.Size(940, 98)
+        $txtIdxSql.Location = New-Object System.Drawing.Point(20, 448)
+        $txtIdxSql.Size = New-Object System.Drawing.Size(940, 82)
         $txtIdxSql.Anchor = 'Top,Left,Right'
         $txtIdxSql.Multiline = $true
         $txtIdxSql.ScrollBars = 'Vertical'
@@ -6567,18 +6567,26 @@ function Show-SqlIndexAdvisor {
         $txtIdxSql.Font = New-Object System.Drawing.Font("Consolas", 8.5)
         [void]$f.Controls.Add($txtIdxSql)
 
-        $btnIdxBuscar = New-ToolButton $f "BUSCAR SUGESTÕES" 20 566 155 34 $Script:UiAzul $null "Roda a consulta de índices faltantes do SQL Server no banco selecionado"
+        $pnlIdxAcoes = New-Object System.Windows.Forms.Panel
+        $pnlIdxAcoes.Location = New-Object System.Drawing.Point(20, 542)
+        $pnlIdxAcoes.Size = New-Object System.Drawing.Size(940, 102)
+        $pnlIdxAcoes.Anchor = 'Bottom,Left,Right'
+        $pnlIdxAcoes.BackColor = $Script:UiFundo
+        [void]$f.Controls.Add($pnlIdxAcoes)
+
+        $btnIdxBuscar = New-ToolButton $pnlIdxAcoes "BUSCAR SUGESTÕES" 0 0 155 34 $Script:UiAzul $null "Roda a consulta de índices faltantes do SQL Server no banco selecionado"
         $btnIdxBuscar.Enabled = $false
-        $btnIdxTop = New-ToolButton $f "MARCAR TOP 10" 185 566 120 34 $Script:UiCinza $null "Marca as 10 sugestões de maior ganho"
-        $btnIdxLimpar = New-ToolButton $f "DESMARCAR" 315 566 105 34 $Script:UiCinza $null "Desmarca todas as sugestões"
-        $btnIdxCopiar = New-ToolButton $f "COPIAR SQL" 430 566 105 34 $Script:UiCinza $null "Copia os CREATE INDEX marcados; se nada estiver marcado, copia o selecionado"
-        $btnIdxAplicar = New-ToolButton $f "APLICAR MARCADOS" 545 566 150 34 $Script:UiVerde $null "Cria somente os índices marcados, depois de confirmação"
+        $btnIdxTop = New-ToolButton $pnlIdxAcoes "MARCAR TOP 10" 165 0 120 34 $Script:UiCinza $null "Marca as 10 sugestões de maior ganho"
+        $btnIdxLimpar = New-ToolButton $pnlIdxAcoes "DESMARCAR" 295 0 105 34 $Script:UiCinza $null "Desmarca todas as sugestões"
+        $btnIdxCopiar = New-ToolButton $pnlIdxAcoes "COPIAR SQL" 410 0 105 34 $Script:UiCinza $null "Copia os CREATE INDEX marcados; se nada estiver marcado, copia o selecionado"
+        $btnIdxAplicar = New-ToolButton $pnlIdxAcoes "APLICAR MARCADOS" 0 42 150 34 $Script:UiVerde $null "Cria somente os índices marcados, depois de confirmação"
         $btnIdxAplicar.Enabled = $false
-        $btnIdxAplicarTodos = New-ToolButton $f "APLICAR TODOS" 705 566 150 34 $Script:UiVerde $null "Cria todas as sugestões da lista em lotes de 5 índices por vez"
+        $btnIdxAplicarTodos = New-ToolButton $pnlIdxAcoes "APLICAR TODOS" 160 42 150 34 $Script:UiVerde $null "Cria todas as sugestões da lista em lotes de 5 índices por vez"
         $btnIdxAplicarTodos.Enabled = $false
-        $btnIdxFechar = New-ToolButton $f "FECHAR" 870 566 90 34 $Script:UiCinza { $f.Close() }
+        $btnIdxFechar = New-ToolButton $pnlIdxAcoes "FECHAR" 850 42 90 34 $Script:UiCinza { $f.Close() }
         $btnIdxFechar.Anchor = 'Top,Right'
-        $lblIdxStatus = New-ToolLabel $f "Ao abrir, o Preparador conecta e busca sugestões. Criar índices só acontece nos botões APLICAR." 20 612 9 -Cor $Script:UiSuave -W 940
+        $lblIdxStatus = New-ToolLabel $pnlIdxAcoes "Ao abrir, o Preparador conecta e busca sugestões. Criar índices só acontece nos botões APLICAR." 0 82 9 -Cor $Script:UiSuave -W 940
+        $lblIdxStatus.Anchor = 'Top,Left,Right'
 
         $getConexao = {
             param([string]$Banco = "master", [int]$Timeout = 8)
