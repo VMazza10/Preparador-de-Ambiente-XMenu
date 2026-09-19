@@ -1,6 +1,6 @@
 ﻿# =============================================================================
 # PREPARADOR XMENU - VERSAO REVENDA
-# Baseado na v5.32
+# Baseado na v5.33
 # Alteracoes Revenda:
 #   - Wallpaper: fundo_revenda.png
 #   - Removido: Atalhos de Suporte e Pasta Netcontroll
@@ -6326,7 +6326,7 @@ function Show-DbSwapNetWebPdv {
         $chkPosTroca.SetBounds(440, 684, 285, 24)
         $chkPosTroca.Anchor = 'Bottom,Left'
         [void]$f.Controls.Add($chkPosTroca)
-        if ($Script:ToolTip) { $Script:ToolTip.SetToolTip($chkPosTroca, "Depois de trocar o banco, o Preparador abre o AjustesInstalacao.exe da pasta NetControll, clica em Atualizar Banco, espera terminar (a janela fecha sozinha) e abre o Concentrador.exe.`r`nDesmarque para fazer isso manualmente.") }
+        if ($Script:ToolTip) { $Script:ToolTip.SetToolTip($chkPosTroca, "Depois de trocar o banco, o Preparador abre o AjustesInstalacao.exe (da pasta concentrador), clica em Atualizar Banco, espera terminar (a janela fecha sozinha) e abre o Concentrador.exe.`r`nDesmarque para fazer isso manualmente.") }
 
         $txtSrv.TabIndex = 0
         $cmbUsr.TabIndex = 1
@@ -6697,19 +6697,19 @@ SELECT
                 $resAjustes = $resAjustes[$resAjustes.Count - 1]
                 if ($resAjustes.Status -eq 'Concluido') {
                     & $addLog "AjustesInstalacao concluído em $($resAjustes.Segundos) s."
-                    $concentradorExe = Join-Path $pasta "Concentrador.exe"
+                    $concentradorExe = Find-ProgramaNetControll -Pasta $pasta -Nome "Concentrador.exe"
                     $abriu = $false
                     $motivoNaoAbriu = ""
                     if (Get-Process -Name "Concentrador" -ErrorAction SilentlyContinue) {
                         $abriu = $true
                         & $addLog "O Concentrador já estava aberto."
                     }
-                    elseif (-not (Test-Path -LiteralPath $concentradorExe)) { $motivoNaoAbriu = "Não encontrei o Concentrador.exe em $pasta." }
+                    elseif (-not $concentradorExe) { $motivoNaoAbriu = "Não encontrei o Concentrador.exe em $($pasta.TrimEnd('\'))\concentrador nem em $($pasta.TrimEnd('\')))." }
                     else {
                         try {
                             $psiConc = New-Object System.Diagnostics.ProcessStartInfo
                             $psiConc.FileName = $concentradorExe
-                            $psiConc.WorkingDirectory = $pasta
+                            $psiConc.WorkingDirectory = (Split-Path -Parent $concentradorExe)
                             $psiConc.UseShellExecute = $true
                             [void][System.Diagnostics.Process]::Start($psiConc)
                             $abriu = $true
@@ -9999,6 +9999,24 @@ public static class AjustesUi
         PostMessage(h, 0x00F5, IntPtr.Zero, IntPtr.Zero);
     }
 
+    // Clica em um botao de uma caixa de aviso (MessageBox) do processo, pelo texto (ignora o &): ex. "sim"
+    public static bool ClicaDialogo(int pid, string texto)
+    {
+        string alvo = Limpa(texto);
+        foreach (IntPtr topo in Topo((uint)pid))
+        {
+            if (Classe(topo) != "#32770") { continue; }
+            foreach (IntPtr f in Filhos(topo))
+            {
+                if (Classe(f).ToUpperInvariant().Contains("BUTTON") && Limpa(Texto(f)) == alvo && IsWindowEnabled(f))
+                {
+                    PostMessage(f, 0x00F5, IntPtr.Zero, IntPtr.Zero);
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
     // Texto de caixas de aviso (MessageBox) abertas pelo processo; vazio se nao ha nenhuma
     public static string Dialogos(int pid)
     {
@@ -10045,6 +10063,18 @@ public static class AjustesUi
     }
 }
 
+# O AjustesInstalacao.exe e o Concentrador.exe ficam dentro da pasta "concentrador" (C:\netcontroll\concentrador); em instalacao
+# de teste ou antiga podem estar direto em C:\netcontroll. Procura nas duas, primeiro na "concentrador". Devolve o caminho ou $null.
+function Find-ProgramaNetControll {
+    param([string]$Pasta, [string]$Nome)
+    $base = "$Pasta".Trim().TrimEnd('\')
+    if ($base -eq "") { return $null }
+    foreach ($dir in @((Join-Path $base "concentrador"), $base)) {
+        $arq = Join-Path $dir $Nome
+        if (Test-Path -LiteralPath $arq -PathType Leaf) { return $arq }
+    }
+    return $null
+}
 # Devolve @{ Status; Mensagem; Segundos }. Status:
 #   Concluido = o Ajustes fechou sozinho depois do clique (barra terminou)
 #   SemExe / SemBotao / Dialogo / Timeout / Erro = nao concluiu; Mensagem explica o que aconteceu
@@ -10056,10 +10086,11 @@ function Invoke-AtualizarBancoAjustes {
         [scriptblock]$AoProgresso = $null
     )
     $r = [pscustomobject]@{ Status = 'Erro'; Mensagem = ''; Segundos = 0 }
-    $exe = Join-Path "$PastaNetControll" "AjustesInstalacao.exe"
-    if (-not (Test-Path -LiteralPath $exe)) {
+    $exe = Find-ProgramaNetControll -Pasta $PastaNetControll -Nome "AjustesInstalacao.exe"
+    if (-not $exe) {
         $r.Status = 'SemExe'
-        $r.Mensagem = "Não encontrei o AjustesInstalacao.exe em $PastaNetControll."
+        $baseAviso = "$PastaNetControll".Trim().TrimEnd('\')
+        $r.Mensagem = "Não encontrei o AjustesInstalacao.exe em $baseAviso\concentrador nem em $baseAviso."
         return $r
     }
     if (-not (Enable-AjustesUi)) { $r.Mensagem = "Não consegui preparar o clique automático (veja o log do programa)."; return $r }
@@ -10067,7 +10098,7 @@ function Invoke-AtualizarBancoAjustes {
     try {
         $psi = New-Object System.Diagnostics.ProcessStartInfo
         $psi.FileName = $exe
-        $psi.WorkingDirectory = "$PastaNetControll"
+        $psi.WorkingDirectory = (Split-Path -Parent $exe)
         $psi.UseShellExecute = $true
         $proc = [System.Diagnostics.Process]::Start($psi)
         $relogio = [System.Diagnostics.Stopwatch]::StartNew()
@@ -10093,6 +10124,7 @@ function Invoke-AtualizarBancoAjustes {
         # 2) espera terminar: a janela fecha sozinha quando a barra acaba
         $inicio = $relogio.Elapsed.TotalSeconds
         $ultimoDialogo = 0
+        $confirmacoes = 0
         while (-not $proc.HasExited) {
             $seg = [int]($relogio.Elapsed.TotalSeconds - $inicio)
             if ($relogio.Elapsed.TotalSeconds - $inicio -gt $TimeoutSeg) {
@@ -10101,16 +10133,23 @@ function Invoke-AtualizarBancoAjustes {
                 $r.Mensagem = "O AjustesInstalacao ainda estava rodando depois de $tempoTexto. Ele continua aberto: espere terminar ou veja a tela dele."
                 return $r
             }
-            # Aviso aberto pelo Ajustes (erro ou pergunta): entrega para o tecnico em vez de esperar em vao
-            if ($seg -ge ($ultimoDialogo + 2)) {
+            # Aviso aberto pelo Ajustes. A pergunta normal dele ("Deseja mesmo rodar o script da versao atual instalada?")
+            # e respondida Sim; qualquer outro aviso (erro, pergunta nova) e entregue para o tecnico em vez de esperar em vao
+            if ($seg -ge ($ultimoDialogo + 1)) {
                 $ultimoDialogo = $seg
                 $dlg = "$([AjustesUi]::Dialogos($proc.Id))"
                 if ($dlg -ne "") {
-                    $r.Status = 'Dialogo'
-                    $r.Mensagem = "O AjustesInstalacao mostrou um aviso e está esperando você: $dlg"
-                    return $r
+                    if ($dlg -match '(?i)Deseja mesmo rodar o script' -and $confirmacoes -lt 3) {
+                        if ([AjustesUi]::ClicaDialogo($proc.Id, "sim")) { $confirmacoes++ }
+                    }
+                    else {
+                        $r.Status = 'Dialogo'
+                        $r.Mensagem = "O AjustesInstalacao mostrou um aviso e está esperando você: $dlg"
+                        return $r
+                    }
                 }
             }
+
             if ($null -ne $AoProgresso) { try { & $AoProgresso $seg } catch {} }
             [System.Windows.Forms.Application]::DoEvents()
             Start-Sleep -Milliseconds 300
@@ -15262,7 +15301,7 @@ function Start-Download {
                 Set-ButtonDone -Button $Button -Label "BAIXADO"
             }
             elseif ($Script:DownloadSomenteSalvar) {
-                # So salvar (ex.: PDV 5.0, que ainda nao foi lancado): abre a pasta com o arquivo selecionado e NAO executa nada
+                # So salvar (ex.: APK do PDV 5.0): abre a pasta com o arquivo selecionado e NAO executa nada
                 Log-Message "SUCESSO" "Arquivo salvo em: $destPath"
                 try { Start-Process -FilePath "explorer.exe" -ArgumentList "/select,`"$destPath`"" } catch { Log-Message "ERRO" "Nao consegui abrir a pasta: $($_.Exception.Message)" }
                 $Button.Text = "Baixado"
@@ -15673,7 +15712,7 @@ function Open-Selector {
 
     # Aba "Versão 5.0": o PDV novo (ainda nao lancado) fica separado das versoes 1.3. As funcoes sao as mesmas da
     # aba 1.3 (lista, copiar link, baixar e versao manual), mas os arquivos da 5.0 nao sao ZIP (instalador, exe e apk):
-    # so baixa e abre a pasta com o arquivo selecionado, sem executar nada e sem mexer em C:\netcontroll\NetPDV.
+    # o instalador e o exe abrem sozinhos depois de baixar; o apk (Android) so baixa e abre a pasta. Nao mexe em C:\netcontroll\NetPDV.
     if ($Type -eq "PDV") {
         $corFundoAba = [System.Drawing.Color]::FromArgb(30, 30, 30)
         $tabs = New-Object System.Windows.Forms.TabControl
@@ -15743,7 +15782,7 @@ function Open-Selector {
         $btn50.BackColor = [System.Drawing.Color]::FromArgb(14, 88, 62); $btn50.ForeColor = 'White'; $btn50.FlatStyle = 'Flat'
         $btn50.Add_Click({
                 $sel = $versions50[$cb50.SelectedIndex]
-                $fSel.Tag = @{ Url = (& $urlPdv50 $sel.Versao $sel.Arquivo); File = (& $nomeArq50 $sel.Versao $sel.Arquivo); Name = $sel.Name; Deploy = $false; SomenteSalvar = $true }
+                $fSel.Tag = @{ Url = (& $urlPdv50 $sel.Versao $sel.Arquivo); File = (& $nomeArq50 $sel.Versao $sel.Arquivo); Name = $sel.Name; Deploy = $false; SomenteSalvar = ($sel.Arquivo -like '*.apk') }
                 $fSel.DialogResult = 'OK'
                 $fSel.Close()
             })
@@ -15768,7 +15807,7 @@ function Open-Selector {
                 if ($v -match '^\d+\.\d+$') {
                     $sel = $versions50[$cb50.SelectedIndex]
                     $verManual = "5.0.$v"
-                    $fSel.Tag = @{ Url = (& $urlPdv50 $verManual $sel.Arquivo); File = (& $nomeArq50 $verManual $sel.Arquivo); Name = "$($sel.Arquivo) v$verManual"; Deploy = $false; SomenteSalvar = $true }
+                    $fSel.Tag = @{ Url = (& $urlPdv50 $verManual $sel.Arquivo); File = (& $nomeArq50 $verManual $sel.Arquivo); Name = "$($sel.Arquivo) v$verManual"; Deploy = $false; SomenteSalvar = ($sel.Arquivo -like '*.apk') }
                     $fSel.DialogResult = 'OK'
                     $fSel.Close()
                 }
@@ -15810,7 +15849,7 @@ function Open-Selector {
         $sep502.Location = '20,232'; $sep502.AutoSize = $true; $sep502.ForeColor = 'Gray'
         [void]$pg50.Controls.Add($sep502)
         $lblDest50 = New-Object System.Windows.Forms.Label
-        $lblDest50.Text = "O arquivo é salvo na pasta de downloads e a pasta é aberta.`r`nNada é executado nem instalado."
+        $lblDest50.Text = "Instalador e executável abrem sozinhos depois de baixar.`r`nO APK (Android) só baixa e abre a pasta."
         $lblDest50.Location = '20,256'; $lblDest50.AutoSize = $true; $lblDest50.ForeColor = [System.Drawing.Color]::Gray; $lblDest50.Font = New-Object System.Drawing.Font("Segoe UI", 8)
         [void]$pg50.Controls.Add($lblDest50)
 
@@ -16176,7 +16215,7 @@ $formWidth = if ($screen.Width -lt 1000) { 900 } else { 1000 }
 $formHeight = if ($screen.Height -lt 800) { 700 } else { 800 }
 
 $form = New-Object System.Windows.Forms.Form
-$form.Text = "Preparador XMenu – Suporte Técnico v5.32 - REVENDA"
+$form.Text = "Preparador XMenu – Suporte Técnico v5.33 - REVENDA"
 $form.Size = New-Object System.Drawing.Size($formWidth, $formHeight)
 $form.StartPosition = "CenterScreen"
 $form.BackColor = [System.Drawing.Color]::FromArgb(25, 25, 30); $form.ForeColor = 'White'
@@ -16914,7 +16953,7 @@ $bClock.Add_Click({ Invoke-ClockSync })
 [void]$tbl.Controls.Add($bClock)
 
 # Mensagem de abertura: explica o programa para quem abre pela primeira vez
-Log-Message "INFO" "Preparador XMenu v5.32 - REVENDA - preparo e suporte de computadores com XMenu e NetPDV"
+Log-Message "INFO" "Preparador XMenu v5.33 - REVENDA - preparo e suporte de computadores com XMenu e NetPDV"
 Log-Message "LOG" "==============================================================="
 Log-Message "LOG" "COMO USAR"
 Log-Message "LOG" "  PREPARAR AMBIENTE WINDOWS .. ajusta energia, UAC e desempenho do PC num clique"
@@ -16924,8 +16963,10 @@ Log-Message "LOG" "  EXTERNOS ................... acesso remoto, Chrome, TEF HUB
 Log-Message "LOG" "  SUPORTE E DIAGNÓSTICO ...... impressoras, rede, SQL, backup, XMLs e reparos do Windows"
 Log-Message "LOG" "  Passe o mouse sobre um botão para ver o que ele faz antes de clicar."
 Log-Message "LOG" "---------------------------------------------------------------"
-Log-Message "LOG" "NOVO NA v5.32"
-Log-Message "SUCESSO" "  PDV: nova aba Versão 5.0 no seletor do ZIP do PDV (instalador, executável e APK da 5.0.0.11, copiar link e versão manual), só baixa e abre a pasta"
+Log-Message "LOG" "NOVO NA v5.33"
+Log-Message "SUCESSO" "  PDV: nova aba Versão 5.0 no seletor do ZIP do PDV (instalador, executável e APK da 5.0.0.11, copiar link e versão manual): instalador e executável abrem ao baixar, o APK abre a pasta"
+Log-Message "SUCESSO" "  Banco: o passo automático responde Sim à pergunta do Ajustes (Deseja mesmo rodar o script da versão atual instalada?)"
+Log-Message "SUCESSO" "  Banco: o passo automático procura o AjustesInstalacao e o Concentrador em C:\netcontroll\concentrador (e, se não achar, em C:\netcontroll)"
 Log-Message "SUCESSO" "  Banco: depois da troca, o Preparador abre o AjustesInstalacao, clica em Atualizar Banco, espera terminar e abre o Concentrador (caixa marcada por padrão na tela)"
 Log-Message "SUCESSO" "  Banco: telas de Diagnóstico, Trocar Banco e Índices com visual novo (cabeçalho escuro, linhas alternadas, fonte maior e etiquetas de situação)"
 Log-Message "SUCESSO" "  Banco: avisos de confirmação em destaque, com o tamanho do banco atual e do banco novo em fonte grande"
