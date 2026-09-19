@@ -1,5 +1,5 @@
 ﻿# =============================================================================
-# PREPARADOR XMENU v5.33
+# PREPARADOR XMENU v5.34
 # Visual: Dashboard Moderno
 # Correcoes:
 #   - CRITICO: Removido DoEvents do loop de evento de download (causava crash).
@@ -6169,6 +6169,7 @@ function Show-DbSwapNetWebPdv {
         $Script:DbSwapCandidatos = @()
         $Script:DbSwapMdfZeroKb = 24320
         $Script:DbSwapLdfZeroKb = 1792
+        $Script:DbSwapLdfZeroKb2 = 4672   # log do banco zero das versoes novas (o antigo tem 1.792 KB)
 
         $f = New-ToolForm "Trocar Banco NetWebPDV" 980 760
         $f.MinimumSize = New-Object System.Drawing.Size(900, 720)
@@ -6407,14 +6408,29 @@ function Show-DbSwapNetWebPdv {
             $raizBusca = "$($txtNovaRaiz.Text)".Trim()
             $raizFallback = "$($txtRaiz.Text)".Trim()
             $usouFallback = $false
+            $limitarTres = $false
             if (-not (Test-Path -LiteralPath $raizBusca)) {
                 if (-not (Test-Path -LiteralPath $raizFallback)) { throw "Pasta do banco novo não existe: $raizBusca" }
-                & $addLog "Pasta padrão não encontrada. Procurando NetWebPDV.mdf dentro de $raizFallback..."
-                $raizBusca = $raizFallback
+                # Sem a pasta UltimaVersao: procura nas subpastas das versoes (concentrador\Versoes\<versao>) e fica so com os 3 bancos mais recentes
+                $pastaVersoes = Join-Path (Join-Path $raizFallback "concentrador") "Versoes"
+                if (Test-Path -LiteralPath $pastaVersoes) {
+                    & $addLog "Pasta padrão não encontrada. Procurando nas subpastas das versões: $pastaVersoes (os 3 bancos mais recentes)..."
+                    $raizBusca = $pastaVersoes
+                    $limitarTres = $true
+                }
+                else {
+                    & $addLog "Pasta padrão não encontrada. Procurando NetWebPDV.mdf dentro de $raizFallback (sem pastas de backup)..."
+                    $raizBusca = $raizFallback
+                }
                 $usouFallback = $true
             }
+            $baseBusca = "$raizBusca".TrimEnd('\')
             $arquivos = @(Get-ChildItem -LiteralPath $raizBusca -Recurse -File -Filter "*.mdf" -ErrorAction Stop |
-                Where-Object { $_.BaseName -ieq "NetWebPDV" })
+                Where-Object {
+                    $_.BaseName -ieq "NetWebPDV" -and
+                    # Backup nunca e banco novo: pastas Backup*, *.OLD e data (onde fica o banco em uso) ficam de fora da busca
+                    (($_.DirectoryName.Substring([Math]::Min($baseBusca.Length, $_.DirectoryName.Length))) -notmatch '(?i)(^|\\)(backup[^\\]*|[^\\]*\.old|data)(\\|$)')
+                })
             if ($usouFallback) {
                 $prioritarios = @($arquivos | Where-Object { $_.FullName -match "\\UltimaVersao\\" })
                 if ($prioritarios.Count -gt 0) {
@@ -6433,7 +6449,7 @@ function Show-DbSwapNetWebPdv {
                     $mdfKb = [math]::Round($mdf.Length / 1KB)
                     $ldfKb = [math]::Round($ldf.Length / 1KB)
                     $mdfOk = ([math]::Abs($mdfKb - $Script:DbSwapMdfZeroKb) -le 2048)
-                    $ldfOk = ([math]::Abs($ldfKb - $Script:DbSwapLdfZeroKb) -le 512)
+                    $ldfOk = ([math]::Abs($ldfKb - $Script:DbSwapLdfZeroKb) -le 512) -or ([math]::Abs($ldfKb - $Script:DbSwapLdfZeroKb2) -le 512)
                     $perfil = if ($mdfOk -and $ldfOk) { "Banco zero provável" } else { "Conferir tamanho" }
                     $lista += [pscustomobject]@{
                         Mdf       = $mdf.FullName
@@ -6447,7 +6463,9 @@ function Show-DbSwapNetWebPdv {
                     }
                 }
             }
-            return @($lista | Sort-Object Data -Descending)
+            $ordenada = @($lista | Sort-Object Data -Descending)
+            if ($limitarTres) { $ordenada = @($ordenada | Select-Object -First 3) }
+            return $ordenada
         }
         $localizar = {
             if ($Script:DbSwapOcupado) { return }
@@ -6805,7 +6823,7 @@ SELECT
                     $atual.MdfKb, $atual.LdfKb, $atual.TotalKb, $cand.MdfKb, $cand.LdfKb, $candTotalKb)
             $msg = "ATENÇÃO: isso vai desconectar o banco $($atual.Banco), mover os arquivos atuais para backup e colocar o banco selecionado no lugar.`r`n`r`n$resultadoSeguranca`r`n`r`nCOMPARAÇÃO DE TAMANHO:`r`n$comparacaoTamanhos`r`n`r`nBanco novo:`r`n$($cand.Mdf)`r`n`r`nBackup: $pastaBackupData`r`nOs arquivos MDF e LDF serão guardados juntos em um ZIP validado.`r`n`r`nDeseja continuar?"
             if ($cand.Perfil -ne "Banco zero provável") {
-                $msg += "`r`n`r`nAVISO: o tamanho não parece o banco zero padrão.`r`nEsperado aprox.: MDF 24.320 KB e LOG 1.792 KB.`r`nEncontrado: MDF $($cand.MdfKb) KB e LOG $($cand.LdfKb) KB."
+                $msg += "`r`n`r`nAVISO: o tamanho não parece o banco zero padrão.`r`nEsperado aprox.: MDF 24.320 KB e LOG 1.792 KB ou 4.672 KB.`r`nEncontrado: MDF $($cand.MdfKb) KB e LOG $($cand.LdfKb) KB."
             }
             # Aviso em destaque: tamanho do banco atual x banco novo em fonte grande, e um quadro
             # para cada alerta. Se ele falhar por qualquer motivo, vale a caixa comum de sempre.
@@ -6825,7 +6843,7 @@ SELECT
                 }
                 else { $itensAviso += @{ Tipo = 'ok'; Titulo = ''; Texto = 'Nenhuma movimentação ou caixa aberto no banco atual.' } }
                 if (-not $ehZero) {
-                    $itensAviso += @{ Tipo = 'perigo'; Titulo = 'O BANCO NOVO NÃO PARECE UM BANCO ZERO'; Texto = "Esperado: banco de cerca de $(Format-TamanhoBanco $Script:DbSwapMdfZeroKb) e log de cerca de $(Format-TamanhoBanco $Script:DbSwapLdfZeroKb). Encontrado: banco de $(Format-TamanhoBanco $cand.MdfKb) e log de $(Format-TamanhoBanco $cand.LdfKb). Confira se é o arquivo certo." }
+                    $itensAviso += @{ Tipo = 'perigo'; Titulo = 'O BANCO NOVO NÃO PARECE UM BANCO ZERO'; Texto = "Esperado: banco de cerca de $(Format-TamanhoBanco $Script:DbSwapMdfZeroKb) e log de cerca de $(Format-TamanhoBanco $Script:DbSwapLdfZeroKb) ou $(Format-TamanhoBanco $Script:DbSwapLdfZeroKb2). Encontrado: banco de $(Format-TamanhoBanco $cand.MdfKb) e log de $(Format-TamanhoBanco $cand.LdfKb). Confira se é o arquivo certo." }
                 }
                 if ($abertosAgora.Count -gt 0) {
                     $itensAviso += @{ Tipo = 'alerta'; Titulo = 'ESTES PROGRAMAS SERÃO FECHADOS AUTOMATICAMENTE'; Texto = "Abertos agora: $($abertosAgora -join ', '). Quem estiver usando perde a tela." }
@@ -16297,7 +16315,7 @@ $formWidth = if ($screen.Width -lt 1200) { $screen.Width - 50 } else { 1200 }
 $formHeight = if ($screen.Height -lt 900) { $screen.Height - 50 } else { 900 }
 
 $form = New-Object System.Windows.Forms.Form
-$form.Text = "Preparador XMenu – Suporte Técnico v5.33"
+$form.Text = "Preparador XMenu – Suporte Técnico v5.34"
 $form.Size = New-Object System.Drawing.Size($formWidth, $formHeight)
 $form.StartPosition = "CenterScreen"
 $form.BackColor = [System.Drawing.Color]::FromArgb(25, 25, 30); $form.ForeColor = 'White'
@@ -17038,7 +17056,7 @@ $bClock.Add_Click({ Invoke-ClockSync })
 [void]$tbl.Controls.Add($bClock)
 
 # Mensagem de abertura: explica o programa para quem abre pela primeira vez
-Log-Message "INFO" "Preparador XMenu v5.33 - preparo e suporte de computadores com XMenu e NetPDV"
+Log-Message "INFO" "Preparador XMenu v5.34 - preparo e suporte de computadores com XMenu e NetPDV"
 Log-Message "LOG" "==============================================================="
 Log-Message "LOG" "COMO USAR"
 Log-Message "LOG" "  PREPARAR AMBIENTE WINDOWS .. ajusta energia, UAC e desempenho do PC num clique"
@@ -17048,8 +17066,9 @@ Log-Message "LOG" "  EXTERNOS ................... acesso remoto, Chrome, TEF HUB
 Log-Message "LOG" "  SUPORTE E DIAGNÓSTICO ...... impressoras, rede, SQL, backup, XMLs e reparos do Windows"
 Log-Message "LOG" "  Passe o mouse sobre um botão para ver o que ele faz antes de clicar."
 Log-Message "LOG" "---------------------------------------------------------------"
-Log-Message "LOG" "NOVO NA v5.33"
+Log-Message "LOG" "NOVO NA v5.34"
 Log-Message "SUCESSO" "  PDV: nova aba Versão 5.0 no seletor do ZIP do PDV (instalador, executável e APK da 5.0.0.11, copiar link e versão manual): instalador e executável abrem ao baixar, o APK abre a pasta"
+Log-Message "SUCESSO" "  Banco: a busca do banco novo usa as subpastas das versões (3 mais recentes), ignora pastas de backup e aceita log de 1.792 KB ou 4.672 KB como banco zero"
 Log-Message "SUCESSO" "  Banco: o passo automático responde Sim à pergunta do Ajustes (Deseja mesmo rodar o script da versão atual instalada?)"
 Log-Message "SUCESSO" "  Banco: o passo automático procura o AjustesInstalacao e o Concentrador em C:\netcontroll\concentrador (e, se não achar, em C:\netcontroll)"
 Log-Message "SUCESSO" "  Banco: depois da troca, o Preparador abre o AjustesInstalacao, clica em Atualizar Banco, espera terminar e abre o Concentrador (caixa marcada por padrão na tela)"
