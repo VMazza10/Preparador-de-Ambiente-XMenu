@@ -1,5 +1,5 @@
 ﻿# =============================================================================
-# PREPARADOR XMENU v5.30
+# PREPARADOR XMENU v5.31
 # Visual: Dashboard Moderno
 # Correcoes:
 #   - CRITICO: Removido DoEvents do loop de evento de download (causava crash).
@@ -6233,8 +6233,10 @@ function Show-DbSwapNetWebPdv {
         New-ToolLabel $cardPastas "Procurar banco novo em:" 378 41 9 -Cor $Script:UiSuave | Out-Null
         $txtNovaRaiz = & $novoCampo $cardPastas 520 38 384 "C:\netcontroll\concentrador\Versoes\UltimaVersao"
         $txtNovaRaiz.Anchor = 'Top,Left,Right'
-        $lblAtual = New-ToolLabel $cardPastas "Banco atual: será identificado ao localizar." 14 75 9 -Cor $Script:UiSuave -W 890
+        $lblAtual = New-ToolLabel $cardPastas "Banco atual: será identificado ao localizar." 14 72 9 -Cor $Script:UiSuave -W 890
         $lblAtual.AutoEllipsis = $true
+        $lblAtual.Font = New-Object System.Drawing.Font("Segoe UI", 11.5, [System.Drawing.FontStyle]::Bold)
+        $lblAtual.Height = 27
 
         New-ToolLabel $f "3  ESCOLHA O BANCO NOVO" 20 309 10 -Negrito | Out-Null
         $lblResumoCandidatos = New-ToolLabel $f "Nenhuma busca realizada" 690 310 9 -Cor $Script:UiSuave -W 250
@@ -6246,21 +6248,20 @@ function Show-DbSwapNetWebPdv {
         $lv.Anchor = 'Top,Left,Right'
         $lv.View = 'Details'
         $lv.FullRowSelect = $true
-        $lv.GridLines = $true
         $lv.HideSelection = $false
         $lv.HeaderStyle = 'Nonclickable'
-        $lv.BackColor = [System.Drawing.Color]::FromArgb(12, 12, 25)
         $lv.ForeColor = $Script:UiTexto
-        $lv.Font = New-Object System.Drawing.Font("Segoe UI", 9)
-        [void]$lv.Columns.Add("Situação", 150)
+        [void]$lv.Columns.Add("Situação", 175)
         [void]$lv.Columns.Add("Data da versão", 130)
         [void]$lv.Columns.Add("Banco (MDF)", 125)
         [void]$lv.Columns.Add("Log (LDF)", 115)
         [void]$lv.Columns.Add("Pasta encontrada", 380)
         [void]$f.Controls.Add($lv)
+        Set-ListaModerna $lv -ColunasStatus @(0) -ColunasSuaves @(4) -ColunasDireita @(2, 3) -MinUltima 200
         $ajustarColunasBanco = {
             param($Controle)
             if ($null -eq $Controle -or $Controle -isnot [System.Windows.Forms.ListView]) { $Controle = $lv }
+            if (Test-ListaModernaAtiva $Controle) { return }
             if ($Controle.Columns.Count -ge 5) {
                 $Controle.Columns[4].Width = [Math]::Max(200, ($Controle.ClientSize.Width - 590))
                 $Controle.Refresh()
@@ -6283,7 +6284,9 @@ function Show-DbSwapNetWebPdv {
         $cardSelecionado.BackColor = [System.Drawing.Color]::FromArgb(18, 45, 43)
         [void]$f.Controls.Add($cardSelecionado)
         New-ToolLabel $cardSelecionado "BANCO SELECIONADO" 14 8 8.5 -Negrito -Cor $Script:UiVerde | Out-Null
-        $lblSelecionado = New-ToolLabel $cardSelecionado "Selecione uma versão encontrada para ver os arquivos." 14 28 9 -Cor $Script:UiSuave -W 890
+        $lblSelecionado = New-ToolLabel $cardSelecionado "Selecione uma versão encontrada para ver os arquivos." 14 26 9 -Cor $Script:UiSuave -W 890
+        $lblSelecionado.Font = New-Object System.Drawing.Font("Segoe UI", 10.5, [System.Drawing.FontStyle]::Bold)
+        $lblSelecionado.Height = 26
         $lblSelecionado.AutoEllipsis = $true
         $lblSelecionado.Anchor = 'Top,Left,Right'
 
@@ -6298,7 +6301,7 @@ function Show-DbSwapNetWebPdv {
         $txtLog.BackColor = [System.Drawing.Color]::FromArgb(20, 24, 34)
         $txtLog.ForeColor = $Script:UiTexto
         $txtLog.BorderStyle = 'FixedSingle'
-        $txtLog.Font = New-Object System.Drawing.Font("Consolas", 8.5)
+        $txtLog.Font = New-Object System.Drawing.Font("Consolas", 9.5)
         [void]$f.Controls.Add($txtLog)
 
         $lblStatus = New-ToolLabel $f "Nenhuma alteração será feita sem sua confirmação." 20 653 9 -Cor $Script:UiSuave -W 920
@@ -6340,7 +6343,10 @@ function Show-DbSwapNetWebPdv {
             foreach ($ctl in @($btnLocalizar, $btnTrocar, $btnAtualizar, $btnFechar, $txtSrv, $cmbUsr, $txtSenha, $txtBanco, $txtRaiz, $txtNovaRaiz, $lv)) {
                 if ($ctl) { $ctl.Enabled = -not $Ocupado }
             }
-            if (-not $Ocupado) { $btnTrocar.Enabled = ($lv.SelectedItems.Count -gt 0 -and $null -ne $Script:DbSwapAtual) }
+            if (-not $Ocupado) {
+                $btnTrocar.Enabled = ($lv.SelectedItems.Count -gt 0 -and $null -ne $Script:DbSwapAtual)
+                if ($null -ne $mostrarSelecionado) { & $mostrarSelecionado }
+            }
         }
         $getConn = {
             param([string]$Banco = "master", [int]$Timeout = 8)
@@ -6487,8 +6493,10 @@ function Show-DbSwapNetWebPdv {
                     MdfKb   = $mdfAtualKb
                     LdfKb   = $ldfAtualKb
                     TotalKb = $totalAtualKb
+                    Data    = (@($mdfAtualArquivo.LastWriteTime, $ldfAtualArquivo.LastWriteTime) | Sort-Object -Descending | Select-Object -First 1)
                 }
-                $lblAtual.Text = ("Banco atual: MDF {0:N0} KB   |   LOG {1:N0} KB   |   TOTAL {2:N0} KB" -f $mdfAtualKb, $ldfAtualKb, $totalAtualKb)
+                $lblAtual.ForeColor = $Script:UiTexto
+                $lblAtual.Text = ("BANCO ATUAL:  {0}   (banco {1}  +  log {2})" -f (Format-TamanhoBanco $totalAtualKb), (Format-TamanhoBanco $mdfAtualKb), (Format-TamanhoBanco $ldfAtualKb))
                 if ($Script:ToolTip) { $Script:ToolTip.SetToolTip($lblAtual, "MDF: $mdfAtual`r`nLOG: $ldfAtual") }
                 & $addLog ("Banco atual: MDF {0:N0} KB; LOG {1:N0} KB; total {2:N0} KB." -f $mdfAtualKb, $ldfAtualKb, $totalAtualKb)
                 & $addLog "Arquivos atuais: $mdfAtual | $ldfAtual"
@@ -6680,7 +6688,11 @@ SELECT
                 $lblStatus.ForeColor = $Script:UiVermelho
                 $lblStatus.Text = "Troca bloqueada: $erroSeguranca"
                 & $addLog "BLOQUEADO: $erroSeguranca"
-                [System.Windows.Forms.MessageBox]::Show("A troca do banco foi bloqueada por segurança.`r`n`r`n$erroSeguranca", "Troca bloqueada", "OK", "Warning") | Out-Null
+                try {
+                    [void](Show-AvisoDestaque -Dono $f -Titulo "Troca bloqueada" -Manchete "A TROCA FOI BLOQUEADA POR SEGURANÇA" -Resumo "Nenhum arquivo foi alterado e o banco atual continua em uso." -Tipo 'perigo' `
+                            -Itens @(@{ Tipo = 'perigo'; Titulo = 'MOTIVO'; Texto = "$erroSeguranca" }) -TextoSim "ENTENDI")
+                }
+                catch { [System.Windows.Forms.MessageBox]::Show("A troca do banco foi bloqueada por segurança.`r`n`r`n$erroSeguranca", "Troca bloqueada", "OK", "Warning") | Out-Null }
                 return
             }
             finally { & $setOcupado $false }
@@ -6705,8 +6717,47 @@ SELECT
             if ($cand.Perfil -ne "Banco zero provável") {
                 $msg += "`r`n`r`nAVISO: o tamanho não parece o banco zero padrão.`r`nEsperado aprox.: MDF 24.320 KB e LOG 1.792 KB.`r`nEncontrado: MDF $($cand.MdfKb) KB e LOG $($cand.LdfKb) KB."
             }
-            $resp = [System.Windows.Forms.MessageBox]::Show($msg, "Confirmar troca do banco", "YesNo", "Warning")
-            if ($resp -ne [System.Windows.Forms.DialogResult]::Yes) { return }
+            # Aviso em destaque: tamanho do banco atual x banco novo em fonte grande, e um quadro
+            # para cada alerta. Se ele falhar por qualquer motivo, vale a caixa comum de sempre.
+            $confirmou = $false
+            try {
+                $ehZero = ($cand.Perfil -eq "Banco zero provável")
+                $abertosAgora = @()
+                foreach ($nomeProc in @("Concentrador", "NetStart", "NetServidor", "NetTerminal", "NetPrint", "NetPDV", "LinkXMenu", "XMenu")) {
+                    if (Get-Process -Name $nomeProc -ErrorAction SilentlyContinue) { $abertosAgora += $nomeProc }
+                }
+                $itensAviso = @()
+                if (-not $seguranca.Seguro) {
+                    $partesAberto = @()
+                    if ($seguranca.MovimentacoesAbertas -gt 0) { $partesAberto += "$($seguranca.MovimentacoesAbertas) movimentação(ões) aberta(s)" }
+                    if ($seguranca.CaixasAbertos -gt 0) { $partesAberto += "$($seguranca.CaixasAbertos) caixa(s) ainda aberto(s)" }
+                    $itensAviso += @{ Tipo = 'perigo'; Titulo = 'HÁ DADOS EM ABERTO NO BANCO ATUAL'; Texto = "$($partesAberto -join ' e '). Eles não existirão no banco novo e ficarão somente no backup do banco antigo." }
+                }
+                else { $itensAviso += @{ Tipo = 'ok'; Titulo = ''; Texto = 'Nenhuma movimentação ou caixa aberto no banco atual.' } }
+                if (-not $ehZero) {
+                    $itensAviso += @{ Tipo = 'perigo'; Titulo = 'O BANCO NOVO NÃO PARECE UM BANCO ZERO'; Texto = "Esperado: banco de cerca de $(Format-TamanhoBanco $Script:DbSwapMdfZeroKb) e log de cerca de $(Format-TamanhoBanco $Script:DbSwapLdfZeroKb). Encontrado: banco de $(Format-TamanhoBanco $cand.MdfKb) e log de $(Format-TamanhoBanco $cand.LdfKb). Confira se é o arquivo certo." }
+                }
+                if ($abertosAgora.Count -gt 0) {
+                    $itensAviso += @{ Tipo = 'alerta'; Titulo = 'ESTES PROGRAMAS SERÃO FECHADOS AUTOMATICAMENTE'; Texto = "Abertos agora: $($abertosAgora -join ', '). Quem estiver usando perde a tela." }
+                }
+                else { $itensAviso += @{ Tipo = 'info'; Titulo = ''; Texto = 'Se algum programa NetControll estiver aberto, ele será fechado automaticamente.' } }
+                $itensAviso += @{ Tipo = 'ok'; Titulo = 'BACKUP AUTOMÁTICO DO BANCO ANTIGO'; Texto = "O banco e o log atuais serão guardados juntos em um ZIP validado em: $pastaBackupData" }
+                $detalheAtual = "Banco $(Format-TamanhoBanco $atual.MdfKb) + log $(Format-TamanhoBanco $atual.LdfKb)`r`n$($atual.Banco)"
+                if ($atual.Data) { $detalheAtual += ("`r`nAlterado em {0:dd/MM/yyyy HH:mm}" -f $atual.Data) }
+                $detalheNovo = ("Banco $(Format-TamanhoBanco $cand.MdfKb) + log $(Format-TamanhoBanco $cand.LdfKb)`r`nVersão de {0:dd/MM/yyyy HH:mm}`r`n$($cand.Pasta)" -f $cand.Data)
+                $tipoAviso = if ((-not $seguranca.Seguro) -or (-not $ehZero)) { 'perigo' } else { 'aviso' }
+                $ciencia = if ($tipoAviso -eq 'perigo') { "Entendi: o banco atual sairá do sistema e ficará somente no backup." } else { "" }
+                $respAviso = @(Show-AvisoDestaque -Dono $f -Titulo "Confirmar troca do banco" -Manchete "ISSO VAI TROCAR O BANCO $("$($atual.Banco)".ToUpper())" `
+                        -Resumo "O banco atual será desconectado e guardado em backup, e o banco novo assume o lugar dele." -Tipo $tipoAviso `
+                        -Comparacao @{ Rotulo1 = "Banco atual - vai SAIR"; Valor1 = (Format-TamanhoBanco $atual.TotalKb); Detalhe1 = $detalheAtual; Rotulo2 = "Banco novo - vai ENTRAR"; Valor2 = (Format-TamanhoBanco $candTotalKb); Detalhe2 = $detalheNovo } `
+                        -Itens $itensAviso -TextoSim "SIM, TROCAR O BANCO" -TextoNao "CANCELAR" -Ciencia $ciencia)
+                $confirmou = ($respAviso.Count -gt 0 -and $respAviso[-1] -eq $true)
+            }
+            catch {
+                & $addLog "AVISO: não consegui montar o aviso em destaque ($($_.Exception.Message)); usando a caixa comum."
+                $confirmou = ([System.Windows.Forms.MessageBox]::Show($msg, "Confirmar troca do banco", "YesNo", "Warning") -eq [System.Windows.Forms.DialogResult]::Yes)
+            }
+            if (-not $confirmou) { return }
             & $setOcupado $true
             $cn = $null
             $backupDir = ""
@@ -6727,8 +6778,19 @@ SELECT
                         $segurancaFinal.CaixasAbertos -ne $seguranca.CaixasAbertos)
                     if ($dadosMudaram) {
                         $msgFinal = "A situação mudou desde a primeira confirmação.`r`n`r`nMovimentações abertas: $($segurancaFinal.MovimentacoesAbertas)`r`nCaixas abertos: $($segurancaFinal.CaixasAbertos)`r`n`r`nEsses dados não existirão no banco novo e ficarão somente no backup do banco antigo.`r`n`r`nContinuar mesmo assim?"
-                        $respFinal = [System.Windows.Forms.MessageBox]::Show($msgFinal, "Novo alerta antes da troca", "YesNo", "Warning")
-                        if ($respFinal -ne [System.Windows.Forms.DialogResult]::Yes) {
+                        $confirmouFinal = $false
+                        try {
+                            $respFinalAviso = @(Show-AvisoDestaque -Dono $f -Titulo "Novo alerta antes da troca" -Manchete "A SITUAÇÃO MUDOU DESDE A CONFIRMAÇÃO" `
+                                    -Resumo "Os programas já foram fechados. Ainda dá tempo de cancelar: nenhum arquivo foi alterado." -Tipo 'perigo' `
+                                    -Itens @(@{ Tipo = 'perigo'; Titulo = 'DADOS EM ABERTO NO BANCO ATUAL'; Texto = "Movimentações abertas: $($segurancaFinal.MovimentacoesAbertas)`r`nCaixas abertos: $($segurancaFinal.CaixasAbertos)`r`nEsses dados não existirão no banco novo e ficarão somente no backup do banco antigo." }) `
+                                    -TextoSim "CONTINUAR MESMO ASSIM" -TextoNao "CANCELAR" -Ciencia "Entendi: esses dados só existirão no backup do banco antigo.")
+                            $confirmouFinal = ($respFinalAviso.Count -gt 0 -and $respFinalAviso[-1] -eq $true)
+                        }
+                        catch {
+                            & $addLog "AVISO: não consegui montar o aviso em destaque ($($_.Exception.Message)); usando a caixa comum."
+                            $confirmouFinal = ([System.Windows.Forms.MessageBox]::Show($msgFinal, "Novo alerta antes da troca", "YesNo", "Warning") -eq [System.Windows.Forms.DialogResult]::Yes)
+                        }
+                        if (-not $confirmouFinal) {
                             & $addLog "Troca cancelada pelo usuário após o alerta final. Nenhum arquivo foi alterado."
                             $lblStatus.ForeColor = $Script:UiAmarelo
                             $lblStatus.Text = "Troca cancelada. Nenhum arquivo foi alterado."
@@ -6800,7 +6862,13 @@ SELECT
                     & $addLog "Pasta do backup aberta: $pastaBackupData"
                 }
                 catch { & $addLog "AVISO: o backup foi concluído, mas não foi possível abrir a pasta: $($_.Exception.Message)" }
-                [System.Windows.Forms.MessageBox]::Show("Banco trocado com sucesso.`r`n`r`nBackup do banco antigo (MDF + LDF):`r`n$backupDestinoFinal", "Trocar Banco", "OK", "Information") | Out-Null
+                try {
+                    [void](Show-AvisoDestaque -Dono $f -Titulo "Trocar Banco" -Manchete "BANCO TROCADO COM SUCESSO" -Resumo "O sistema já está usando o banco novo." -Tipo 'ok' `
+                            -Comparacao @{ Rotulo1 = "Banco antigo - guardado no backup"; Valor1 = (Format-TamanhoBanco $atual.TotalKb); Detalhe1 = "Banco $(Format-TamanhoBanco $atual.MdfKb) + log $(Format-TamanhoBanco $atual.LdfKb)"; Cor1 = $Script:UiSuave; `
+                                Rotulo2 = "Banco em uso agora"; Valor2 = (Format-TamanhoBanco $candTotalKb); Detalhe2 = "Banco $(Format-TamanhoBanco $cand.MdfKb) + log $(Format-TamanhoBanco $cand.LdfKb)"; Cor2 = $Script:UiVerde } `
+                            -Itens @(@{ Tipo = 'ok'; Titulo = 'BACKUP DO BANCO ANTIGO (MDF + LOG)'; Texto = "$backupDestinoFinal" }) -TextoSim "OK")
+                }
+                catch { [System.Windows.Forms.MessageBox]::Show("Banco trocado com sucesso.`r`n`r`nBackup do banco antigo (MDF + LDF):`r`n$backupDestinoFinal", "Trocar Banco", "OK", "Information") | Out-Null }
             }
             catch {
                 $erro = $_.Exception.Message
@@ -6840,7 +6908,11 @@ SELECT
                 $lblStatus.ForeColor = $Script:UiVermelho
                 $lblStatus.Text = "Falha na troca: $erro"
                 $situacaoBanco = if ($desanexouAtual) { "O Preparador tentou restaurar o banco antigo." } else { "Nenhum arquivo foi substituído e o banco atual permaneceu anexado." }
-                [System.Windows.Forms.MessageBox]::Show("Falha ao trocar o banco:`r`n`r`n$erro`r`n`r`nVerifique o log da tela. $situacaoBanco", "Trocar Banco", "OK", "Error") | Out-Null
+                try {
+                    [void](Show-AvisoDestaque -Dono $f -Titulo "Trocar Banco" -Manchete "A TROCA DO BANCO FALHOU" -Resumo "$situacaoBanco" -Tipo 'erro' `
+                            -Itens @(@{ Tipo = 'perigo'; Titulo = 'O QUE ACONTECEU'; Texto = "$erro" }, @{ Tipo = 'info'; Titulo = ''; Texto = 'Veja o acompanhamento na parte de baixo da tela para os detalhes de cada passo.' }) -TextoSim "OK")
+                }
+                catch { [System.Windows.Forms.MessageBox]::Show("Falha ao trocar o banco:`r`n`r`n$erro`r`n`r`nVerifique o log da tela. $situacaoBanco", "Trocar Banco", "OK", "Error") | Out-Null }
             }
             finally {
                 if ($cn) { try { $cn.Close() } catch {} }
@@ -6848,19 +6920,22 @@ SELECT
             }
         }
 
-        $lv.Add_SelectedIndexChanged({
+        # Atualiza o cartao do banco novo (tamanho em fonte grande). Roda ao trocar a linha e tambem ao fim da busca:
+        # antes, se a busca terminasse com a linha ja selecionada, o cartao ficava em 'A busca esta em andamento'
+        $mostrarSelecionado = {
                 $candSelecionado = $null
                 if ($lv.SelectedItems.Count -gt 0) { $candSelecionado = $lv.SelectedItems[0].Tag }
                 $pronto = ($null -ne $candSelecionado -and $null -ne $Script:DbSwapAtual -and -not $Script:DbSwapOcupado)
                 $btnTrocar.Enabled = $pronto
                 if ($pronto) {
                     $lblSelecionado.ForeColor = $Script:UiTexto
-                    $lblSelecionado.Text = ("MDF: {0} ({1:N0} KB)   |   LOG: {2} ({3:N0} KB)   |   Pasta: {4}" -f `
-                            (Split-Path $candSelecionado.Mdf -Leaf), $candSelecionado.MdfKb, `
-                            (Split-Path $candSelecionado.Ldf -Leaf), $candSelecionado.LdfKb, $candSelecionado.Pasta)
+                    $lblSelecionado.Text = ("BANCO NOVO:  {0}   (banco {1}  +  log {2})   |   versão de {3:dd/MM/yyyy HH:mm}" -f `
+                            (Format-TamanhoBanco ($candSelecionado.MdfKb + $candSelecionado.LdfKb)), `
+                            (Format-TamanhoBanco $candSelecionado.MdfKb), (Format-TamanhoBanco $candSelecionado.LdfKb), $candSelecionado.Data)
                     if ($Script:ToolTip) { $Script:ToolTip.SetToolTip($lblSelecionado, "MDF: $($candSelecionado.Mdf)`r`nLOG: $($candSelecionado.Ldf)") }
                 }
-            })
+            }
+        $lv.Add_SelectedIndexChanged({ & $mostrarSelecionado })
         $btnLocalizar.Add_Click($localizar)
         $btnAtualizar.Add_Click($localizar)
         $btnTrocar.Add_Click($trocar)
@@ -7302,23 +7377,22 @@ function Show-SqlIndexAdvisor {
         $lvIdx.Anchor = 'Top,Left,Right'
         $lvIdx.View = 'Details'
         $lvIdx.FullRowSelect = $true
-        $lvIdx.GridLines = $true
         $lvIdx.CheckBoxes = $true
         $lvIdx.HideSelection = $false
         $lvIdx.HeaderStyle = 'Nonclickable'
-        $lvIdx.BackColor = [System.Drawing.Color]::FromArgb(12, 12, 25)
         $lvIdx.ForeColor = $Script:UiTexto
-        $lvIdx.Font = New-Object System.Drawing.Font("Segoe UI", 9)
-        [void]$lvIdx.Columns.Add("Prioridade", 95)
-        [void]$lvIdx.Columns.Add("Tabela do banco", 225)
-        [void]$lvIdx.Columns.Add("Uso registrado", 100)
-        [void]$lvIdx.Columns.Add("Leituras completas", 115)
-        [void]$lvIdx.Columns.Add("Último uso", 105)
+        [void]$lvIdx.Columns.Add("Prioridade", 118)
+        [void]$lvIdx.Columns.Add("Tabela do banco", 195)
+        [void]$lvIdx.Columns.Add("Uso registrado", 128)
+        [void]$lvIdx.Columns.Add("Leituras completas", 152)
+        [void]$lvIdx.Columns.Add("Último uso", 100)
         [void]$lvIdx.Columns.Add("Situação", 200)
         [void]$f.Controls.Add($lvIdx)
+        Set-ListaModerna $lvIdx -ColunasStatus @(5) -ColunasDireita @(2, 3) -MinUltima 160
         $ajustarColunasIdx = {
             param($Controle)
             if ($null -eq $Controle -or $Controle -isnot [System.Windows.Forms.ListView]) { $Controle = $lvIdx }
+            if (Test-ListaModernaAtiva $Controle) { return }
             if ($Controle.Columns.Count -ge 6) {
                 $Controle.Columns[5].Width = [Math]::Max(120, ($Controle.ClientSize.Width - 720))
             }
@@ -7348,7 +7422,7 @@ function Show-SqlIndexAdvisor {
         $txtIdxSql.BackColor = [System.Drawing.Color]::FromArgb(20, 24, 34)
         $txtIdxSql.ForeColor = $Script:UiTexto
         $txtIdxSql.BorderStyle = 'FixedSingle'
-        $txtIdxSql.Font = New-Object System.Drawing.Font("Consolas", 8.5)
+        $txtIdxSql.Font = New-Object System.Drawing.Font("Consolas", 9.5)
         $txtIdxSql.Text = "Selecione uma sugestão para visualizar o comando que será executado."
         [void]$f.Controls.Add($txtIdxSql)
 
@@ -7614,10 +7688,33 @@ ORDER BY migs.avg_total_user_cost * migs.avg_user_impact * (migs.user_seeks + mi
                 return
             }
             $textoLote = if ($EmLotesDeCinco) { "`r`n`r`nO Preparador vai executar em lotes de 5 índices por vez." } else { "" }
-            $resp = [System.Windows.Forms.MessageBox]::Show(
-                "Serão criados $($alvosValidos.Count) índice(s).`r`n`r`nIsso é igual executar os CREATE INDEX no SQL Server Management Studio e pode levar alguns minutos em banco grande.$textoLote`r`n`r`nContinuar?",
-                $Titulo, "YesNo", "Warning")
-            if ($resp -ne [System.Windows.Forms.DialogResult]::Yes) { return }
+            # Aviso em destaque; se falhar, vale a caixa comum de sempre.
+            $confirmou = $false
+            try {
+                $tabelasAviso = @($alvosValidos | ForEach-Object { "$($_.Tag.TabelaAmigavel)" } | Select-Object -Unique)
+                $listaTabelas = if ($tabelasAviso.Count -gt 6) { (($tabelasAviso | Select-Object -First 6) -join ", ") + " e mais $($tabelasAviso.Count - 6)" } else { $tabelasAviso -join ", " }
+                $bancoAviso = "$($cmbIdxBanco.Text)"
+                if ($bancoAviso -eq "" -or $bancoAviso -eq "(TODOS OS BANCOS)") { $bancoAviso = "todos os bancos analisados" }
+                $itensIdx = @(
+                    @{ Tipo = 'alerta'; Titulo = 'AS VENDAS PODEM FICAR LENTAS OU PARADAS POR ALGUNS MINUTOS'; Texto = 'Enquanto um índice é criado, a tabela pode ficar bloqueada para gravação. Em banco grande isso leva alguns minutos: prefira fazer fora do horário de movimento.' },
+                    @{ Tipo = 'ok'; Titulo = 'NENHUM DADO É APAGADO OU ALTERADO'; Texto = 'Criar índice só adiciona um atalho de busca. Se algum índice falhar, ele simplesmente não é criado.' },
+                    @{ Tipo = 'info'; Titulo = ''; Texto = "Tabelas: $listaTabelas" }
+                )
+                if ($EmLotesDeCinco) { $itensIdx += @{ Tipo = 'info'; Titulo = ''; Texto = 'O Preparador vai executar em lotes de 5 índices por vez.' } }
+                if ($alvosValidos.Count -gt 10) {
+                    $itensIdx += @{ Tipo = 'alerta'; Titulo = 'SÃO MUITOS ÍNDICES'; Texto = 'Cada índice novo ocupa espaço em disco e deixa a gravação um pouco mais lenta. Se houver dúvida, aplique só os 10 de maior prioridade (botão TOP 10).' }
+                }
+                $respIdx = @(Show-AvisoDestaque -Dono $f -Titulo $Titulo -Manchete "VAI CRIAR $($alvosValidos.Count) ÍNDICE(S) NO BANCO" -Resumo "É igual a executar os CREATE INDEX no SQL Server Management Studio." -Tipo 'aviso' `
+                        -Destaque @{ Rotulo = 'índice(s) que serão criados'; Valor = "$($alvosValidos.Count)"; Detalhe = "Banco: $bancoAviso" } `
+                        -Itens $itensIdx -TextoSim "SIM, CRIAR OS ÍNDICES" -TextoNao "CANCELAR" -CorSim $Script:UiAzul)
+                $confirmou = ($respIdx.Count -gt 0 -and $respIdx[-1] -eq $true)
+            }
+            catch {
+                $confirmou = ([System.Windows.Forms.MessageBox]::Show(
+                        "Serão criados $($alvosValidos.Count) índice(s).`r`n`r`nIsso é igual executar os CREATE INDEX no SQL Server Management Studio e pode levar alguns minutos em banco grande.$textoLote`r`n`r`nContinuar?",
+                        $Titulo, "YesNo", "Warning") -eq [System.Windows.Forms.DialogResult]::Yes)
+            }
+            if (-not $confirmou) { return }
 
             & $setOcupado $true
             $cn = $null
@@ -7805,15 +7902,13 @@ function Show-SqlDbDiagnostic {
         $lvDiag.Anchor = 'Top,Left,Right'
         $lvDiag.View = 'Details'
         $lvDiag.FullRowSelect = $true
-        $lvDiag.GridLines = $true
-        $lvDiag.BackColor = [System.Drawing.Color]::FromArgb(12, 12, 25)
         $lvDiag.ForeColor = $Script:UiTexto
-        $lvDiag.Font = New-Object System.Drawing.Font("Segoe UI", 8.5)
         [void]$lvDiag.Columns.Add("Item", 185)
-        [void]$lvDiag.Columns.Add("Status", 95)
-        [void]$lvDiag.Columns.Add("Detalhe", 380)
+        [void]$lvDiag.Columns.Add("Status", 112)
+        [void]$lvDiag.Columns.Add("Detalhe", 360)
         [void]$lvDiag.Columns.Add("O que fazer", 260)
         [void]$f.Controls.Add($lvDiag)
+        Set-ListaModerna $lvDiag -ColunasStatus @(1) -ColunasSuaves @(3) -MinUltima 220
 
         $txtDiagRel = New-Object System.Windows.Forms.TextBox
         $txtDiagRel.Location = New-Object System.Drawing.Point(20, 490)
@@ -7825,7 +7920,7 @@ function Show-SqlDbDiagnostic {
         $txtDiagRel.BackColor = [System.Drawing.Color]::FromArgb(20, 24, 34)
         $txtDiagRel.ForeColor = $Script:UiTexto
         $txtDiagRel.BorderStyle = 'FixedSingle'
-        $txtDiagRel.Font = New-Object System.Drawing.Font("Consolas", 8.5)
+        $txtDiagRel.Font = New-Object System.Drawing.Font("Consolas", 9.5)
         [void]$f.Controls.Add($txtDiagRel)
 
         $btnDiagRodar = New-ToolButton $f "DIAGNOSTICAR" 20 582 150 34 $Script:UiAzul $null "Executa diagnóstico de leitura no banco selecionado"
@@ -8602,6 +8697,10 @@ function Set-JanelaAdaptavel {
         $doRodape = @($Janela.Controls | Where-Object { "$($_.Dock)" -eq 'None' -and "$($_.Anchor)" -match 'Bottom' -and "$($_.Anchor)" -notmatch 'Top' })
         $conteudo = @($Janela.Controls | Where-Object { $doRodape -notcontains $_ })
         $painelRolavel = $null
+        # Tirar um botao do formulario (para o rodape) zera o botao padrao de Enter e Esc:
+        # guarda aqui e devolve no fim, senao em tela pequena Esc deixava de fechar a janela
+        $botaoEnter = $Janela.AcceptButton
+        $botaoEsc = $Janela.CancelButton
         $Janela.SuspendLayout()
         try {
             if ($doRodape.Count -gt 0 -and $conteudo.Count -gt 0) {
@@ -8680,7 +8779,11 @@ function Set-JanelaAdaptavel {
             $onde.AutoScroll = $true
             $onde.AutoScrollMinSize = New-Object System.Drawing.Size($larguraRolagem, $alturaRolagem)
         }
-        finally { $Janela.ResumeLayout() }
+        finally {
+            $Janela.ResumeLayout()
+            if ($null -ne $botaoEnter -and $null -eq $Janela.AcceptButton) { $Janela.AcceptButton = $botaoEnter }
+            if ($null -ne $botaoEsc -and $null -eq $Janela.CancelButton) { $Janela.CancelButton = $botaoEsc }
+        }
 
         # Janela de tamanho fixo precisa virar ajustavel para caber na tela
         if ("$($Janela.FormBorderStyle)" -like 'Fixed*') { $Janela.FormBorderStyle = 'Sizable' }
@@ -8890,6 +8993,815 @@ function Format-ToolListView {
     $LV.BorderStyle = 'None'
     $LV.Font = New-Object System.Drawing.Font("Segoe UI", 9.5)
 }
+
+# -----------------------------------------------------------------------------
+# LISTA MODERNA (planilha das telas do banco)
+# A grade padrao do Windows (linhas pretas, grade branca, cabecalho claro e fonte
+# miuda) destoava do resto do programa. Aqui a lista e desenhada na mao: cabecalho
+# escuro, linhas altas e alternadas, selecao verde, "etiqueta" colorida na coluna de
+# situacao e dica com o texto inteiro quando a celula corta. Nenhuma coluna, item ou
+# evento muda: so o desenho. O desenho e compilado quando a primeira janela abre (o
+# mesmo padrao do RodaDoMouse) e, se a compilacao falhar, a lista segue com o visual
+# simples ja ajustado por Set-ListaModerna.
+# -----------------------------------------------------------------------------
+function Enable-ListaModerna {
+    if ("ListaModerna" -as [type]) { return $true }
+    if ($Script:ListaModernaFalhou) { return $false }
+    try {
+        Add-Type -ReferencedAssemblies System.Windows.Forms, System.Drawing -TypeDefinition @'
+using System;
+using System.Drawing;
+using System.Drawing.Drawing2D;
+using System.Reflection;
+using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
+using System.Windows.Forms;
+
+public class ListaModerna
+{
+    public Color CorLinha = Color.FromArgb(33, 40, 54);
+    public Color CorLinhaAlt = Color.FromArgb(38, 46, 62);
+    public Color CorCabecalho = Color.FromArgb(46, 57, 78);
+    public Color CorTextoCab = Color.FromArgb(196, 208, 230);
+    public Color CorTexto = Color.FromArgb(234, 240, 250);
+    public Color CorSuave = Color.FromArgb(146, 160, 184);
+    public Color CorDivisoria = Color.FromArgb(47, 57, 77);
+    public Color CorDestaque = Color.FromArgb(0, 194, 146);
+    public Color CorVerde = Color.FromArgb(0, 194, 146);
+    public Color CorAmarelo = Color.FromArgb(226, 168, 40);
+    public Color CorVermelho = Color.FromArgb(222, 70, 70);
+    public Color CorInfo = Color.FromArgb(96, 165, 250);
+    public int[] ColunasStatus = new int[0];
+    public int[] ColunasSuaves = new int[0];
+    public int MinUltima = 140;
+    public int Margem = 10;
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct RETANGULO { public int Left; public int Top; public int Right; public int Bottom; }
+    [DllImport("user32.dll")]
+    private static extern IntPtr SendMessage(IntPtr h, int msg, IntPtr wp, IntPtr lp);
+    [DllImport("user32.dll", EntryPoint = "SendMessage")]
+    private static extern IntPtr SendMessageRect(IntPtr h, int msg, IntPtr wp, ref RETANGULO lp);
+    [DllImport("user32.dll")]
+    private static extern bool GetClientRect(IntPtr h, out RETANGULO r);
+
+
+    private static ConditionalWeakTable<ListView, ListaModerna> registro = new ConditionalWeakTable<ListView, ListaModerna>();
+
+    private ListView lv;
+    private bool ligada;
+    private int hover = -1;
+    private ImageList imgAltura;
+    private Font fonteNegrito;
+    private Font fonteCab;
+    private ToolTip dica;
+    private int dicaItem = -1;
+    private int dicaCol = -1;
+    private bool ajustePendente;
+    private CabecalhoWnd cab;
+
+    private ListaModerna(ListView l) { lv = l; }
+
+    public static ListaModerna Aplicar(ListView l)
+    {
+        ListaModerna x;
+        if (!registro.TryGetValue(l, out x)) { x = new ListaModerna(l); registro.Add(l, x); }
+        return x;
+    }
+
+    public static bool Ativa(ListView l)
+    {
+        ListaModerna x;
+        if (l == null) { return false; }
+        return registro.TryGetValue(l, out x) && x.ligada;
+    }
+
+
+    public void Ligar()
+    {
+        if (ligada) { return; }
+        dica = new ToolTip();
+        lv.DrawColumnHeader += DesenhaCabecalho;
+        lv.DrawItem += DesenhaLinha;
+        lv.DrawSubItem += DesenhaCelula;
+        lv.MouseMove += AoMover;
+        lv.MouseLeave += AoSair;
+        lv.FontChanged += delegate { AjustaAltura(); lv.Invalidate(); };
+        lv.SizeChanged += delegate { AjustaUltima(); };
+        lv.HandleCreated += delegate { AoCriarHandle(); };
+        lv.HandleDestroyed += delegate { SoltaCabecalho(); };
+        lv.Disposed += delegate { Libera(); };
+        lv.GridLines = false;
+        lv.BorderStyle = BorderStyle.None;
+        lv.BackColor = CorLinha;
+        lv.ForeColor = CorTexto;
+        TornaDuplo(lv);
+        AjustaAltura();
+        lv.OwnerDraw = true;
+        ligada = true;
+        if (lv.IsHandleCreated) { AoCriarHandle(); }
+    }
+
+    private static void TornaDuplo(Control c)
+    {
+        try
+        {
+            PropertyInfo p = typeof(Control).GetProperty("DoubleBuffered", BindingFlags.Instance | BindingFlags.NonPublic);
+            if (p != null) { p.SetValue(c, true, null); }
+        }
+        catch (Exception) { }
+    }
+
+    private void AoCriarHandle()
+    {
+        try { SendMessage(lv.Handle, 0x1036, (IntPtr)0x10000, (IntPtr)0x10000); } catch (Exception) { }
+        try
+        {
+            IntPtr hc = SendMessage(lv.Handle, 0x101F, IntPtr.Zero, IntPtr.Zero);
+            SoltaCabecalho();
+            if (hc != IntPtr.Zero) { cab = new CabecalhoWnd(this); cab.AssignHandle(hc); }
+        }
+        catch (Exception) { }
+        AjustaUltima();
+    }
+
+    private void SoltaCabecalho()
+    {
+        if (cab != null) { try { cab.ReleaseHandle(); } catch (Exception) { } cab = null; }
+    }
+
+    private void Libera()
+    {
+        SoltaCabecalho();
+        if (fonteNegrito != null) { fonteNegrito.Dispose(); fonteNegrito = null; }
+        if (fonteCab != null) { fonteCab.Dispose(); fonteCab = null; }
+        if (imgAltura != null) { imgAltura.Dispose(); imgAltura = null; }
+        if (dica != null) { dica.Dispose(); dica = null; }
+    }
+
+    // A altura da linha da grade vem da imagem pequena: uma imagem de 1 x N pixels
+    // (sem desenho) e o jeito de ter linhas mais altas sem mexer em mais nada.
+    private void AjustaAltura()
+    {
+        int h = Math.Max(26, lv.Font.Height + 9);
+        if (fonteNegrito != null) { fonteNegrito.Dispose(); fonteNegrito = null; }
+        if (fonteCab != null) { fonteCab.Dispose(); fonteCab = null; }
+        ImageList nova = new ImageList();
+        nova.ColorDepth = ColorDepth.Depth32Bit;
+        nova.ImageSize = new Size(1, h);
+        lv.SmallImageList = nova;
+        if (imgAltura != null) { imgAltura.Dispose(); }
+        imgAltura = nova;
+    }
+
+    private Font FonteNegrito()
+    {
+        if (fonteNegrito == null) { fonteNegrito = new Font(lv.Font.FontFamily, lv.Font.Size - 0.5f, FontStyle.Bold); }
+        return fonteNegrito;
+    }
+
+    private Font FonteCab()
+    {
+        if (fonteCab == null) { fonteCab = new Font(lv.Font.FontFamily, Math.Max(7.5f, lv.Font.Size - 1.5f), FontStyle.Bold); }
+        return fonteCab;
+    }
+
+    // ---- ultima coluna sempre preenche o resto da largura (sem faixa vazia no cabecalho).
+    // Se as outras colunas ja ocupam tudo (janela pequena, zoom), elas encolhem juntas em vez de
+    // sobrar barra de rolagem de lado: assim o texto da ultima coluna nunca fica cortado.
+    private int MinimoUltima()
+    {
+        return Math.Min(MinUltima, Math.Max(90, lv.ClientSize.Width / 5));
+    }
+
+    private int SomaOutras()
+    {
+        int soma = 0;
+        for (int i = 0; i < lv.Columns.Count - 1; i++) { soma += lv.Columns[i].Width; }
+        return soma;
+    }
+
+    private bool PrecisaAjuste()
+    {
+        int n = lv.Columns.Count;
+        int cw = lv.ClientSize.Width;
+        if (n == 0 || cw <= 0) { return false; }
+        int soma = SomaOutras();
+        int minU = MinimoUltima();
+        if (n > 1 && soma + minU > cw) { return true; }
+        return Math.Abs(lv.Columns[n - 1].Width - Math.Max(minU, cw - soma)) > 1;
+    }
+
+    public void AjustaUltima()
+    {
+        if (!ligada) { return; }
+        int n = lv.Columns.Count;
+        int cw = lv.ClientSize.Width;
+        if (n == 0 || cw <= 0) { return; }
+        int soma = SomaOutras();
+        int minU = MinimoUltima();
+        if (n > 1 && soma > 0 && soma + minU > cw)
+        {
+            double f = Math.Max(0.5, (double)(cw - minU) / soma);
+            for (int i = 0; i < n - 1; i++)
+            {
+                int nw = Math.Max(56, (int)(lv.Columns[i].Width * f));
+                if (nw != lv.Columns[i].Width) { lv.Columns[i].Width = nw; }
+            }
+            soma = SomaOutras();
+        }
+        ColumnHeader u = lv.Columns[n - 1];
+        int alvo = Math.Max(minU, cw - soma);
+        if (Math.Abs(u.Width - alvo) > 1) { u.Width = alvo; }
+    }
+
+    private void AgendaAjuste()
+    {
+        if (ajustePendente || !lv.IsHandleCreated) { return; }
+        if (!PrecisaAjuste()) { return; }
+        ajustePendente = true;
+        lv.BeginInvoke((MethodInvoker)delegate { ajustePendente = false; AjustaUltima(); });
+    }
+    // ---- cabecalho
+    private void DesenhaCabecalho(object s, DrawListViewColumnHeaderEventArgs e)
+    {
+        Graphics g = e.Graphics;
+        Rectangle r = e.Bounds;
+        using (SolidBrush b = new SolidBrush(CorCabecalho)) { g.FillRectangle(b, r); }
+        using (Pen p = new Pen(Color.FromArgb(150, CorDestaque))) { g.DrawLine(p, r.Left, r.Bottom - 1, r.Right, r.Bottom - 1); }
+        if (e.ColumnIndex < lv.Columns.Count - 1)
+        {
+            using (Pen p2 = new Pen(Color.FromArgb(60, 255, 255, 255))) { g.DrawLine(p2, r.Right - 1, r.Top + 7, r.Right - 1, r.Bottom - 9); }
+        }
+        int esq = r.Left + ((e.ColumnIndex == 0 && lv.CheckBoxes) ? 28 : Margem);
+        Rectangle rt = new Rectangle(esq, r.Top, Math.Max(1, r.Right - Margem - esq), Math.Max(1, r.Height - 1));
+        TextFormatFlags fl = Alinha(e.Header.TextAlign) | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine;
+        TextRenderer.DrawText(g, (e.Header.Text ?? "").ToUpperInvariant(), FonteCab(), rt, CorTextoCab, fl);
+        if (e.ColumnIndex == lv.Columns.Count - 1) { AgendaAjuste(); }
+    }
+
+    // ---- fundo da linha (zebra, selecao, passagem do mouse)
+    private void DesenhaLinha(object s, DrawListViewItemEventArgs e)
+    {
+        Graphics g = e.Graphics;
+        Rectangle r = new Rectangle(0, e.Bounds.Top, Math.Max(lv.ClientSize.Width, e.Bounds.Right), e.Bounds.Height);
+        Color fundo = (e.ItemIndex % 2 == 0) ? CorLinha : CorLinhaAlt;
+        using (SolidBrush b = new SolidBrush(fundo)) { g.FillRectangle(b, r); }
+        if (e.Item.Selected)
+        {
+            using (SolidBrush b = new SolidBrush(Color.FromArgb(lv.Focused ? 64 : 42, CorDestaque))) { g.FillRectangle(b, r); }
+            using (SolidBrush b2 = new SolidBrush(CorDestaque)) { g.FillRectangle(b2, r.Left, r.Top, 3, r.Height); }
+        }
+        else if (e.ItemIndex == hover)
+        {
+            using (SolidBrush b = new SolidBrush(Color.FromArgb(16, 255, 255, 255))) { g.FillRectangle(b, r); }
+        }
+        using (Pen p = new Pen(CorDivisoria)) { g.DrawLine(p, r.Left, r.Bottom - 1, r.Right, r.Bottom - 1); }
+    }
+
+    // ---- celula
+    private void DesenhaCelula(object s, DrawListViewSubItemEventArgs e)
+    {
+        Graphics g = e.Graphics;
+        Rectangle cel = e.Bounds;
+        int col = e.ColumnIndex;
+        int esq = cel.Left + Margem;
+        if (col == 0 && lv.CheckBoxes)
+        {
+            Rectangle cx = new Rectangle(cel.Left + 4, cel.Top + (cel.Height - 16) / 2, 16, 16);
+            DesenhaCaixa(g, cx, e.Item.Checked);
+            esq = cel.Left + 28;
+        }
+        int dir = cel.Right - Margem;
+        if (dir <= esq) { return; }
+        string texto = e.SubItem.Text ?? "";
+        Color corItem = e.Item.ForeColor;
+        bool suaveLinha = MesmaCor(corItem, CorSuave);
+        bool semantica = !suaveLinha && !MesmaCor(corItem, CorTexto);
+        Color cor = CorTexto;
+        if (suaveLinha || Contem(ColunasSuaves, col)) { cor = CorSuave; }
+        if (!lv.Enabled) { cor = Mistura(cor, CorLinha, 0.5); }
+        Rectangle area = new Rectangle(esq, cel.Top, dir - esq, Math.Max(1, cel.Height - 1));
+        if (Contem(ColunasStatus, col) && !suaveLinha && texto.Length > 1)
+        {
+            DesenhaPilula(g, area, texto, semantica ? corItem : CorDoTexto(texto), lv.Enabled);
+        }
+        else
+        {
+            TextFormatFlags fl = Alinha(lv.Columns[col].TextAlign) | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine;
+            TextRenderer.DrawText(g, texto, lv.Font, area, cor, fl);
+        }
+    }
+
+    // Cor da etiqueta quando a linha nao traz cor propria (ex.: "Criado", "Erro")
+    private Color CorDoTexto(string texto)
+    {
+        string t = texto.ToLowerInvariant();
+        if (t.Contains("erro") || t.Contains("falha") || t.Contains("crític") || t.Contains("critic")) { return CorVermelho; }
+        if (t.Contains("aten") || t.Contains("criando") || t.Contains("aguard") || t.Contains("buscando") || t.Contains("conferir")) { return CorAmarelo; }
+        if (t == "ok" || t.StartsWith("ok ") || t.Contains("criado") || t.Contains("aplicado") || t.Contains("adequado") || t.Contains("sucesso") || t.Contains("conclu")) { return CorVerde; }
+        if (t.Contains("pronto")) { return CorInfo; }
+        return CorSuave;
+    }
+
+    private void DesenhaPilula(Graphics g, Rectangle area, string texto, Color cor, bool ativa)
+    {
+        Font fb = FonteNegrito();
+        Color fundoLinha = CorLinha;
+        Color c = ativa ? cor : Mistura(cor, fundoLinha, 0.5);
+        Size tam = TextRenderer.MeasureText(g, texto, fb, new Size(int.MaxValue, int.MaxValue), TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine);
+        int alt = Math.Max(14, Math.Min(area.Height - 8, fb.Height + 4));
+        int larg = Math.Min(area.Width, tam.Width + 20);
+        Rectangle pr = new Rectangle(area.Left, area.Top + (area.Height - alt) / 2, larg, alt);
+        SmoothingMode antes = g.SmoothingMode;
+        g.SmoothingMode = SmoothingMode.AntiAlias;
+        using (GraphicsPath gp = Arredondado(pr, alt / 2))
+        {
+            using (SolidBrush b = new SolidBrush(Color.FromArgb(44, c))) { g.FillPath(b, gp); }
+            using (Pen p = new Pen(Color.FromArgb(120, c))) { g.DrawPath(p, gp); }
+        }
+        g.SmoothingMode = antes;
+        TextRenderer.DrawText(g, texto, fb, pr, c, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine);
+    }
+
+    private void DesenhaCaixa(Graphics g, Rectangle r, bool marcada)
+    {
+        SmoothingMode antes = g.SmoothingMode;
+        g.SmoothingMode = SmoothingMode.AntiAlias;
+        using (GraphicsPath gp = Arredondado(r, 4))
+        {
+            if (marcada)
+            {
+                using (SolidBrush b = new SolidBrush(CorDestaque)) { g.FillPath(b, gp); }
+            }
+            else
+            {
+                using (SolidBrush b = new SolidBrush(Color.FromArgb(22, 27, 38))) { g.FillPath(b, gp); }
+                using (Pen p = new Pen(Color.FromArgb(122, 136, 162), 1.5f)) { g.DrawPath(p, gp); }
+            }
+        }
+        if (marcada)
+        {
+            using (Pen p = new Pen(Color.White, 2f))
+            {
+                p.StartCap = LineCap.Round;
+                p.EndCap = LineCap.Round;
+                p.LineJoin = LineJoin.Round;
+                g.DrawLines(p, new Point[] { new Point(r.Left + 4, r.Top + 8), new Point(r.Left + 7, r.Top + 11), new Point(r.Left + 12, r.Top + 5) });
+            }
+        }
+        g.SmoothingMode = antes;
+    }
+
+    // ---- mouse: linha sob o ponteiro e dica com o texto inteiro da celula cortada
+    private void AoMover(object s, MouseEventArgs e)
+    {
+        ListViewHitTestInfo h = lv.HitTest(e.Location);
+        int idx = (h.Item == null) ? -1 : h.Item.Index;
+        if (idx != hover) { int ant = hover; hover = idx; Redesenha(ant); Redesenha(idx); }
+        int col = -1;
+        if (h.Item != null && h.SubItem != null) { col = h.Item.SubItems.IndexOf(h.SubItem); }
+        if (idx == dicaItem && col == dicaCol) { return; }
+        dicaItem = idx;
+        dicaCol = col;
+        if (dica == null) { return; }
+        dica.Hide(lv);
+        if (col < 0 || col >= lv.Columns.Count) { return; }
+        string t = h.SubItem.Text ?? "";
+        int largura = lv.Columns[col].Width - Margem * 2 - ((col == 0 && lv.CheckBoxes) ? 18 : 0);
+        Size m = TextRenderer.MeasureText(t, lv.Font, new Size(int.MaxValue, 100), TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine);
+        if (t.Length > 0 && m.Width > largura) { dica.Show(t, lv, e.X + 14, e.Y + 22, 8000); }
+    }
+
+    private void AoSair(object s, EventArgs e)
+    {
+        int ant = hover;
+        hover = -1;
+        dicaItem = -1;
+        dicaCol = -1;
+        Redesenha(ant);
+        if (dica != null) { dica.Hide(lv); }
+    }
+
+    private void Redesenha(int i)
+    {
+        if (i >= 0 && i < lv.Items.Count) { lv.RedrawItems(i, i, false); }
+    }
+
+    // ---- utilidades
+    private static bool Contem(int[] v, int i)
+    {
+        if (v == null) { return false; }
+        for (int k = 0; k < v.Length; k++) { if (v[k] == i) { return true; } }
+        return false;
+    }
+
+    private static bool MesmaCor(Color a, Color b) { return a.ToArgb() == b.ToArgb(); }
+
+    private static Color Mistura(Color a, Color b, double t)
+    {
+        return Color.FromArgb((int)(a.R * t + b.R * (1 - t)), (int)(a.G * t + b.G * (1 - t)), (int)(a.B * t + b.B * (1 - t)));
+    }
+
+    private static TextFormatFlags Alinha(HorizontalAlignment a)
+    {
+        if (a == HorizontalAlignment.Right) { return TextFormatFlags.Right; }
+        if (a == HorizontalAlignment.Center) { return TextFormatFlags.HorizontalCenter; }
+        return TextFormatFlags.Left;
+    }
+
+    private static GraphicsPath Arredondado(Rectangle r, int raio)
+    {
+        GraphicsPath p = new GraphicsPath();
+        int d = Math.Max(2, Math.Min(raio * 2, Math.Min(r.Width, r.Height)));
+        p.AddArc(r.Left, r.Top, d, d, 180, 90);
+        p.AddArc(r.Right - d, r.Top, d, d, 270, 90);
+        p.AddArc(r.Right - d, r.Bottom - d, d, d, 0, 90);
+        p.AddArc(r.Left, r.Bottom - d, d, d, 90, 90);
+        p.CloseFigure();
+        return p;
+    }
+
+    // A faixa que sobra a direita da ultima coluna e pintada pelo proprio Windows (clara):
+    // depois de cada pintura do cabecalho ela recebe a mesma cor escura.
+    private void PintaFolga(IntPtr h)
+    {
+        int n = lv.Columns.Count;
+        if (n == 0) { return; }
+        RETANGULO area;
+        if (!GetClientRect(h, out area)) { return; }
+        RETANGULO ult = new RETANGULO();
+        SendMessageRect(h, 0x1207, (IntPtr)(n - 1), ref ult);
+        if (ult.Right <= 0 || ult.Right >= area.Right - 1) { return; }
+        using (Graphics g = Graphics.FromHwnd(h))
+        {
+            using (SolidBrush b = new SolidBrush(CorCabecalho)) { g.FillRectangle(b, ult.Right, 0, area.Right - ult.Right, area.Bottom); }
+            using (Pen p = new Pen(Color.FromArgb(150, CorDestaque))) { g.DrawLine(p, ult.Right, area.Bottom - 1, area.Right, area.Bottom - 1); }
+        }
+    }
+
+    private sealed class CabecalhoWnd : NativeWindow
+    {
+        private ListaModerna dono;
+        public CabecalhoWnd(ListaModerna d) { dono = d; }
+        protected override void WndProc(ref Message m)
+        {
+            base.WndProc(ref m);
+            if (m.Msg == 0x000F)
+            {
+                try { dono.PintaFolga(this.Handle); } catch (Exception) { }
+            }
+        }
+    }
+}
+'@
+        return $true
+    }
+    catch {
+        $Script:ListaModernaFalhou = $true
+        Log-Message "ERRO" "Lista moderna: não consegui montar o desenho personalizado ($($_.Exception.Message)); a lista segue com o visual simples"
+        return $false
+    }
+}
+
+# Trocar o desenho nao pode deixar a lista sem funcionar: se o desenho personalizado
+# falhar, o que ja foi ajustado aqui (cores, fonte, sem grade) continua valendo.
+function Set-ListaModerna {
+    param(
+        $LV,
+        [int[]]$ColunasStatus = @(),
+        [int[]]$ColunasSuaves = @(),
+        [int[]]$ColunasDireita = @(),
+        [int]$MinUltima = 140
+    )
+    $LV.View = 'Details'
+    $LV.FullRowSelect = $true
+    $LV.GridLines = $false
+    $LV.HideSelection = $false
+    $LV.BackColor = $Script:UiCartao
+    $LV.ForeColor = $Script:UiTexto
+    $LV.Font = New-Object System.Drawing.Font("Segoe UI", 9.5)
+    foreach ($i in $ColunasDireita) {
+        if ($i -ge 0 -and $i -lt $LV.Columns.Count) { $LV.Columns[$i].TextAlign = [System.Windows.Forms.HorizontalAlignment]::Right }
+    }
+    if (-not (Enable-ListaModerna)) { return }
+    try {
+        $x = [ListaModerna]::Aplicar($LV)
+        $x.CorLinha = $Script:UiCartao
+        $x.CorLinhaAlt = Get-UiTom $Script:UiCartao 5
+        $x.CorCabecalho = [System.Drawing.Color]::FromArgb(46, 57, 78)
+        $x.CorTexto = $Script:UiTexto
+        $x.CorSuave = $Script:UiSuave
+        $x.CorDivisoria = [System.Drawing.Color]::FromArgb(47, 57, 77)
+        $x.CorDestaque = $Script:UiVerde
+        $x.CorVerde = $Script:UiVerde
+        $x.CorAmarelo = $Script:UiAmarelo
+        $x.CorVermelho = $Script:UiVermelho
+        $x.ColunasStatus = $ColunasStatus
+        $x.ColunasSuaves = $ColunasSuaves
+        $x.MinUltima = $MinUltima
+        $x.Ligar()
+    }
+    catch { Log-Message "ERRO" "Lista moderna: não consegui ligar o desenho ($($_.Exception.Message))" }
+}
+
+# Verdadeiro quando o desenho personalizado esta ligado nesta lista (ele mesmo
+# cuida da largura da ultima coluna; as telas usam isto para nao brigar com ele).
+function Test-ListaModernaAtiva {
+    param($LV)
+    try { return [bool](("ListaModerna" -as [type]) -and [ListaModerna]::Ativa($LV)) } catch { return $false }
+}
+
+
+
+# -----------------------------------------------------------------------------
+# AVISO EM DESTAQUE (confirmacoes das telas do banco)
+# A caixa de texto padrao do Windows nao deixa claro o que vai acontecer. Este aviso
+# tem faixa colorida com a manchete, cartoes grandes (ex.: banco atual x banco novo,
+# com o tamanho em fonte grande) e um quadro para cada alerta. O botao padrao e sempre
+# o de cancelar: Enter ou Esc nao confirmam nada sem querer.
+# Devolve $true quando o usuario confirma.
+# -----------------------------------------------------------------------------
+function Get-UiMistura {
+    param($Base, $Cor, [double]$Parte)
+    $r = [int]([Math]::Round($Base.R * (1 - $Parte) + $Cor.R * $Parte))
+    $g = [int]([Math]::Round($Base.G * (1 - $Parte) + $Cor.G * $Parte))
+    $b = [int]([Math]::Round($Base.B * (1 - $Parte) + $Cor.B * $Parte))
+    return [System.Drawing.Color]::FromArgb($r, $g, $b)
+}
+
+# Tamanho de arquivo de banco em linguagem de gente: 25,5 MB, 1,20 GB
+function Format-TamanhoBanco {
+    param([double]$Kb)
+    $cul = [System.Globalization.CultureInfo]::GetCultureInfo("pt-BR")
+    if ($Kb -ge 1048576) { return [string]::Format($cul, "{0:N2} GB", ($Kb / 1048576)) }
+    if ($Kb -ge 1024) { return [string]::Format($cul, "{0:N1} MB", ($Kb / 1024)) }
+    return [string]::Format($cul, "{0:N0} KB", $Kb)
+}
+
+function Show-AvisoDestaque {
+    param(
+        $Dono = $null,
+        [string]$Titulo = "Aviso",
+        [string]$Manchete = "",
+        [string]$Resumo = "",
+        # 'aviso' (amarelo), 'perigo' (vermelho), 'ok' (verde) ou 'erro' (vermelho)
+        [string]$Tipo = "aviso",
+        # Dois cartoes lado a lado: @{ Rotulo1; Valor1; Detalhe1; Cor1; Rotulo2; Valor2; Detalhe2; Cor2 }
+        $Comparacao = $null,
+        # Um cartao grande: @{ Rotulo; Valor; Detalhe }
+        $Destaque = $null,
+        # Quadros: @( @{ Tipo = 'perigo|alerta|ok|info'; Titulo = ''; Texto = '' } )
+        $Itens = @(),
+        [string]$TextoSim = "OK",
+        [string]$TextoNao = "",
+        $CorSim = $null,
+        # Quando preenchido, o botao de confirmar so libera depois de marcar esta frase
+        [string]$Ciencia = ""
+    )
+    $corTipo = switch ($Tipo) {
+        'perigo' { $Script:UiVermelho }
+        'erro' { $Script:UiVermelho }
+        'ok' { $Script:UiVerde }
+        default { $Script:UiAmarelo }
+    }
+    $corFaixa = if ($Tipo -eq 'aviso') { $corTipo } else { Get-UiTom $corTipo -34 }
+    # Texto escuro sobre o amarelo, branco sobre as demais
+    $luz = (0.299 * $corFaixa.R) + (0.587 * $corFaixa.G) + (0.114 * $corFaixa.B)
+    $corTextoFaixa = if ($luz -gt 150) { [System.Drawing.Color]::FromArgb(28, 24, 12) } else { [System.Drawing.Color]::White }
+    if ($null -eq $CorSim) { $CorSim = if ($Tipo -eq 'ok') { $Script:UiAzul } else { $Script:UiVermelho } }
+
+    $largura = 780
+    $margem = 24
+    $util = $largura - ($margem * 2)
+    $flagsMedida = [System.Windows.Forms.TextFormatFlags]::WordBreak -bor [System.Windows.Forms.TextFormatFlags]::NoPadding -bor [System.Windows.Forms.TextFormatFlags]::NoPrefix
+    $medir = {
+        param([string]$Texto, $Fonte, [int]$Larg)
+        if ("$Texto" -eq "") { return 0 }
+        # Mede com o proprio Label (e o que sera desenhado): o TextRenderer sozinho errava em caminhos compridos
+        $medidor = New-Object System.Windows.Forms.Label
+        try {
+            $medidor.UseMnemonic = $false
+            $medidor.Font = $Fonte
+            $medidor.Text = $Texto
+            $tam = $medidor.GetPreferredSize((New-Object System.Drawing.Size([Math]::Max(20, $Larg - 8), 0)))
+        }
+        finally { $medidor.Dispose() }
+        return ([int]$tam.Height + 8)
+    }
+    $novoTexto = {
+        param($Pai, [string]$Texto, $Fonte, $Cor, [int]$X, [int]$Y, [int]$Larg, [int]$Alt)
+        $l = New-Object System.Windows.Forms.Label
+        $l.AutoSize = $false
+        $l.UseMnemonic = $false
+        $l.Text = $Texto
+        $l.Font = $Fonte
+        $l.ForeColor = $Cor
+        $l.BackColor = [System.Drawing.Color]::Transparent
+        $l.SetBounds($X, $Y, $Larg, $Alt)
+        [void]$Pai.Controls.Add($l)
+        return $l
+    }
+
+    $f = New-ToolForm $Titulo $largura 400
+    try {
+        $f.FormBorderStyle = 'FixedDialog'
+        $f.MaximizeBox = $false
+        $f.MinimizeBox = $false
+        $f.ShowInTaskbar = $false
+        $f.StartPosition = 'CenterParent'
+
+        # ---- faixa colorida com a manchete
+        $fMan = New-Object System.Drawing.Font("Segoe UI", 16, [System.Drawing.FontStyle]::Bold)
+        $fRes = New-Object System.Drawing.Font("Segoe UI", 10.5)
+        $xTexto = $margem + 68
+        $lTexto = $largura - $xTexto - $margem
+        $hMan = & $medir $Manchete $fMan $lTexto
+        $hRes = & $medir $Resumo $fRes $lTexto
+        $hFaixa = [Math]::Max(96, (18 + $hMan + $(if ($hRes -gt 0) { 4 + $hRes } else { 0 }) + 18))
+        $faixa = New-Object System.Windows.Forms.Panel
+        $faixa.SetBounds(0, 0, $largura, $hFaixa)
+        $faixa.BackColor = $corFaixa
+        [void]$f.Controls.Add($faixa)
+
+        $icone = New-Object System.Windows.Forms.Panel
+        $icone.SetBounds($margem, [int](($hFaixa - 52) / 2), 52, 52)
+        $icone.BackColor = $corFaixa
+        $icone.Tag = @{ Tipo = $Tipo; Faixa = $corFaixa; Texto = $corTextoFaixa }
+        $icone.Add_Paint({
+                param($s, $e)
+                $d = $s.Tag
+                $g = $e.Graphics
+                $g.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
+                $k = [single]($s.Width / 52.0)
+                $g.ScaleTransform($k, $k)
+                $br = New-Object System.Drawing.SolidBrush($d.Texto)
+                $g.FillEllipse($br, 1, 1, 49, 49)
+                $br.Dispose()
+                $pen = New-Object System.Drawing.Pen($d.Faixa, 4.5)
+                $pen.StartCap = [System.Drawing.Drawing2D.LineCap]::Round
+                $pen.EndCap = [System.Drawing.Drawing2D.LineCap]::Round
+                $pen.LineJoin = [System.Drawing.Drawing2D.LineJoin]::Round
+                if ($d.Tipo -eq 'ok') {
+                    $g.DrawLines($pen, [System.Drawing.Point[]]@((New-Object System.Drawing.Point(14, 27)), (New-Object System.Drawing.Point(23, 36)), (New-Object System.Drawing.Point(39, 17))))
+                }
+                elseif ($d.Tipo -eq 'erro') {
+                    $g.DrawLine($pen, 17, 17, 34, 34)
+                    $g.DrawLine($pen, 34, 17, 17, 34)
+                }
+                else {
+                    $g.DrawLine($pen, 26, 12, 26, 29)
+                    $g.FillEllipse((New-Object System.Drawing.SolidBrush($d.Faixa)), 22.5, 34.5, 7, 7)
+                }
+                $pen.Dispose()
+            })
+        [void]$faixa.Controls.Add($icone)
+
+        $yMan = [int](($hFaixa - ($hMan + $(if ($hRes -gt 0) { 4 + $hRes } else { 0 }))) / 2)
+        [void](& $novoTexto $faixa $Manchete $fMan $corTextoFaixa $xTexto $yMan $lTexto $hMan)
+        if ($hRes -gt 0) { [void](& $novoTexto $faixa $Resumo $fRes $corTextoFaixa $xTexto ($yMan + $hMan + 4) $lTexto $hRes) }
+
+        $y = $hFaixa + 20
+
+        # ---- cartoes grandes
+        $fRotulo = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold)
+        $fValor = New-Object System.Drawing.Font("Segoe UI", 28, [System.Drawing.FontStyle]::Bold)
+        $fDetalhe = New-Object System.Drawing.Font("Segoe UI", 9.5)
+        $novoCartao = {
+            param([int]$X, [int]$Larg, [string]$Rotulo, [string]$Valor, [string]$Detalhe, $CorTopo, [int]$AltCartao)
+            $p = New-Object System.Windows.Forms.Panel
+            $p.SetBounds($X, $y, $Larg, $AltCartao)
+            $p.BackColor = $Script:UiCartao
+            [void]$f.Controls.Add($p)
+            $topo = New-Object System.Windows.Forms.Panel
+            $topo.SetBounds(0, 0, $Larg, 5)
+            $topo.BackColor = $CorTopo
+            [void]$p.Controls.Add($topo)
+            [void](& $novoTexto $p $Rotulo.ToUpper() $fRotulo $Script:UiSuave 16 16 ($Larg - 32) 20)
+            [void](& $novoTexto $p $Valor $fValor $Script:UiTexto 16 38 ($Larg - 32) 52)
+            [void](& $novoTexto $p $Detalhe $fDetalhe $Script:UiSuave 16 94 ($Larg - 32) ($AltCartao - 100))
+        }
+        if ($null -ne $Comparacao) {
+            $gap = 64
+            $lc = [int](($util - $gap) / 2)
+            $d1 = & $medir "$($Comparacao.Detalhe1)" $fDetalhe ($lc - 32)
+            $d2 = & $medir "$($Comparacao.Detalhe2)" $fDetalhe ($lc - 32)
+            $altCartao = 100 + [Math]::Max($d1, $d2) + 8
+            $cor1 = if ($null -ne $Comparacao.Cor1) { $Comparacao.Cor1 } else { $Script:UiVermelho }
+            $cor2 = if ($null -ne $Comparacao.Cor2) { $Comparacao.Cor2 } else { $Script:UiVerde }
+            & $novoCartao $margem $lc "$($Comparacao.Rotulo1)" "$($Comparacao.Valor1)" "$($Comparacao.Detalhe1)" $cor1 $altCartao
+            & $novoCartao ($margem + $lc + $gap) $lc "$($Comparacao.Rotulo2)" "$($Comparacao.Valor2)" "$($Comparacao.Detalhe2)" $cor2 $altCartao
+            $fSeta = New-Object System.Drawing.Font("Segoe UI", 30, [System.Drawing.FontStyle]::Bold)
+            $seta = & $novoTexto $f ([string][char]0x2192) $fSeta $Script:UiSuave ($margem + $lc) ($y + 34) $gap 56
+            $seta.TextAlign = [System.Drawing.ContentAlignment]::MiddleCenter
+            $y += $altCartao + 18
+        }
+        elseif ($null -ne $Destaque) {
+            $dd = & $medir "$($Destaque.Detalhe)" $fDetalhe ($util - 32)
+            $altCartao = 100 + $dd + 8
+            & $novoCartao $margem $util "$($Destaque.Rotulo)" "$($Destaque.Valor)" "$($Destaque.Detalhe)" $corTipo $altCartao
+            $y += $altCartao + 18
+        }
+
+        # ---- quadros de alerta
+        $fItemTitulo = New-Object System.Drawing.Font("Segoe UI", 10.5, [System.Drawing.FontStyle]::Bold)
+        $fItem = New-Object System.Drawing.Font("Segoe UI", 10.5)
+        foreach ($item in @($Itens)) {
+            if ($null -eq $item) { continue }
+            $corItem = switch ("$($item.Tipo)") {
+                'perigo' { $Script:UiVermelho }
+                'alerta' { $Script:UiAmarelo }
+                'ok' { $Script:UiVerde }
+                default { $Script:UiSuave }
+            }
+            $larguraTexto = $util - 16 - 20
+            $hT = & $medir "$($item.Titulo)" $fItemTitulo $larguraTexto
+            $hX = & $medir "$($item.Texto)" $fItem $larguraTexto
+            $altItem = 12 + $hT + $hX + 8
+            $q = New-Object System.Windows.Forms.Panel
+            $q.SetBounds($margem, $y, $util, $altItem)
+            $q.BackColor = Get-UiMistura $Script:UiFundo $corItem 0.16
+            [void]$f.Controls.Add($q)
+            $barra = New-Object System.Windows.Forms.Panel
+            $barra.SetBounds(0, 0, 6, $altItem)
+            $barra.BackColor = $corItem
+            [void]$q.Controls.Add($barra)
+            $yi = 8
+            if ($hT -gt 0) { [void](& $novoTexto $q "$($item.Titulo)" $fItemTitulo $corItem 20 $yi $larguraTexto $hT); $yi += $hT }
+            if ($hX -gt 0) { [void](& $novoTexto $q "$($item.Texto)" $fItem $Script:UiTexto 20 $yi $larguraTexto $hX) }
+            $y += $altItem + 10
+        }
+
+        # ---- ciencia obrigatoria (so quando ha risco de perder dado)
+        $chk = $null
+        if ($Ciencia -ne "") {
+            $fCiencia = New-Object System.Drawing.Font("Segoe UI", 10.5, [System.Drawing.FontStyle]::Bold)
+            $hC = & $medir $Ciencia $fCiencia ($util - 34)
+            $chk = New-Object System.Windows.Forms.CheckBox
+            $chk.SetBounds($margem, ($y + 4), $util, ($hC + 6))
+            $chk.Text = $Ciencia
+            $chk.Font = $fCiencia
+            $chk.ForeColor = $Script:UiTexto
+            $chk.BackColor = [System.Drawing.Color]::Transparent
+            $chk.UseMnemonic = $false
+            $chk.Cursor = 'Hand'
+            [void]$f.Controls.Add($chk)
+            $y += $hC + 18
+        }
+
+        # ---- botoes: o padrao (Enter / Esc) e sempre o seguro
+        $y += 8
+        $comNao = ("$TextoNao" -ne "")
+        $btnSim = New-ToolButton $f $TextoSim 0 $y 280 46 $CorSim $null
+        $btnSim.Font = New-Object System.Drawing.Font("Segoe UI", 10.5, [System.Drawing.FontStyle]::Bold)
+        $btnSim.DialogResult = if ($comNao) { [System.Windows.Forms.DialogResult]::Yes } else { [System.Windows.Forms.DialogResult]::OK }
+        $btnSim.Left = $largura - $margem - $btnSim.Width
+        $btnNao = $null
+        if ($comNao) {
+            $btnNao = New-ToolButton $f $TextoNao 0 $y 180 46 $Script:UiCinza $null
+            $btnNao.Font = New-Object System.Drawing.Font("Segoe UI", 10.5, [System.Drawing.FontStyle]::Bold)
+            $btnNao.DialogResult = [System.Windows.Forms.DialogResult]::No
+            $btnNao.Left = $btnSim.Left - 14 - $btnNao.Width
+            $f.AcceptButton = $btnNao
+            $f.CancelButton = $btnNao
+        }
+        else {
+            $btnSim.Width = 180
+            $btnSim.Left = $largura - $margem - $btnSim.Width
+            $f.AcceptButton = $btnSim
+            $f.CancelButton = $btnSim
+        }
+        if ($null -ne $chk) {
+            $btnSim.Enabled = $false
+            $chk.Tag = $btnSim
+            $chk.Add_CheckedChanged({ param($s, $e) $s.Tag.Enabled = $s.Checked })
+        }
+        $y += 46 + 22
+        $f.ClientSize = New-Object System.Drawing.Size($largura, $y)
+        # Ancorar embaixo so DEPOIS de fixar a altura: antes, a janela crescia e empurrava os botoes para fora da tela
+        # (e, em tela pequena, e esse rodape que fica sempre a vista)
+        $btnSim.Anchor = 'Bottom,Right'
+        if ($null -ne $btnNao) { $btnNao.Anchor = 'Bottom,Right' }
+        if ($null -ne $chk) { $chk.Anchor = 'Bottom,Left' }
+        # Em tela pequena o conteudo encolhe (zoom) mas a janela nao: estica a faixa colorida ate a borda direita
+        $f.Tag = $faixa
+        $f.Add_Shown({
+                param($s, $e)
+                if ($null -ne $s.CancelButton) { $s.CancelButton.Select() }
+                $fx = $s.Tag
+                if ($null -ne $fx -and $null -ne $fx.Parent) {
+                    $w = $fx.Parent.ClientSize.Width
+                    if ($w -gt $fx.Width) { $fx.Width = $w }
+                }
+            })
+        if ($Tipo -ne 'ok') { try { [System.Media.SystemSounds]::Exclamation.Play() } catch {} }
+
+        $res = if ($null -ne $Dono) { $f.ShowDialog($Dono) } else { $f.ShowDialog() }
+        return ($res -eq [System.Windows.Forms.DialogResult]::Yes -or $res -eq [System.Windows.Forms.DialogResult]::OK)
+    }
+    finally { $f.Dispose() }
+}
+
 
 # -----------------------------------------------------------------------------
 # MONITOR DE CPU E MEMORIA
@@ -14837,7 +15749,7 @@ $formWidth = if ($screen.Width -lt 1200) { $screen.Width - 50 } else { 1200 }
 $formHeight = if ($screen.Height -lt 900) { $screen.Height - 50 } else { 900 }
 
 $form = New-Object System.Windows.Forms.Form
-$form.Text = "Preparador XMenu – Suporte Técnico v5.30"
+$form.Text = "Preparador XMenu – Suporte Técnico v5.31"
 $form.Size = New-Object System.Drawing.Size($formWidth, $formHeight)
 $form.StartPosition = "CenterScreen"
 $form.BackColor = [System.Drawing.Color]::FromArgb(25, 25, 30); $form.ForeColor = 'White'
@@ -15147,20 +16059,22 @@ $lS.Location = New-Object System.Drawing.Point(2, ($topoTitulo + $lT.PreferredHe
 $hTitulo.Width = [Math]::Max($lT.PreferredWidth, $lS.PreferredWidth + 2) + 24
 $hRight.Padding = New-Object System.Windows.Forms.Padding(0, [int](($altUtilCab - $btnLinks.Height) / 2), 0, 0)
 $larguraTituloNormal = $hTitulo.Width
+# Largura que o credito completo ocupa com a fonte menor: em tela pequena ele continua inteiro (so a fonte encolhe)
+$larguraCreditoCompacta = [System.Windows.Forms.TextRenderer]::MeasureText($textoCreditoCompleto, $fonteCreditoCompacta, [System.Drawing.Size]::Empty, [System.Windows.Forms.TextFormatFlags]'NoPadding, SingleLine').Width
 $ajustarCabecalhoCompacto = {
     $largura = $form.ClientSize.Width
     if ($largura -lt 760) {
-        $Script:HeaderCreditoTexto = $textoCreditoCompacto
+        $Script:HeaderCreditoTexto = $textoCreditoCompleto
         $Script:HeaderCreditoFonte = $fonteCreditoCompacta
-        $hTitulo.Width = [Math]::Min($larguraTituloNormal, 205)
+        $hTitulo.Width = [Math]::Min($larguraTituloNormal, [Math]::Max(($larguraCreditoCompacta + 28), 190))
         $btnLinks.Text = "LINKS ▼"
         $btnLinks.Width = 86
         $hRight.Width = 86
     }
     elseif ($largura -lt 980) {
-        $Script:HeaderCreditoTexto = $textoCreditoCompacto
+        $Script:HeaderCreditoTexto = $textoCreditoCompleto
         $Script:HeaderCreditoFonte = $fonteCreditoNormal
-        $hTitulo.Width = [Math]::Min($larguraTituloNormal, 220)
+        $hTitulo.Width = $larguraTituloNormal
         $btnLinks.Text = "LINKS ÚTEIS ▼"
         $btnLinks.Width = 116
         $hRight.Width = 116
@@ -15576,7 +16490,7 @@ $bClock.Add_Click({ Invoke-ClockSync })
 [void]$tbl.Controls.Add($bClock)
 
 # Mensagem de abertura: explica o programa para quem abre pela primeira vez
-Log-Message "INFO" "Preparador XMenu v5.30 - preparo e suporte de computadores com XMenu e NetPDV"
+Log-Message "INFO" "Preparador XMenu v5.31 - preparo e suporte de computadores com XMenu e NetPDV"
 Log-Message "LOG" "==============================================================="
 Log-Message "LOG" "COMO USAR"
 Log-Message "LOG" "  PREPARAR AMBIENTE WINDOWS .. ajusta energia, UAC e desempenho do PC num clique"
@@ -15586,7 +16500,12 @@ Log-Message "LOG" "  EXTERNOS ................... acesso remoto, Chrome, TEF HUB
 Log-Message "LOG" "  SUPORTE E DIAGNÓSTICO ...... impressoras, rede, SQL, backup, XMLs e reparos do Windows"
 Log-Message "LOG" "  Passe o mouse sobre um botão para ver o que ele faz antes de clicar."
 Log-Message "LOG" "---------------------------------------------------------------"
-Log-Message "LOG" "NOVO NA v5.30"
+Log-Message "LOG" "NOVO NA v5.31"
+Log-Message "SUCESSO" "  Banco: telas de Diagnóstico, Trocar Banco e Índices com visual novo (cabeçalho escuro, linhas alternadas, fonte maior e etiquetas de situação)"
+Log-Message "SUCESSO" "  Banco: avisos de confirmação em destaque, com o tamanho do banco atual e do banco novo em fonte grande"
+Log-Message "SUCESSO" "  Banco: aviso da troca lista os programas que serão fechados e exige ciência quando há dados em aberto"
+Log-Message "SUCESSO" "  Banco: aviso dos índices explica o risco de lentidão e que nenhum dado é apagado"
+Log-Message "SUCESSO" "  Telas pequenas: Enter e Esc voltam a funcionar nas janelas adaptadas e o Desenvolvido por fica inteiro no cabeçalho"
 Log-Message "SUCESSO" "  Banco: ZIP da troca salvo diretamente na pasta concentrador\data"
 Log-Message "SUCESSO" "  Banco: troca mostra e compara os tamanhos do banco atual e do banco novo"
 Log-Message "SUCESSO" "  Banco: tela de troca localiza automaticamente ao abrir"
