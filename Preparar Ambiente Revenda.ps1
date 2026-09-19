@@ -14023,25 +14023,67 @@ $hInfo.Add_Resize({ $hInfo.Invalidate() })
 # Largura de cada coluna da grade (nome e valor) e o total que ela pede. Usada no
 # Paint e ao abrir, para alargar a janela quando a grade nao cabe.
 $gapNomeInfo = 5; $gapColInfo = 22; $x0Info = 14
+$obterInfoCabecalho = {
+    param([int]$Largura)
+    $cols = 4
+    $permitidos = $null
+    $incluiDisco = $true
+    if ($Largura -lt 430) {
+        $cols = 2
+        $permitidos = @('Host', 'IP', 'RAM')
+        $incluiDisco = $false
+    }
+    elseif ($Largura -lt 620) {
+        $cols = 2
+        $permitidos = @('Host', 'IP', 'Usuário', 'RAM')
+        $incluiDisco = $false
+    }
+    elseif ($Largura -lt 760) {
+        $cols = 3
+        $permitidos = @('Host', 'IP', 'Usuário', 'RAM')
+        $incluiDisco = $true
+    }
+    else {
+        return @{ Itens = @($Script:InfoPc); Colunas = 4 }
+    }
+
+    $base = @($Script:InfoPc | Where-Object { $permitidos -contains $_.Nome -or ($incluiDisco -and "$($_.Nome)" -like '*(C:)*') })
+    $limite = [Math]::Min($base.Count, ($cols * 2))
+    $itens = @()
+    for ($i = 0; $i -lt $limite; $i++) {
+        $itens += [PSCustomObject]@{
+            Linha = [int][Math]::Floor($i / $cols)
+            Col   = $i % $cols
+            Nome  = $base[$i].Nome
+            Valor = $base[$i].Valor
+        }
+    }
+    return @{ Itens = $itens; Colunas = $cols }
+}
 $medirInfoPc = {
-    param($g)
+    param($g, [int]$Largura = 0)
     # Medir sem EndEllipsis: com ele e sem tamanho limite o MeasureText devolve quase zero
+    if ($Largura -le 0) { $Largura = $hInfo.ClientSize.Width }
+    $infoCab = & $obterInfoCabecalho $Largura
+    $cols = [int]$infoCab.Colunas
     $flagsMedida = [System.Windows.Forms.TextFormatFlags]'NoPadding, SingleLine'
-    $larNome = @(0, 0, 0, 0); $larValor = @(0, 0, 0, 0)
-    foreach ($it in $Script:InfoPc) {
+    $larNome = New-Object 'int[]' $cols
+    $larValor = New-Object 'int[]' $cols
+    foreach ($it in @($infoCab.Itens)) {
         $larNome[$it.Col] = [Math]::Max($larNome[$it.Col], [System.Windows.Forms.TextRenderer]::MeasureText($g, $it.Nome, $fonteInfoNome, [System.Drawing.Size]::Empty, $flagsMedida).Width + 2)
         $larValor[$it.Col] = [Math]::Max($larValor[$it.Col], [System.Windows.Forms.TextRenderer]::MeasureText($g, "$($it.Valor)", $fonteInfoValor, [System.Drawing.Size]::Empty, $flagsMedida).Width + 2)
     }
-    $usado = $x0Info + 4 * $gapNomeInfo + 3 * $gapColInfo
-    for ($c = 0; $c -lt 4; $c++) { $usado += $larNome[$c] + $larValor[$c] }
-    return @{ Nome = $larNome; Valor = $larValor; Usado = $usado }
+    $usado = $x0Info + ($cols * $gapNomeInfo) + (($cols - 1) * $gapColInfo)
+    for ($c = 0; $c -lt $cols; $c++) { $usado += $larNome[$c] + $larValor[$c] }
+    return @{ Nome = $larNome; Valor = $larValor; Usado = $usado; Itens = @($infoCab.Itens); Colunas = $cols }
 }
 # Ao abrir: se a grade nao coube (escala do Windows em 125%, nome de processador
 # comprido), alarga a janela o que faltar, centralizada e sem passar da tela
 $ajustarJanelaAoCabecalho = {
     $gMed = $hInfo.CreateGraphics()
-    try { $med = & $medirInfoPc $gMed } finally { $gMed.Dispose() }
+    try { $med = & $medirInfoPc $gMed $hInfo.ClientSize.Width } finally { $gMed.Dispose() }
     $falta = $med.Usado - $hInfo.ClientSize.Width
+    if ($hInfo.ClientSize.Width -lt 760) { return }
     if ($falta -le 0) { return }
     $areaTela = [System.Windows.Forms.Screen]::FromControl($form).WorkingArea
     $novaLargura = [Math]::Min($form.Width + $falta + 12, $areaTela.Width - 20)
@@ -14054,14 +14096,17 @@ $hInfo.Add_Paint({
         $g = $e.Graphics
         $flags = [System.Windows.Forms.TextFormatFlags]'Left, VerticalCenter, EndEllipsis, NoPadding, SingleLine'
         $gapNome = $gapNomeInfo; $gapCol = $gapColInfo; $x0 = $x0Info
-        $med = & $medirInfoPc $g
+        $med = & $medirInfoPc $g $s.ClientSize.Width
         $larNome = $med.Nome; $larValor = $med.Valor
+        $itens = @($med.Itens)
+        $cols = [int]$med.Colunas
         # Janela estreita: tira o que falta da coluna de valor mais larga (ate 60 px), depois da seguinte
         $sobra = $s.ClientSize.Width - $med.Usado
-        for ($volta = 0; $volta -lt 4 -and $sobra -lt 0; $volta++) {
+        for ($volta = 0; $volta -lt $cols -and $sobra -lt 0; $volta++) {
             $maior = 0
-            for ($c = 1; $c -lt 4; $c++) { if ($larValor[$c] -gt $larValor[$maior]) { $maior = $c } }
-            $corte = [Math]::Min(-$sobra, $larValor[$maior] - 60)
+            for ($c = 1; $c -lt $cols; $c++) { if ($larValor[$c] -gt $larValor[$maior]) { $maior = $c } }
+            $minValor = if ($s.ClientSize.Width -lt 520) { 44 } else { 60 }
+            $corte = [Math]::Min(-$sobra, $larValor[$maior] - $minValor)
             if ($corte -le 0) { break }
             $larValor[$maior] -= $corte
             $sobra += $corte
@@ -14071,7 +14116,7 @@ $hInfo.Add_Paint({
         $caneta = New-Object System.Drawing.Pen([System.Drawing.Color]::FromArgb(70, 255, 255, 255), 1)
         $g.DrawLine($caneta, 0, $y0 + 2, 0, $y0 + 2 * $altLinhaInfo - 2)
         $caneta.Dispose()
-        foreach ($it in $Script:InfoPc) {
+        foreach ($it in $itens) {
             $x = $x0
             for ($c = 0; $c -lt $it.Col; $c++) { $x += $larNome[$c] + $gapNome + $larValor[$c] + $gapCol }
             $y = $y0 + $it.Linha * $altLinhaInfo
@@ -14118,6 +14163,35 @@ $lT.Location = New-Object System.Drawing.Point(0, $topoTitulo)
 $lS.Location = New-Object System.Drawing.Point(2, ($topoTitulo + $lT.PreferredHeight - 3))
 $hTitulo.Width = [Math]::Max($lT.PreferredWidth, $lS.PreferredWidth + 2) + 24
 $hRight.Padding = New-Object System.Windows.Forms.Padding(0, [int](($altUtilCab - $btnLinks.Height) / 2), 0, 0)
+$larguraTituloNormal = $hTitulo.Width
+$ajustarCabecalhoCompacto = {
+    $largura = $form.ClientSize.Width
+    if ($largura -lt 760) {
+        $lS.Visible = $false
+        $hTitulo.Width = [Math]::Min($larguraTituloNormal, 205)
+        $btnLinks.Text = "LINKS ▼"
+        $btnLinks.Width = 86
+        $hRight.Width = 86
+    }
+    elseif ($largura -lt 980) {
+        $lS.Visible = $false
+        $hTitulo.Width = [Math]::Min($larguraTituloNormal, 220)
+        $btnLinks.Text = "LINKS ÚTEIS ▼"
+        $btnLinks.Width = 116
+        $hRight.Width = 116
+    }
+    else {
+        $lS.Visible = $true
+        $hTitulo.Width = $larguraTituloNormal
+        $btnLinks.Text = "LINKS ÚTEIS ▼"
+        $btnLinks.Width = 116
+        $hRight.Width = 116
+    }
+    $hRight.Padding = New-Object System.Windows.Forms.Padding(0, [int](($head.ClientSize.Height - $head.Padding.Top - $head.Padding.Bottom - $btnLinks.Height) / 2), 0, 0)
+    $hInfo.Invalidate()
+}
+$form.Add_Resize({ try { & $ajustarCabecalhoCompacto } catch {} })
+& $ajustarCabecalhoCompacto
 
 # FOOTER
 $foot = New-Object System.Windows.Forms.Panel; $foot.Dock = 'Bottom'; $foot.Height = 30
