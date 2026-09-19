@@ -14246,17 +14246,25 @@ $lS.Location = New-Object System.Drawing.Point(2, ($topoTitulo + $lT.PreferredHe
 $hTitulo.Width = [Math]::Max($lT.PreferredWidth, $lS.PreferredWidth + 2) + 24
 $hRight.Padding = New-Object System.Windows.Forms.Padding(0, [int](($altUtilCab - $btnLinks.Height) / 2), 0, 0)
 $larguraTituloNormal = $hTitulo.Width
+$textoCreditoCompleto = "Desenvolvido por Vinicius Mazaroski"
+$textoCreditoCompacto = "Vinicius Mazaroski"
+$fonteCreditoNormal = New-Object System.Drawing.Font("Segoe UI", 8, [System.Drawing.FontStyle]::Bold)
+$fonteCreditoCompacta = New-Object System.Drawing.Font("Segoe UI", 7.5, [System.Drawing.FontStyle]::Bold)
 $ajustarCabecalhoCompacto = {
     $largura = $form.ClientSize.Width
     if ($largura -lt 760) {
-        $lS.Visible = $false
+        $lS.Visible = $true
+        $lS.Text = $textoCreditoCompacto
+        $lS.Font = $fonteCreditoCompacta
         $hTitulo.Width = [Math]::Min($larguraTituloNormal, 205)
         $btnLinks.Text = "LINKS ▼"
         $btnLinks.Width = 86
         $hRight.Width = 86
     }
     elseif ($largura -lt 980) {
-        $lS.Visible = $false
+        $lS.Visible = $true
+        $lS.Text = $textoCreditoCompacto
+        $lS.Font = $fonteCreditoNormal
         $hTitulo.Width = [Math]::Min($larguraTituloNormal, 220)
         $btnLinks.Text = "LINKS ÚTEIS ▼"
         $btnLinks.Width = 116
@@ -14264,6 +14272,8 @@ $ajustarCabecalhoCompacto = {
     }
     else {
         $lS.Visible = $true
+        $lS.Text = $textoCreditoCompleto
+        $lS.Font = $fonteCreditoNormal
         $hTitulo.Width = $larguraTituloNormal
         $btnLinks.Text = "LINKS ÚTEIS ▼"
         $btnLinks.Width = 116
