@@ -6855,6 +6855,389 @@ ORDER BY migs.avg_total_user_cost * migs.avg_user_impact * (migs.user_seeks + mi
     }
 }
 
+function Show-SqlDbDiagnostic {
+    try {
+        if ($null -ne $Script:DbDiagForm -and -not $Script:DbDiagForm.IsDisposed) {
+            $Script:DbDiagForm.Activate(); return
+        }
+
+        $Script:DbDiagOcupado = $false
+        $f = New-ToolForm "Diagnóstico do Banco" 1000 700
+        $f.MinimumSize = New-Object System.Drawing.Size(980, 660)
+        $Script:DbDiagForm = $f
+
+        $novoCampo = {
+            param($Pai, [int]$X, [int]$Y, [int]$W, [string]$Valor)
+            $t = New-Object System.Windows.Forms.TextBox
+            $t.Location = New-Object System.Drawing.Point($X, $Y)
+            $t.Size = New-Object System.Drawing.Size($W, 24)
+            $t.BackColor = [System.Drawing.Color]::FromArgb(20, 24, 34)
+            $t.ForeColor = $Script:UiTexto
+            $t.BorderStyle = 'FixedSingle'
+            $t.Text = $Valor
+            [void]$Pai.Controls.Add($t)
+            return $t
+        }
+
+        New-ToolLabel $f "DIAGNÓSTICO DO BANCO" 20 14 12 -Negrito | Out-Null
+        New-ToolLabel $f "Leitura segura: estado, tamanho, backup, conexões, bloqueios, log, estatísticas e sugestões de índice." 20 42 9 -Cor $Script:UiSuave -W 940 | Out-Null
+
+        $cardConn = New-Object System.Windows.Forms.Panel
+        $cardConn.Location = New-Object System.Drawing.Point(20, 70)
+        $cardConn.Size = New-Object System.Drawing.Size(940, 92)
+        $cardConn.BackColor = $Script:UiCartao
+        $cardConn.Anchor = 'Top,Left,Right'
+        [void]$f.Controls.Add($cardConn)
+
+        New-ToolLabel $cardConn "CONEXÃO" 14 8 10 -Negrito | Out-Null
+        New-ToolLabel $cardConn "Servidor:" 14 38 9 -Cor $Script:UiSuave | Out-Null
+        $txtDiagServidor = & $novoCampo $cardConn 72 35 130 "localhost"
+        New-ToolLabel $cardConn "Usuário:" 212 38 9 -Cor $Script:UiSuave | Out-Null
+        $cmbDiagUsuario = New-Object System.Windows.Forms.ComboBox
+        $cmbDiagUsuario.Location = New-Object System.Drawing.Point(266, 35)
+        $cmbDiagUsuario.Width = 64
+        $cmbDiagUsuario.DropDownStyle = 'DropDown'
+        $cmbDiagUsuario.FlatStyle = 'Flat'
+        $cmbDiagUsuario.BackColor = [System.Drawing.Color]::FromArgb(20, 24, 34)
+        $cmbDiagUsuario.ForeColor = $Script:UiTexto
+        foreach ($usr in $Script:SqlUsuariosPadrao) { [void]$cmbDiagUsuario.Items.Add($usr) }
+        $cmbDiagUsuario.Text = (Get-SqlUsuarioSalvo)
+        [void]$cardConn.Controls.Add($cmbDiagUsuario)
+        New-ToolLabel $cardConn "Senha:" 340 38 9 -Cor $Script:UiSuave | Out-Null
+        $txtDiagSenha = & $novoCampo $cardConn 384 35 110 "netcontroll"
+        $btnDiagTestar = New-ToolButton $cardConn "TESTAR" 508 34 96 27 $Script:UiAzul $null "Conecta e lista os bancos de usuário"
+        New-ToolLabel $cardConn "Banco:" 620 38 9 -Cor $Script:UiSuave | Out-Null
+        $cmbDiagBanco = New-Object System.Windows.Forms.ComboBox
+        $cmbDiagBanco.Location = New-Object System.Drawing.Point(668, 35)
+        $cmbDiagBanco.Width = 246
+        $cmbDiagBanco.DropDownStyle = 'DropDownList'
+        $cmbDiagBanco.FlatStyle = 'Flat'
+        $cmbDiagBanco.BackColor = [System.Drawing.Color]::FromArgb(20, 24, 34)
+        $cmbDiagBanco.ForeColor = $Script:UiTexto
+        [void]$cardConn.Controls.Add($cmbDiagBanco)
+        $lblDiagConn = New-ToolLabel $cardConn "Ao abrir, tenta conectar e diagnosticar automaticamente." 14 64 9 -Cor $Script:UiSuave -W 900
+
+        $lvDiag = New-Object System.Windows.Forms.ListView
+        $lvDiag.Location = New-Object System.Drawing.Point(20, 178)
+        $lvDiag.Size = New-Object System.Drawing.Size(940, 300)
+        $lvDiag.Anchor = 'Top,Left,Right'
+        $lvDiag.View = 'Details'
+        $lvDiag.FullRowSelect = $true
+        $lvDiag.GridLines = $true
+        $lvDiag.BackColor = [System.Drawing.Color]::FromArgb(12, 12, 25)
+        $lvDiag.ForeColor = $Script:UiTexto
+        $lvDiag.Font = New-Object System.Drawing.Font("Segoe UI", 8.5)
+        [void]$lvDiag.Columns.Add("Item", 185)
+        [void]$lvDiag.Columns.Add("Status", 95)
+        [void]$lvDiag.Columns.Add("Detalhe", 380)
+        [void]$lvDiag.Columns.Add("Recomendação", 260)
+        [void]$f.Controls.Add($lvDiag)
+
+        $txtDiagRel = New-Object System.Windows.Forms.TextBox
+        $txtDiagRel.Location = New-Object System.Drawing.Point(20, 490)
+        $txtDiagRel.Size = New-Object System.Drawing.Size(940, 76)
+        $txtDiagRel.Anchor = 'Top,Left,Right'
+        $txtDiagRel.Multiline = $true
+        $txtDiagRel.ScrollBars = 'Vertical'
+        $txtDiagRel.ReadOnly = $true
+        $txtDiagRel.BackColor = [System.Drawing.Color]::FromArgb(20, 24, 34)
+        $txtDiagRel.ForeColor = $Script:UiTexto
+        $txtDiagRel.BorderStyle = 'FixedSingle'
+        $txtDiagRel.Font = New-Object System.Drawing.Font("Consolas", 8.5)
+        [void]$f.Controls.Add($txtDiagRel)
+
+        $btnDiagRodar = New-ToolButton $f "DIAGNOSTICAR" 20 582 150 34 $Script:UiAzul $null "Executa diagnóstico de leitura no banco selecionado"
+        $btnDiagRodar.Enabled = $false
+        $btnDiagCheck = New-ToolButton $f "VERIFICAR INTEGRIDADE" 180 582 190 34 $Script:UiCinza $null "Roda DBCC CHECKDB com NO_INFOMSGS; pode demorar em banco grande"
+        $btnDiagCheck.Enabled = $false
+        $btnDiagCopiar = New-ToolButton $f "COPIAR RELATÓRIO" 380 582 160 34 $Script:UiCinza $null "Copia o relatório do diagnóstico"
+        $btnDiagAtualizar = New-ToolButton $f "ATUALIZAR" 550 582 120 34 $Script:UiCinza $null "Roda o diagnóstico novamente"
+        $btnDiagFechar = New-ToolButton $f "FECHAR" 840 582 120 34 $Script:UiCinza { $f.Close() }
+        $btnDiagFechar.Anchor = 'Top,Right'
+        $lblDiagStatus = New-ToolLabel $f "Nenhum comando de alteração é executado neste diagnóstico." 20 628 9 -Cor $Script:UiSuave -W 940
+
+        $getConexao = {
+            param([string]$Banco = "master", [int]$Timeout = 8)
+            return New-SqlTextoConexao -Servidor $txtDiagServidor.Text -Usuario $cmbDiagUsuario.Text -Senha $txtDiagSenha.Text -Banco $Banco -Timeout $Timeout
+        }
+        $setOcupado = {
+            param([bool]$Ocupado)
+            $Script:DbDiagOcupado = $Ocupado
+            foreach ($ctl in @($btnDiagTestar, $btnDiagRodar, $btnDiagCheck, $btnDiagCopiar, $btnDiagAtualizar, $cmbDiagBanco, $txtDiagServidor, $cmbDiagUsuario, $txtDiagSenha)) {
+                if ($ctl) { $ctl.Enabled = -not $Ocupado }
+            }
+            if (-not $Ocupado) {
+                $temBanco = ($cmbDiagBanco.Items.Count -gt 0)
+                $btnDiagRodar.Enabled = $temBanco
+                $btnDiagCheck.Enabled = $temBanco
+            }
+        }
+        $addDiag = {
+            param([string]$Item, [string]$Status, [string]$Detalhe, [string]$Recomendacao)
+            $it = New-Object System.Windows.Forms.ListViewItem($Item)
+            [void]$it.SubItems.Add($Status)
+            [void]$it.SubItems.Add($Detalhe)
+            [void]$it.SubItems.Add($Recomendacao)
+            switch -Regex ($Status) {
+                'OK' { $it.ForeColor = $Script:UiVerde; break }
+                'ATEN' { $it.ForeColor = $Script:UiAmarelo; break }
+                'ERRO|CRIT' { $it.ForeColor = $Script:UiVermelho; break }
+                default { $it.ForeColor = $Script:UiTexto }
+            }
+            [void]$lvDiag.Items.Add($it)
+            return "${Item}: $Status - $Detalhe"
+        }
+        $execScalar = {
+            param($Conexao, [string]$Sql, $Parametro)
+            $cmd = $Conexao.CreateCommand()
+            $cmd.CommandTimeout = 60
+            $cmd.CommandText = $Sql
+            if ($null -ne $Parametro) { [void]$cmd.Parameters.AddWithValue("@b", $Parametro) }
+            $v = $cmd.ExecuteScalar()
+            if ($v -is [System.DBNull]) { return $null }
+            return $v
+        }
+        $sqlName = {
+            param([string]$Nome)
+            return "[" + $Nome.Replace("]", "]]") + "]"
+        }
+
+        $testar = {
+            if ($Script:DbDiagOcupado) { return }
+            & $setOcupado $true
+            $cn = $null
+            try {
+                $lblDiagConn.ForeColor = $Script:UiAmarelo
+                $lblDiagConn.Text = "Conectando..."
+                $cn = New-Object System.Data.SqlClient.SqlConnection((& $getConexao "master" 8))
+                Wait-SqlTarefa $cn.OpenAsync()
+                $cmd = $cn.CreateCommand()
+                $cmd.CommandTimeout = 30
+                $cmd.CommandText = "SELECT CAST(SERVERPROPERTY('Edition') AS nvarchar(128)) AS edicao, CAST(SERVERPROPERTY('ProductVersion') AS nvarchar(64)) AS versao; " +
+                    "SELECT name FROM sys.databases WHERE database_id > 4 AND state = 0 ORDER BY name"
+                $t = $cmd.ExecuteReaderAsync()
+                Wait-SqlTarefa $t
+                $rd = $t.Result
+                $versaoSql = ""
+                try {
+                    if ($rd.Read()) { $versaoSql = "$($rd['edicao']) $($rd['versao'])" }
+                    [void]$rd.NextResult()
+                    $cmbDiagBanco.Items.Clear()
+                    while ($rd.Read()) { [void]$cmbDiagBanco.Items.Add("$($rd['name'])") }
+                }
+                finally { $rd.Close() }
+                if ($cmbDiagBanco.Items.Count -eq 0) { throw "Esse SQL Server não tem bancos de usuário disponíveis." }
+                $cmbDiagBanco.SelectedIndex = 0
+                for ($i = 0; $i -lt $cmbDiagBanco.Items.Count; $i++) {
+                    if ("$($cmbDiagBanco.Items[$i])" -ieq "netwebpdv") { $cmbDiagBanco.SelectedIndex = $i; break }
+                }
+                Save-SqlUsuario "$($cmbDiagUsuario.Text)"
+                $lblDiagConn.ForeColor = $Script:UiVerde
+                $lblDiagConn.Text = "OK - $versaoSql | bancos: $($cmbDiagBanco.Items.Count)"
+            }
+            catch {
+                $lblDiagConn.ForeColor = $Script:UiVermelho
+                $lblDiagConn.Text = Get-BackupErroTexto -Erro $_.Exception -Pasta $Script:BackupPasta
+                Log-Message "ERRO" "Diagnóstico banco: falha de conexão - $($_.Exception.Message)"
+            }
+            finally {
+                if ($cn) { try { $cn.Close() } catch {} }
+                & $setOcupado $false
+            }
+        }
+
+        $diagnosticar = {
+            if ($Script:DbDiagOcupado -or "$($cmbDiagBanco.Text)" -eq "") { return }
+            & $setOcupado $true
+            $cn = $null
+            $linhasRel = New-Object System.Collections.Generic.List[string]
+            try {
+                $lvDiag.Items.Clear()
+                $txtDiagRel.Clear()
+                $banco = "$($cmbDiagBanco.Text)"
+                $nomeSql = & $sqlName $banco
+                $lblDiagStatus.ForeColor = $Script:UiAmarelo
+                $lblDiagStatus.Text = "Diagnosticando $banco..."
+                $cn = New-Object System.Data.SqlClient.SqlConnection((& $getConexao "master" 15))
+                Wait-SqlTarefa $cn.OpenAsync()
+
+                $cmdInfo = $cn.CreateCommand()
+                $cmdInfo.CommandTimeout = 60
+                $cmdInfo.CommandText = "SELECT name, state_desc, recovery_model_desc, compatibility_level, create_date, log_reuse_wait_desc FROM sys.databases WHERE name = @b"
+                [void]$cmdInfo.Parameters.AddWithValue("@b", $banco)
+                $rdInfo = $cmdInfo.ExecuteReader()
+                $estado = ""; $recovery = ""; $compat = ""; $criado = ""; $logWait = ""
+                try {
+                    if ($rdInfo.Read()) {
+                        $estado = "$($rdInfo['state_desc'])"; $recovery = "$($rdInfo['recovery_model_desc'])"; $compat = "$($rdInfo['compatibility_level'])"
+                        $criado = ([datetime]$rdInfo['create_date']).ToString("dd/MM/yyyy")
+                        $logWait = "$($rdInfo['log_reuse_wait_desc'])"
+                    }
+                }
+                finally { $rdInfo.Close() }
+                $linhasRel.Add((& $addDiag "Estado do banco" ($(if ($estado -eq "ONLINE") { "OK" } else { "ERRO" })) "$estado | Recovery: $recovery | Compat: $compat | Criado em $criado" ($(if ($estado -eq "ONLINE") { "Banco disponível." } else { "Verificar estado antes de usar o PDV." }))))
+
+                $cmdTam = $cn.CreateCommand()
+                $cmdTam.CommandTimeout = 60
+                $cmdTam.CommandText = "SELECT type_desc, SUM(CAST(size AS bigint)) * 8.0 / 1024.0 AS mb FROM sys.master_files WHERE database_id = DB_ID(@b) GROUP BY type_desc"
+                [void]$cmdTam.Parameters.AddWithValue("@b", $banco)
+                $rdTam = $cmdTam.ExecuteReader()
+                $dataMb = 0.0; $logMb = 0.0
+                try {
+                    while ($rdTam.Read()) {
+                        if ("$($rdTam['type_desc'])" -eq "ROWS") { $dataMb = [double]$rdTam['mb'] }
+                        elseif ("$($rdTam['type_desc'])" -eq "LOG") { $logMb = [double]$rdTam['mb'] }
+                    }
+                }
+                finally { $rdTam.Close() }
+                $linhasRel.Add((& $addDiag "Tamanho MDF/LDF" "INFO" ("Dados: {0:N0} MB | Log: {1:N0} MB" -f $dataMb, $logMb) "Log muito maior que dados merece atenção."))
+                $statusLogWait = if ($logWait -eq "NOTHING") { "OK" } else { "ATENÇÃO" }
+                $linhasRel.Add((& $addDiag "Reuso do log" $statusLogWait $logWait ($(if ($logWait -eq "NOTHING") { "Sem bloqueio aparente para reutilizar log." } else { "Verificar backup/log/transações abertas." }))))
+
+                $ultimoBackup = & $execScalar $cn "SELECT MAX(backup_finish_date) FROM msdb.dbo.backupset WHERE database_name = @b AND type = 'D'" $banco
+                if ($null -eq $ultimoBackup) {
+                    $linhasRel.Add((& $addDiag "Último backup" "ATENÇÃO" "Nenhum backup completo encontrado no histórico do SQL." "Faça backup antes de manutenção."))
+                }
+                else {
+                    $dias = [int]((Get-Date) - [datetime]$ultimoBackup).TotalDays
+                    $st = if ($dias -le 1) { "OK" } elseif ($dias -le 7) { "ATENÇÃO" } else { "CRÍTICO" }
+                    $linhasRel.Add((& $addDiag "Último backup" $st (([datetime]$ultimoBackup).ToString("dd/MM/yyyy HH:mm") + " ($dias dia(s))") "Backup recente reduz risco em manutenção."))
+                }
+
+                $conexoes = & $execScalar $cn "SELECT COUNT(*) FROM sys.sysprocesses WHERE dbid = DB_ID(@b)" $banco
+                $ativas = & $execScalar $cn "SELECT COUNT(*) FROM sys.dm_exec_requests WHERE database_id = DB_ID(@b)" $banco
+                $bloq = & $execScalar $cn "SELECT COUNT(*) FROM sys.sysprocesses WHERE dbid = DB_ID(@b) AND blocked <> 0" $banco
+                $linhasRel.Add((& $addDiag "Conexões abertas" "INFO" "$conexoes conexão(ões), $ativas requisição(ões) ativa(s)" "Muitas conexões podem indicar PDVs presos."))
+                $linhasRel.Add((& $addDiag "Bloqueios agora" ($(if ([int]$bloq -eq 0) { "OK" } else { "ATENÇÃO" })) "$bloq sessão(ões) bloqueada(s)" ($(if ([int]$bloq -eq 0) { "Sem travamento visível agora." } else { "Verificar sessões e comandos em execução." }))))
+
+                $cmdLog = $cn.CreateCommand()
+                $cmdLog.CommandTimeout = 60
+                $cmdLog.CommandText = "DBCC SQLPERF(LOGSPACE)"
+                $dtLog = New-Object System.Data.DataTable
+                $adLog = New-Object System.Data.SqlClient.SqlDataAdapter $cmdLog
+                [void]$adLog.Fill($dtLog)
+                $linhaLog = @($dtLog.Rows | Where-Object { "$($_['Database Name'])" -ieq $banco } | Select-Object -First 1)
+                if ($linhaLog.Count -gt 0) {
+                    $pctLog = [double]$linhaLog[0]['Log Space Used (%)']
+                    $stLog = if ($pctLog -lt 70) { "OK" } elseif ($pctLog -lt 90) { "ATENÇÃO" } else { "CRÍTICO" }
+                    $linhasRel.Add((& $addDiag "Uso do log" $stLog ("{0:N1}% usado" -f $pctLog) "Se estiver alto, investigar transações abertas e espaço em disco."))
+                }
+
+                $miss = & $execScalar $cn "SELECT COUNT(*) FROM sys.dm_db_missing_index_details WHERE database_id = DB_ID(@b)" $banco
+                $linhasRel.Add((& $addDiag "Índices sugeridos" ($(if ([int]$miss -eq 0) { "OK" } else { "ATENÇÃO" })) "$miss sugestão(ões) no cache do SQL" "Use Índices do Banco para revisar/aplicar."))
+
+                $statsAntigas = & $execScalar $cn ("USE " + $nomeSql + "; SELECT COUNT(*) FROM sys.stats s JOIN sys.objects o ON o.object_id = s.object_id WHERE o.type = 'U' AND (STATS_DATE(s.object_id, s.stats_id) IS NULL OR STATS_DATE(s.object_id, s.stats_id) < DATEADD(day,-30,GETDATE()))") $null
+                $linhasRel.Add((& $addDiag "Estatísticas antigas" ($(if ([int]$statsAntigas -eq 0) { "OK" } else { "ATENÇÃO" })) "$statsAntigas estatística(s) sem atualização recente" "Estatísticas antigas podem causar lentidão em consultas."))
+
+                $tabelas = & $execScalar $cn ("USE " + $nomeSql + "; SELECT COUNT(*) FROM sys.tables WHERE is_ms_shipped = 0") $null
+                $linhasRel.Add((& $addDiag "Tabelas do sistema" "INFO" "$tabelas tabela(s) de usuário" "Informação geral do banco."))
+
+                $cmdTop = $cn.CreateCommand()
+                $cmdTop.CommandTimeout = 60
+                $cmdTop.CommandText = "USE " + $nomeSql + "; SELECT TOP 5 t.name, SUM(CASE WHEN p.index_id IN (0,1) THEN p.rows ELSE 0 END) AS linhas FROM sys.partitions p JOIN sys.tables t ON t.object_id = p.object_id GROUP BY t.name ORDER BY linhas DESC"
+                $rdTop = $cmdTop.ExecuteReader()
+                $maiores = @()
+                try { while ($rdTop.Read()) { $maiores += ("{0} ({1:N0})" -f "$($rdTop['name'])", [long]$rdTop['linhas']) } }
+                finally { $rdTop.Close() }
+                if ($maiores.Count -gt 0) { $linhasRel.Add((& $addDiag "Maiores tabelas" "INFO" ($maiores -join "; ") "Ajuda a entender onde o banco pesa mais.")) }
+
+                try {
+                    $maquinaSql = & $execScalar $cn "SELECT CAST(SERVERPROPERTY('MachineName') AS nvarchar(128))" $null
+                    if (Test-SqlLocal -MaquinaSql "$maquinaSql") {
+                        $mdf = & $execScalar $cn "SELECT TOP 1 physical_name FROM sys.master_files WHERE database_id = DB_ID(@b) AND type = 0 ORDER BY file_id" $banco
+                        if ($mdf) {
+                            $raiz = [System.IO.Path]::GetPathRoot("$mdf")
+                            $di = New-Object System.IO.DriveInfo($raiz)
+                            $livreGb = $di.AvailableFreeSpace / 1GB
+                            $stDisco = if ($livreGb -ge 10) { "OK" } elseif ($livreGb -ge 5) { "ATENÇÃO" } else { "CRÍTICO" }
+                            $linhasRel.Add((& $addDiag "Espaço em disco" $stDisco ("{0:N1} GB livres em {1}" -f $livreGb, $raiz.TrimEnd('\')) "Pouco espaço pode parar venda, backup e crescimento do banco."))
+                        }
+                    }
+                }
+                catch {}
+
+                $txtDiagRel.Text = "Diagnóstico do banco $banco - $((Get-Date).ToString('dd/MM/yyyy HH:mm:ss'))`r`n" + (($linhasRel.ToArray()) -join "`r`n")
+                $lblDiagStatus.ForeColor = $Script:UiVerde
+                $lblDiagStatus.Text = "Diagnóstico concluído: $($lvDiag.Items.Count) item(ns)."
+                Log-Message "INFO" "Diagnóstico banco: concluído para $banco"
+            }
+            catch {
+                $lblDiagStatus.ForeColor = $Script:UiVermelho
+                $lblDiagStatus.Text = "Falha no diagnóstico: $($_.Exception.Message)"
+                Log-Message "ERRO" "Diagnóstico banco: $($_.Exception.Message)"
+            }
+            finally {
+                if ($cn) { try { $cn.Close() } catch {} }
+                & $setOcupado $false
+            }
+        }
+
+        $checkdb = {
+            if ($Script:DbDiagOcupado -or "$($cmbDiagBanco.Text)" -eq "") { return }
+            $resp = [System.Windows.Forms.MessageBox]::Show("A verificação de integridade é somente leitura, mas pode demorar em banco grande.`r`n`r`nExecutar agora?", "Verificar Integridade", "YesNo", "Warning")
+            if ($resp -ne [System.Windows.Forms.DialogResult]::Yes) { return }
+            & $setOcupado $true
+            $cn = $null
+            try {
+                $banco = "$($cmbDiagBanco.Text)"
+                $lblDiagStatus.ForeColor = $Script:UiAmarelo
+                $lblDiagStatus.Text = "Executando DBCC CHECKDB em $banco..."
+                $cn = New-Object System.Data.SqlClient.SqlConnection((& $getConexao "master" 15))
+                Wait-SqlTarefa $cn.OpenAsync()
+                $cmd = $cn.CreateCommand()
+                $cmd.CommandTimeout = 0
+                $cmd.CommandText = "DBCC CHECKDB(" + (& $sqlName $banco) + ") WITH NO_INFOMSGS"
+                $t = $cmd.ExecuteNonQueryAsync()
+                Wait-SqlTarefa $t -IntervaloMs 700 -AoEsperar { $lblDiagStatus.Text = "Verificando integridade de $banco..." }
+                [void](& $addDiag "Integridade CHECKDB" "OK" "DBCC CHECKDB terminou sem erro." "Banco não retornou erro de integridade.")
+                $txtDiagRel.Text += "`r`nIntegridade CHECKDB: OK - sem erro."
+                $lblDiagStatus.ForeColor = $Script:UiVerde
+                $lblDiagStatus.Text = "Integridade OK."
+                Log-Message "SUCESSO" "Diagnóstico banco: CHECKDB OK em $banco"
+            }
+            catch {
+                [void](& $addDiag "Integridade CHECKDB" "CRÍTICO" "$($_.Exception.Message)" "Registrar e avaliar restauração/reparo com cuidado.")
+                $txtDiagRel.Text += "`r`nIntegridade CHECKDB: ERRO - $($_.Exception.Message)"
+                $lblDiagStatus.ForeColor = $Script:UiVermelho
+                $lblDiagStatus.Text = "CHECKDB retornou erro."
+                Log-Message "ERRO" "Diagnóstico banco: CHECKDB falhou - $($_.Exception.Message)"
+            }
+            finally {
+                if ($cn) { try { $cn.Close() } catch {} }
+                & $setOcupado $false
+            }
+        }
+
+        $btnDiagTestar.Add_Click($testar)
+        $btnDiagRodar.Add_Click($diagnosticar)
+        $btnDiagAtualizar.Add_Click($diagnosticar)
+        $btnDiagCheck.Add_Click($checkdb)
+        $btnDiagCopiar.Add_Click({
+            if ($txtDiagRel.Text.Trim() -eq "") { return }
+            try { Set-Clipboard -Value $txtDiagRel.Text -ErrorAction Stop }
+            catch { [System.Windows.Forms.Clipboard]::SetText($txtDiagRel.Text) }
+            $lblDiagStatus.ForeColor = $Script:UiVerde
+            $lblDiagStatus.Text = "Relatório copiado."
+        })
+        $txtDiagSenha.Add_KeyDown({
+            param($s, $e)
+            if ($e.KeyCode -eq [System.Windows.Forms.Keys]::Enter) { $e.SuppressKeyPress = $true; & $testar; if ($cmbDiagBanco.Items.Count -gt 0) { & $diagnosticar } }
+        })
+        $f.Add_FormClosing({ $Script:DbDiagForm = $null })
+        $f.Add_Shown({
+            & $testar
+            if ($cmbDiagBanco.Items.Count -gt 0) { & $diagnosticar }
+        })
+
+        Log-Message "INFO" "Diagnóstico banco: janela aberta"
+        [void]$f.ShowDialog($Script:MainForm)
+    }
+    catch {
+        Log-Message "ERRO" "Falha na janela de diagnóstico do banco: $_"
+        [System.Windows.Forms.MessageBox]::Show("Falha ao abrir o diagnóstico do banco:`r`n`r`n$($_.Exception.Message)", "Diagnóstico do Banco", "OK", "Error") | Out-Null
+    }
+}
+
 # -----------------------------------------------------------------------------
 # RELOGIO DO WINDOWS
 # Relogio errado faz a SEFAZ rejeitar NFC-e/SAT e quebra validacao de
@@ -14024,6 +14407,15 @@ $Script:ToolTip.SetToolTip($bBkp, "Faz o backup completo do banco pelo próprio 
 $bBkp.Add_Click({ Show-BackupBanco })
 [void]$tbl.Controls.Add($bBkp)
 
+$bDiagBanco = New-Object System.Windows.Forms.Button; $bDiagBanco.Height = 50; $bDiagBanco.Dock = 'Top'
+$bDiagBanco.Text = "Diagnóstico do Banco"
+$bDiagBanco.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
+$bDiagBanco.Cursor = 'Hand'
+Format-SupportBtn $bDiagBanco $colorSql
+$Script:ToolTip.SetToolTip($bDiagBanco, "Diagnóstico seguro do SQL: estado, tamanho, backup, conexões, bloqueios, log, estatísticas, espaço em disco e integridade opcional.")
+$bDiagBanco.Add_Click({ Show-SqlDbDiagnostic })
+[void]$tbl.Controls.Add($bDiagBanco)
+
 $bIdx = New-Object System.Windows.Forms.Button; $bIdx.Height = 50; $bIdx.Dock = 'Top'
 $bIdx.Text = "Índices do Banco (Sugestões)"
 $bIdx.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
@@ -14032,7 +14424,6 @@ Format-SupportBtn $bIdx $colorSql
 $Script:ToolTip.SetToolTip($bIdx, "Consulta as sugestões de índices do SQL Server, permite copiar o SQL e cria somente os índices marcados após confirmação.")
 $bIdx.Add_Click({ Show-SqlIndexAdvisor })
 [void]$tbl.Controls.Add($bIdx)
-Add-SupportSpacer
 
 # --- DIAGNÓSTICOS (VERDE) ---
 $bInfo = New-Object System.Windows.Forms.Button; $bInfo.Height = 50; $bInfo.Dock = 'Top'
