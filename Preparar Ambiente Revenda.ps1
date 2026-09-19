@@ -1,6 +1,6 @@
 ﻿# =============================================================================
 # PREPARADOR XMENU - VERSAO REVENDA
-# Baseado na v5.27
+# Baseado na v5.30
 # Alteracoes Revenda:
 #   - Wallpaper: fundo_revenda.png
 #   - Removido: Atalhos de Suporte e Pasta Netcontroll
@@ -6474,10 +6474,23 @@ function Show-DbSwapNetWebPdv {
                 $ldfAtual = $logsAtuais[0].Caminho
                 if (-not (Test-Path -LiteralPath $mdfAtual)) { throw "Arquivo MDF atual não encontrado: $mdfAtual" }
                 if (-not (Test-Path -LiteralPath $ldfAtual)) { throw "Arquivo LOG atual não encontrado: $ldfAtual" }
-                $Script:DbSwapAtual = [pscustomobject]@{ Banco = $banco; Mdf = $mdfAtual; Ldf = $ldfAtual }
-                $lblAtual.Text = "Banco atual: $mdfAtual  |  Log: $ldfAtual"
-                & $addLog "Banco atual: $mdfAtual"
-                & $addLog "Log atual: $ldfAtual"
+                $mdfAtualArquivo = Get-Item -LiteralPath $mdfAtual
+                $ldfAtualArquivo = Get-Item -LiteralPath $ldfAtual
+                $mdfAtualKb = [math]::Round($mdfAtualArquivo.Length / 1KB)
+                $ldfAtualKb = [math]::Round($ldfAtualArquivo.Length / 1KB)
+                $totalAtualKb = [math]::Round(($mdfAtualArquivo.Length + $ldfAtualArquivo.Length) / 1KB)
+                $Script:DbSwapAtual = [pscustomobject]@{
+                    Banco   = $banco
+                    Mdf     = $mdfAtual
+                    Ldf     = $ldfAtual
+                    MdfKb   = $mdfAtualKb
+                    LdfKb   = $ldfAtualKb
+                    TotalKb = $totalAtualKb
+                }
+                $lblAtual.Text = ("Banco atual: MDF {0:N0} KB   |   LOG {1:N0} KB   |   TOTAL {2:N0} KB" -f $mdfAtualKb, $ldfAtualKb, $totalAtualKb)
+                if ($Script:ToolTip) { $Script:ToolTip.SetToolTip($lblAtual, "MDF: $mdfAtual`r`nLOG: $ldfAtual") }
+                & $addLog ("Banco atual: MDF {0:N0} KB; LOG {1:N0} KB; total {2:N0} KB." -f $mdfAtualKb, $ldfAtualKb, $totalAtualKb)
+                & $addLog "Arquivos atuais: $mdfAtual | $ldfAtual"
 
                 $Script:DbSwapCandidatos = @(& $findCandidates)
                 foreach ($cand in $Script:DbSwapCandidatos) {
@@ -6684,8 +6697,10 @@ SELECT
 
             $resultadoSeguranca = if ($seguranca.Seguro) { "Verificação: nenhuma movimentação ou caixa aberto." } else { $detalheDadosAbertos }
             $pastaBackupData = Join-Path (Join-Path "$($txtRaiz.Text)" "concentrador") "data"
-            $pastaBackupDia = Join-Path $pastaBackupData ("backup " + (Get-Date).ToString("dd-MM"))
-            $msg = "ATENÇÃO: isso vai desconectar o banco $($atual.Banco), mover os arquivos atuais para backup e colocar o banco selecionado no lugar.`r`n`r`n$resultadoSeguranca`r`n`r`nBanco novo:`r`n$($cand.Mdf)`r`n`r`nBackup: $pastaBackupDia`r`nOs arquivos MDF e LDF serão guardados juntos em um ZIP validado.`r`n`r`nDeseja continuar?"
+            $candTotalKb = [math]::Round($cand.Tamanho / 1KB)
+            $comparacaoTamanhos = ("BANCO ATUAL: MDF {0:N0} KB | LOG {1:N0} KB | TOTAL {2:N0} KB`r`nBANCO NOVO:  MDF {3:N0} KB | LOG {4:N0} KB | TOTAL {5:N0} KB" -f `
+                    $atual.MdfKb, $atual.LdfKb, $atual.TotalKb, $cand.MdfKb, $cand.LdfKb, $candTotalKb)
+            $msg = "ATENÇÃO: isso vai desconectar o banco $($atual.Banco), mover os arquivos atuais para backup e colocar o banco selecionado no lugar.`r`n`r`n$resultadoSeguranca`r`n`r`nCOMPARAÇÃO DE TAMANHO:`r`n$comparacaoTamanhos`r`n`r`nBanco novo:`r`n$($cand.Mdf)`r`n`r`nBackup: $pastaBackupData`r`nOs arquivos MDF e LDF serão guardados juntos em um ZIP validado.`r`n`r`nDeseja continuar?"
             if ($cand.Perfil -ne "Banco zero provável") {
                 $msg += "`r`n`r`nAVISO: o tamanho não parece o banco zero padrão.`r`nEsperado aprox.: MDF 24.320 KB e LOG 1.792 KB.`r`nEncontrado: MDF $($cand.MdfKb) KB e LOG $($cand.LdfKb) KB."
             }
@@ -6723,19 +6738,17 @@ SELECT
 
                 $backupTag = (Get-Date).ToString("dd-MM-yyyy_HH-mm-ss")
                 $backupBase = "Backup NetWebPDV - $backupTag"
-                $backupDir = Join-Path $pastaBackupDia "$backupBase - arquivos"
-                $backupZip = Join-Path $pastaBackupDia "$backupBase.zip"
+                $backupDir = Join-Path $pastaBackupData "$backupBase - arquivos"
+                $backupZip = Join-Path $pastaBackupData "$backupBase.zip"
                 if ((Test-Path -LiteralPath $backupDir) -or (Test-Path -LiteralPath $backupZip)) {
                     $backupTag = (Get-Date).ToString("dd-MM-yyyy_HH-mm-ss-fff")
                     $backupBase = "Backup NetWebPDV - $backupTag"
-                    $backupDir = Join-Path $pastaBackupDia "$backupBase - arquivos"
-                    $backupZip = Join-Path $pastaBackupDia "$backupBase.zip"
+                    $backupDir = Join-Path $pastaBackupData "$backupBase - arquivos"
+                    $backupZip = Join-Path $pastaBackupData "$backupBase.zip"
                 }
                 New-Item -ItemType Directory -Path $pastaBackupData -Force | Out-Null
-                New-Item -ItemType Directory -Path $pastaBackupDia -Force | Out-Null
                 New-Item -ItemType Directory -Path $backupDir -Force | Out-Null
                 & $grantPath $pastaBackupData
-                & $grantPath $pastaBackupDia
                 & $grantPath $backupDir
                 & $grantPath (Split-Path $atual.Mdf)
                 & $grantPath $cand.Pasta
@@ -6752,7 +6765,7 @@ SELECT
 
                 $oldMdfBackup = Join-Path $backupDir "NetWebPDV_$backupTag.mdf"
                 $oldLdfBackup = Join-Path $backupDir "NetWebPDV_log_$backupTag.ldf"
-                & $addLog "Movendo MDF e LDF atuais para o backup em $pastaBackupDia..."
+                & $addLog "Movendo MDF e LDF atuais para o backup em $pastaBackupData..."
                 Move-Item -LiteralPath $atual.Mdf -Destination $oldMdfBackup -Force
                 Move-Item -LiteralPath $atual.Ldf -Destination $oldLdfBackup -Force
 
@@ -6782,8 +6795,8 @@ SELECT
                 $lblStatus.ForeColor = $Script:UiVerde
                 $lblStatus.Text = "Banco trocado com sucesso. Backup em $backupDestinoFinal"
                 try {
-                    Start-Process -FilePath "explorer.exe" -ArgumentList ('"{0}"' -f $pastaBackupDia)
-                    & $addLog "Pasta do backup aberta: $pastaBackupDia"
+                    Start-Process -FilePath "explorer.exe" -ArgumentList ('"{0}"' -f $pastaBackupData)
+                    & $addLog "Pasta do backup aberta: $pastaBackupData"
                 }
                 catch { & $addLog "AVISO: o backup foi concluído, mas não foi possível abrir a pasta: $($_.Exception.Message)" }
                 [System.Windows.Forms.MessageBox]::Show("Banco trocado com sucesso.`r`n`r`nBackup do banco antigo (MDF + LDF):`r`n$backupDestinoFinal", "Trocar Banco", "OK", "Information") | Out-Null
@@ -6852,6 +6865,7 @@ SELECT
         $btnTrocar.Add_Click($trocar)
         $f.Add_FormClosing({ $Script:DbSwapForm = $null })
         Log-Message "INFO" "Trocar banco: janela aberta"
+        $f.Add_Shown({ & $localizar })
         [void]$f.ShowDialog($Script:MainForm)
     }
     catch {
@@ -14741,7 +14755,7 @@ $formWidth = if ($screen.Width -lt 1000) { 900 } else { 1000 }
 $formHeight = if ($screen.Height -lt 800) { 700 } else { 800 }
 
 $form = New-Object System.Windows.Forms.Form
-$form.Text = "Preparador XMenu – Suporte Técnico v5.27 - REVENDA"
+$form.Text = "Preparador XMenu – Suporte Técnico v5.30 - REVENDA"
 $form.Size = New-Object System.Drawing.Size($formWidth, $formHeight)
 $form.StartPosition = "CenterScreen"
 $form.BackColor = [System.Drawing.Color]::FromArgb(25, 25, 30); $form.ForeColor = 'White'
@@ -15477,7 +15491,7 @@ $bClock.Add_Click({ Invoke-ClockSync })
 [void]$tbl.Controls.Add($bClock)
 
 # Mensagem de abertura: explica o programa para quem abre pela primeira vez
-Log-Message "INFO" "Preparador XMenu v5.27 - REVENDA - preparo e suporte de computadores com XMenu e NetPDV"
+Log-Message "INFO" "Preparador XMenu v5.30 - REVENDA - preparo e suporte de computadores com XMenu e NetPDV"
 Log-Message "LOG" "==============================================================="
 Log-Message "LOG" "COMO USAR"
 Log-Message "LOG" "  PREPARAR AMBIENTE WINDOWS .. ajusta energia, UAC e desempenho do PC num clique"
@@ -15487,8 +15501,11 @@ Log-Message "LOG" "  EXTERNOS ................... acesso remoto, Chrome, TEF HUB
 Log-Message "LOG" "  SUPORTE E DIAGNÓSTICO ...... impressoras, rede, SQL, backup, XMLs e reparos do Windows"
 Log-Message "LOG" "  Passe o mouse sobre um botão para ver o que ele faz antes de clicar."
 Log-Message "LOG" "---------------------------------------------------------------"
-Log-Message "LOG" "NOVO NA v5.27"
-Log-Message "SUCESSO" "  Banco: backup da troca salvo em data\backup DD-MM e pasta aberta ao terminar"
+Log-Message "LOG" "NOVO NA v5.30"
+Log-Message "SUCESSO" "  Banco: ZIP da troca salvo diretamente na pasta concentrador\data"
+Log-Message "SUCESSO" "  Banco: troca mostra e compara os tamanhos do banco atual e do banco novo"
+Log-Message "SUCESSO" "  Banco: tela de troca localiza automaticamente ao abrir"
+Log-Message "SUCESSO" "  Banco: pasta concentrador\data aberta automaticamente ao terminar"
 Log-Message "SUCESSO" "  Banco: backup da troca salvo em concentrador\data com MDF e LDF dentro de ZIP validado"
 Log-Message "SUCESSO" "  Banco: movimentação ou caixa aberto gera alerta sem bloqueio automático"
 Log-Message "SUCESSO" "  Banco: ações de índices mais compactas e diretas"
