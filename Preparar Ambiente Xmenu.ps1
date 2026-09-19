@@ -6545,13 +6545,13 @@ function Show-SqlIndexAdvisor {
         $lvIdx.BackColor = [System.Drawing.Color]::FromArgb(12, 12, 25)
         $lvIdx.ForeColor = $Script:UiTexto
         $lvIdx.Font = New-Object System.Drawing.Font("Segoe UI", 8.5)
-        [void]$lvIdx.Columns.Add("Impacto", 90)
-        [void]$lvIdx.Columns.Add("Tabela", 180)
-        [void]$lvIdx.Columns.Add("Seeks", 70)
-        [void]$lvIdx.Columns.Add("Scans", 70)
-        [void]$lvIdx.Columns.Add("Última busca", 125)
-        [void]$lvIdx.Columns.Add("Status", 110)
-        [void]$lvIdx.Columns.Add("CREATE INDEX", 290)
+        [void]$lvIdx.Columns.Add("Ganho", 80)
+        [void]$lvIdx.Columns.Add("Tabela do banco", 220)
+        [void]$lvIdx.Columns.Add("Uso recente", 90)
+        [void]$lvIdx.Columns.Add("Leituras lentas", 95)
+        [void]$lvIdx.Columns.Add("Último uso", 110)
+        [void]$lvIdx.Columns.Add("Situação", 105)
+        [void]$lvIdx.Columns.Add("Comando técnico", 240)
         [void]$f.Controls.Add($lvIdx)
 
         $txtIdxSql = New-Object System.Windows.Forms.TextBox
@@ -6567,16 +6567,18 @@ function Show-SqlIndexAdvisor {
         $txtIdxSql.Font = New-Object System.Drawing.Font("Consolas", 8.5)
         [void]$f.Controls.Add($txtIdxSql)
 
-        $btnIdxBuscar = New-ToolButton $f "BUSCAR SUGESTÕES" 20 566 170 34 $Script:UiAzul $null "Roda a consulta de índices faltantes do SQL Server no banco selecionado"
+        $btnIdxBuscar = New-ToolButton $f "BUSCAR SUGESTÕES" 20 566 155 34 $Script:UiAzul $null "Roda a consulta de índices faltantes do SQL Server no banco selecionado"
         $btnIdxBuscar.Enabled = $false
-        $btnIdxTop = New-ToolButton $f "MARCAR TOP 10" 200 566 130 34 $Script:UiCinza $null "Marca as 10 sugestões de maior impacto"
-        $btnIdxLimpar = New-ToolButton $f "DESMARCAR" 340 566 120 34 $Script:UiCinza $null "Desmarca todas as sugestões"
-        $btnIdxCopiar = New-ToolButton $f "COPIAR SQL" 470 566 120 34 $Script:UiCinza $null "Copia os CREATE INDEX marcados; se nada estiver marcado, copia o selecionado"
-        $btnIdxAplicar = New-ToolButton $f "APLICAR MARCADOS" 600 566 170 34 $Script:UiVerde $null "Cria somente os índices marcados, depois de confirmação"
+        $btnIdxTop = New-ToolButton $f "MARCAR TOP 10" 185 566 120 34 $Script:UiCinza $null "Marca as 10 sugestões de maior ganho"
+        $btnIdxLimpar = New-ToolButton $f "DESMARCAR" 315 566 105 34 $Script:UiCinza $null "Desmarca todas as sugestões"
+        $btnIdxCopiar = New-ToolButton $f "COPIAR SQL" 430 566 105 34 $Script:UiCinza $null "Copia os CREATE INDEX marcados; se nada estiver marcado, copia o selecionado"
+        $btnIdxAplicar = New-ToolButton $f "APLICAR MARCADOS" 545 566 150 34 $Script:UiVerde $null "Cria somente os índices marcados, depois de confirmação"
         $btnIdxAplicar.Enabled = $false
-        $btnIdxFechar = New-ToolButton $f "FECHAR" 840 566 120 34 $Script:UiCinza { $f.Close() }
+        $btnIdxAplicarTodos = New-ToolButton $f "APLICAR TODOS" 705 566 150 34 $Script:UiVerde $null "Cria todas as sugestões da lista em lotes de 5 índices por vez"
+        $btnIdxAplicarTodos.Enabled = $false
+        $btnIdxFechar = New-ToolButton $f "FECHAR" 870 566 90 34 $Script:UiCinza { $f.Close() }
         $btnIdxFechar.Anchor = 'Top,Right'
-        $lblIdxStatus = New-ToolLabel $f "Nenhuma alteração é feita ao buscar. Criar índices só acontece no botão APLICAR MARCADOS." 20 612 9 -Cor $Script:UiSuave -W 940
+        $lblIdxStatus = New-ToolLabel $f "Ao abrir, o Preparador conecta e busca sugestões. Criar índices só acontece nos botões APLICAR." 20 612 9 -Cor $Script:UiSuave -W 940
 
         $getConexao = {
             param([string]$Banco = "master", [int]$Timeout = 8)
@@ -6590,12 +6592,13 @@ function Show-SqlIndexAdvisor {
         $setOcupado = {
             param([bool]$Ocupado)
             $Script:IdxOcupado = $Ocupado
-            foreach ($ctl in @($btnIdxTestar, $btnIdxBuscar, $btnIdxTop, $btnIdxLimpar, $btnIdxCopiar, $btnIdxAplicar, $cmbIdxBanco, $txtIdxServidor, $cmbIdxUsuario, $txtIdxSenha)) {
+            foreach ($ctl in @($btnIdxTestar, $btnIdxBuscar, $btnIdxTop, $btnIdxLimpar, $btnIdxCopiar, $btnIdxAplicar, $btnIdxAplicarTodos, $cmbIdxBanco, $txtIdxServidor, $cmbIdxUsuario, $txtIdxSenha)) {
                 if ($ctl) { $ctl.Enabled = -not $Ocupado }
             }
             if (-not $Ocupado) {
                 $btnIdxBuscar.Enabled = ($cmbIdxBanco.Items.Count -gt 0)
                 $btnIdxAplicar.Enabled = ($lvIdx.Items.Count -gt 0)
+                $btnIdxAplicarTodos.Enabled = ($lvIdx.Items.Count -gt 0)
             }
         }
 
@@ -6689,15 +6692,17 @@ ORDER BY migs.avg_total_user_cost * migs.avg_user_impact * (migs.user_seeks + mi
                     $sql = "$($row['create_index_statement'])"
                     $impacto = [double]$row['improvement_measure']
                     $tabela = "$($row['statement'])"
+                    $tabelaAmigavel = $tabela
+                    if ($tabela -match '^\[([^\]]+)\]\.\[([^\]]+)\]\.\[([^\]]+)\]$') { $tabelaAmigavel = "$($matches[1]) > $($matches[3])" }
                     $last = if ($row['last_user_seek'] -is [System.DBNull]) { "" } else { ([datetime]$row['last_user_seek']).ToString("dd/MM HH:mm") }
                     $it = New-Object System.Windows.Forms.ListViewItem(("{0:N0}" -f $impacto))
-                    [void]$it.SubItems.Add($tabela)
+                    [void]$it.SubItems.Add($tabelaAmigavel)
                     [void]$it.SubItems.Add("$($row['user_seeks'])")
                     [void]$it.SubItems.Add("$($row['user_scans'])")
                     [void]$it.SubItems.Add($last)
-                    [void]$it.SubItems.Add("Pendente")
+                    [void]$it.SubItems.Add("Pronto para aplicar")
                     [void]$it.SubItems.Add($sql)
-                    $it.Tag = [pscustomobject]@{ Sql = $sql; Tabela = $tabela; Impacto = $impacto }
+                    $it.Tag = [pscustomobject]@{ Sql = $sql; Tabela = $tabela; TabelaAmigavel = $tabelaAmigavel; Impacto = $impacto }
                     [void]$lvIdx.Items.Add($it)
                 }
                 if ($dt.Rows.Count -eq 0) {
@@ -6736,54 +6741,63 @@ ORDER BY migs.avg_total_user_cost * migs.avg_user_impact * (migs.user_seeks + mi
             $lblIdxStatus.Text = "SQL copiado: $($sqls.Count) comando(s)."
         }
 
-        $aplicar = {
+        $executarIndices = {
+            param([object[]]$Alvos, [string]$Titulo, [switch]$EmLotesDeCinco)
             if ($Script:IdxOcupado) { return }
-            $alvos = @($lvIdx.CheckedItems)
-            if ($alvos.Count -eq 0) {
-                [System.Windows.Forms.MessageBox]::Show("Marque os índices que deseja criar.", "Aplicar Índices", "OK", "Information") | Out-Null
+            $alvosValidos = @($Alvos | Where-Object { $_.SubItems[5].Text -ne "Criado" })
+            if ($alvosValidos.Count -eq 0) {
+                [System.Windows.Forms.MessageBox]::Show("Não há índices pendentes para aplicar.", $Titulo, "OK", "Information") | Out-Null
                 return
             }
+            $textoLote = if ($EmLotesDeCinco) { "`r`n`r`nO Preparador vai executar em lotes de 5 índices por vez." } else { "" }
             $resp = [System.Windows.Forms.MessageBox]::Show(
-                "Serão criados $($alvos.Count) índice(s) no banco $($cmbIdxBanco.Text).`r`n`r`nIsso é igual executar os CREATE INDEX no SQL Server Management Studio e pode levar alguns minutos em banco grande.`r`n`r`nContinuar?",
-                "Confirmar criação de índices", "YesNo", "Warning")
+                "Serão criados $($alvosValidos.Count) índice(s).`r`n`r`nIsso é igual executar os CREATE INDEX no SQL Server Management Studio e pode levar alguns minutos em banco grande.$textoLote`r`n`r`nContinuar?",
+                $Titulo, "YesNo", "Warning")
             if ($resp -ne [System.Windows.Forms.DialogResult]::Yes) { return }
 
             & $setOcupado $true
             $cn = $null
-            $ok = 0; $falhas = 0
+            $ok = 0; $falhas = 0; $n = 0
             try {
                 $cn = New-Object System.Data.SqlClient.SqlConnection((& $getConexao "master" 15))
                 Wait-SqlTarefa $cn.OpenAsync()
-                $n = 0
-                foreach ($it in $alvos) {
-                    $n++
-                    $sql = "$($it.Tag.Sql)".Trim()
-                    $it.SubItems[5].Text = "Criando..."
-                    $lblIdxStatus.ForeColor = $Script:UiAmarelo
-                    $lblIdxStatus.Text = "Criando índice $n de $($alvos.Count)..."
-                    [System.Windows.Forms.Application]::DoEvents()
-                    try {
-                        if (-not $sql.StartsWith("CREATE INDEX [missing_index_")) { throw "Comando não parece ser uma sugestão de índice gerada pelo SQL Server." }
-                        $cmd = $cn.CreateCommand()
-                        $cmd.CommandTimeout = 0
-                        $cmd.CommandText = $sql
-                        $t = $cmd.ExecuteNonQueryAsync()
-                        Wait-SqlTarefa $t -IntervaloMs 500 -AoEsperar {
-                            $lblIdxStatus.Text = "Criando índice $n de $($alvos.Count)..."
+                $loteTam = if ($EmLotesDeCinco) { 5 } else { [Math]::Max(1, $alvosValidos.Count) }
+                for ($inicio = 0; $inicio -lt $alvosValidos.Count; $inicio += $loteTam) {
+                    $fim = [Math]::Min($inicio + $loteTam - 1, $alvosValidos.Count - 1)
+                    $loteNum = [Math]::Floor($inicio / $loteTam) + 1
+                    $loteTotal = [Math]::Ceiling($alvosValidos.Count / $loteTam)
+                    for ($idx = $inicio; $idx -le $fim; $idx++) {
+                        $it = $alvosValidos[$idx]
+                        $n++
+                        $sql = "$($it.Tag.Sql)".Trim()
+                        $it.SubItems[5].Text = "Criando..."
+                        $lblIdxStatus.ForeColor = $Script:UiAmarelo
+                        $lblIdxStatus.Text = "Lote $loteNum de $loteTotal - criando índice $n de $($alvosValidos.Count)..."
+                        [System.Windows.Forms.Application]::DoEvents()
+                        try {
+                            if (-not $sql.StartsWith("CREATE INDEX [missing_index_")) { throw "Comando não parece ser uma sugestão de índice gerada pelo SQL Server." }
+                            $cmd = $cn.CreateCommand()
+                            $cmd.CommandTimeout = 0
+                            $cmd.CommandText = $sql
+                            $t = $cmd.ExecuteNonQueryAsync()
+                            Wait-SqlTarefa $t -IntervaloMs 500 -AoEsperar {
+                                $lblIdxStatus.Text = "Lote $loteNum de $loteTotal - criando índice $n de $($alvosValidos.Count)..."
+                            }
+                            $it.SubItems[5].Text = "Criado"
+                            $it.Checked = $false
+                            $ok++
                         }
-                        $it.SubItems[5].Text = "Criado"
-                        $it.Checked = $false
-                        $ok++
+                        catch {
+                            $it.SubItems[5].Text = "Erro"
+                            $falhas++
+                            Log-Message "ERRO" "Índices: falha ao criar índice em $($it.Tag.TabelaAmigavel) - $($_.Exception.Message)"
+                        }
                     }
-                    catch {
-                        $it.SubItems[5].Text = "Erro"
-                        $falhas++
-                        Log-Message "ERRO" "Índices: falha ao criar índice - $($_.Exception.Message)"
-                    }
+                    [System.Windows.Forms.Application]::DoEvents()
                 }
                 $lblIdxStatus.ForeColor = if ($falhas -gt 0) { $Script:UiAmarelo } else { $Script:UiVerde }
                 $lblIdxStatus.Text = "Finalizado: $ok criado(s), $falhas falha(s). Clique em BUSCAR SUGESTÕES para atualizar a lista."
-                Log-Message "SUCESSO" "Índices: finalizado no banco $($cmbIdxBanco.Text): $ok criado(s), $falhas falha(s)"
+                Log-Message "SUCESSO" "Índices: finalizado: $ok criado(s), $falhas falha(s)"
             }
             catch {
                 $lblIdxStatus.ForeColor = $Script:UiVermelho
@@ -6794,6 +6808,21 @@ ORDER BY migs.avg_total_user_cost * migs.avg_user_impact * (migs.user_seeks + mi
                 if ($cn) { try { $cn.Close() } catch {} }
                 & $setOcupado $false
             }
+        }
+
+        $aplicar = {
+            $alvos = @($lvIdx.CheckedItems)
+            if ($alvos.Count -eq 0) {
+                [System.Windows.Forms.MessageBox]::Show("Marque os índices que deseja criar.", "Aplicar Marcados", "OK", "Information") | Out-Null
+                return
+            }
+            & $executarIndices $alvos "Aplicar índices marcados"
+        }
+
+        $aplicarTodos = {
+            $alvos = @()
+            foreach ($it in $lvIdx.Items) { $alvos += $it }
+            & $executarIndices $alvos "Aplicar todos os índices" -EmLotesDeCinco
         }
 
         $lvIdx.Add_SelectedIndexChanged({
@@ -6807,11 +6836,16 @@ ORDER BY migs.avg_total_user_cost * migs.avg_user_impact * (migs.user_seeks + mi
         $btnIdxLimpar.Add_Click({ foreach ($it in $lvIdx.Items) { $it.Checked = $false } })
         $btnIdxCopiar.Add_Click($copiar)
         $btnIdxAplicar.Add_Click($aplicar)
+        $btnIdxAplicarTodos.Add_Click($aplicarTodos)
         $txtIdxSenha.Add_KeyDown({
             param($s, $e)
             if ($e.KeyCode -eq [System.Windows.Forms.Keys]::Enter) { $e.SuppressKeyPress = $true; & $testar }
         })
         $f.Add_FormClosing({ $Script:IdxForm = $null })
+        $f.Add_Shown({
+            & $testar
+            if ($cmbIdxBanco.Items.Count -gt 0) { & $buscar }
+        })
 
         Log-Message "INFO" "Índices: janela aberta"
         [void]$f.ShowDialog($Script:MainForm)
