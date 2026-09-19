@@ -1,6 +1,6 @@
 ﻿# =============================================================================
 # PREPARADOR XMENU - VERSAO REVENDA
-# Baseado na v5.14
+# Baseado na v5.15
 # Alteracoes Revenda:
 #   - Wallpaper: fundo_revenda.png
 #   - Removido: Atalhos de Suporte e Pasta Netcontroll
@@ -13877,7 +13877,7 @@ $formWidth = if ($screen.Width -lt 1000) { 900 } else { 1000 }
 $formHeight = if ($screen.Height -lt 800) { 700 } else { 800 }
 
 $form = New-Object System.Windows.Forms.Form
-$form.Text = "Preparador XMenu – Suporte Técnico v5.14 - REVENDA"
+$form.Text = "Preparador XMenu – Suporte Técnico v5.15 - REVENDA"
 $form.Size = New-Object System.Drawing.Size($formWidth, $formHeight)
 $form.StartPosition = "CenterScreen"
 $form.BackColor = [System.Drawing.Color]::FromArgb(25, 25, 30); $form.ForeColor = 'White'
@@ -13930,6 +13930,27 @@ $lS.ForeColor = [System.Drawing.Color]::Gold
 $lS.Font = New-Object System.Drawing.Font("Segoe UI", 8, [System.Drawing.FontStyle]::Bold)
 $lS.Location = '2,23'
 [void]$hTitulo.Controls.Add($lS)
+$textoCreditoCompleto = "Desenvolvido por Vinicius Mazaroski"
+$textoCreditoCompacto = "Vinicius Mazaroski"
+$fonteTituloCab = New-Object System.Drawing.Font("Segoe UI", 14, [System.Drawing.FontStyle]::Bold)
+$fonteCreditoNormal = New-Object System.Drawing.Font("Segoe UI", 8, [System.Drawing.FontStyle]::Bold)
+$fonteCreditoCompacta = New-Object System.Drawing.Font("Segoe UI", 7.5, [System.Drawing.FontStyle]::Bold)
+$Script:HeaderCreditoTexto = $textoCreditoCompleto
+$Script:HeaderCreditoFonte = $fonteCreditoNormal
+$lT.Visible = $false
+$lS.Visible = $false
+$hTitulo.GetType().GetProperty('DoubleBuffered', [System.Reflection.BindingFlags]'Instance,NonPublic').SetValue($hTitulo, $true, $null)
+$hTitulo.Add_Paint({
+        param($s, $e)
+        $flags = [System.Windows.Forms.TextFormatFlags]'Left, EndEllipsis, NoPadding, SingleLine'
+        $creditoFonte = if ($Script:HeaderCreditoFonte) { $Script:HeaderCreditoFonte } else { $fonteCreditoNormal }
+        $alturaTitulo = [System.Windows.Forms.TextRenderer]::MeasureText($e.Graphics, "Preparador XMenu", $fonteTituloCab, [System.Drawing.Size]::Empty, [System.Windows.Forms.TextFormatFlags]'NoPadding, SingleLine').Height
+        $alturaCredito = [System.Windows.Forms.TextRenderer]::MeasureText($e.Graphics, "$($Script:HeaderCreditoTexto)", $creditoFonte, [System.Drawing.Size]::Empty, [System.Windows.Forms.TextFormatFlags]'NoPadding, SingleLine').Height
+        $total = $alturaTitulo + $alturaCredito - 2
+        $topo = [Math]::Max(0, [int](($s.ClientSize.Height - $total) / 2))
+        [System.Windows.Forms.TextRenderer]::DrawText($e.Graphics, "Preparador XMenu", $fonteTituloCab, (New-Object System.Drawing.Rectangle(0, $topo, $s.ClientSize.Width, $alturaTitulo + 2)), [System.Drawing.Color]::White, $flags)
+        [System.Windows.Forms.TextRenderer]::DrawText($e.Graphics, "$($Script:HeaderCreditoTexto)", $creditoFonte, (New-Object System.Drawing.Rectangle(2, ($topo + $alturaTitulo - 2), $s.ClientSize.Width - 2, $alturaCredito + 2)), [System.Drawing.Color]::Gold, $flags)
+    })
 
 # Os dados de hardware sao lidos logo depois que a janela aparece (no Shown, la no fim):
 # a janela abre com "..." e o cabecalho se completa em uns 0,3 s.
@@ -14164,40 +14185,34 @@ $lS.Location = New-Object System.Drawing.Point(2, ($topoTitulo + $lT.PreferredHe
 $hTitulo.Width = [Math]::Max($lT.PreferredWidth, $lS.PreferredWidth + 2) + 24
 $hRight.Padding = New-Object System.Windows.Forms.Padding(0, [int](($altUtilCab - $btnLinks.Height) / 2), 0, 0)
 $larguraTituloNormal = $hTitulo.Width
-$textoCreditoCompleto = "Desenvolvido por Vinicius Mazaroski"
-$textoCreditoCompacto = "Vinicius Mazaroski"
-$fonteCreditoNormal = New-Object System.Drawing.Font("Segoe UI", 8, [System.Drawing.FontStyle]::Bold)
-$fonteCreditoCompacta = New-Object System.Drawing.Font("Segoe UI", 7.5, [System.Drawing.FontStyle]::Bold)
 $ajustarCabecalhoCompacto = {
     $largura = $form.ClientSize.Width
     if ($largura -lt 760) {
-        $lS.Visible = $true
-        $lS.Text = $textoCreditoCompacto
-        $lS.Font = $fonteCreditoCompacta
+        $Script:HeaderCreditoTexto = $textoCreditoCompacto
+        $Script:HeaderCreditoFonte = $fonteCreditoCompacta
         $hTitulo.Width = [Math]::Min($larguraTituloNormal, 205)
         $btnLinks.Text = "LINKS ▼"
         $btnLinks.Width = 86
         $hRight.Width = 86
     }
     elseif ($largura -lt 980) {
-        $lS.Visible = $true
-        $lS.Text = $textoCreditoCompacto
-        $lS.Font = $fonteCreditoNormal
+        $Script:HeaderCreditoTexto = $textoCreditoCompacto
+        $Script:HeaderCreditoFonte = $fonteCreditoNormal
         $hTitulo.Width = [Math]::Min($larguraTituloNormal, 220)
         $btnLinks.Text = "LINKS ÚTEIS ▼"
         $btnLinks.Width = 116
         $hRight.Width = 116
     }
     else {
-        $lS.Visible = $true
-        $lS.Text = $textoCreditoCompleto
-        $lS.Font = $fonteCreditoNormal
+        $Script:HeaderCreditoTexto = $textoCreditoCompleto
+        $Script:HeaderCreditoFonte = $fonteCreditoNormal
         $hTitulo.Width = $larguraTituloNormal
         $btnLinks.Text = "LINKS ÚTEIS ▼"
         $btnLinks.Width = 116
         $hRight.Width = 116
     }
     $hRight.Padding = New-Object System.Windows.Forms.Padding(0, [int](($head.ClientSize.Height - $head.Padding.Top - $head.Padding.Bottom - $btnLinks.Height) / 2), 0, 0)
+    $hTitulo.Invalidate()
     $hInfo.Invalidate()
 }
 $form.Add_Resize({ try { & $ajustarCabecalhoCompacto } catch {} })
@@ -14586,7 +14601,7 @@ $bClock.Add_Click({ Invoke-ClockSync })
 [void]$tbl.Controls.Add($bClock)
 
 # Mensagem de abertura: explica o programa para quem abre pela primeira vez
-Log-Message "INFO" "Preparador XMenu v5.14 - REVENDA - preparo e suporte de computadores com XMenu e NetPDV"
+Log-Message "INFO" "Preparador XMenu v5.15 - REVENDA - preparo e suporte de computadores com XMenu e NetPDV"
 Log-Message "LOG" "==============================================================="
 Log-Message "LOG" "COMO USAR"
 Log-Message "LOG" "  PREPARAR AMBIENTE WINDOWS .. ajusta energia, UAC e desempenho do PC num clique"
@@ -14596,7 +14611,7 @@ Log-Message "LOG" "  EXTERNOS ................... acesso remoto, Chrome, TEF HUB
 Log-Message "LOG" "  SUPORTE E DIAGNÓSTICO ...... impressoras, rede, SQL, backup, XMLs e reparos do Windows"
 Log-Message "LOG" "  Passe o mouse sobre um botão para ver o que ele faz antes de clicar."
 Log-Message "LOG" "---------------------------------------------------------------"
-Log-Message "LOG" "NOVO NA v5.14"
+Log-Message "LOG" "NOVO NA v5.15"
 Log-Message "SUCESSO" "  NetPDV: versão 1.3.68.0 (ZIP) na lista de versões, já vem selecionada"
 Log-Message "SUCESSO" "  XMLs e Backup: servidor padrão agora é localhost (127.0.0.1 não conectava em algumas máquinas)"
 Log-Message "SUCESSO" "  XMLs e Backup: campo Usuário do SQL (sa ou sa2, ou digite outro) e senha editável"
