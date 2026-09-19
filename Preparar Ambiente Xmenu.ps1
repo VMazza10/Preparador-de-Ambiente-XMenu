@@ -6466,6 +6466,362 @@ function Show-BackupBanco {
     }
 }
 
+function Show-SqlIndexAdvisor {
+    try {
+        if ($null -ne $Script:IdxForm -and -not $Script:IdxForm.IsDisposed) {
+            $Script:IdxForm.Activate(); return
+        }
+
+        $Script:IdxOcupado = $false
+        $Script:IdxBancos = @{}
+
+        $f = New-ToolForm "Índices do Banco - Sugestões SQL" 1000 690
+        $f.MinimumSize = New-Object System.Drawing.Size(980, 650)
+        $Script:IdxForm = $f
+
+        $novoCartao = {
+            param([int]$X, [int]$Y, [int]$W, [int]$H)
+            $p = New-Object System.Windows.Forms.Panel
+            $p.Location = New-Object System.Drawing.Point($X, $Y)
+            $p.Size = New-Object System.Drawing.Size($W, $H)
+            $p.BackColor = $Script:UiCartao
+            $p.Anchor = 'Top,Left,Right'
+            [void]$f.Controls.Add($p)
+            return $p
+        }
+        $novoCampo = {
+            param($Pai, [int]$X, [int]$Y, [int]$W, [string]$Valor)
+            $t = New-Object System.Windows.Forms.TextBox
+            $t.Location = New-Object System.Drawing.Point($X, $Y)
+            $t.Size = New-Object System.Drawing.Size($W, 24)
+            $t.BackColor = [System.Drawing.Color]::FromArgb(20, 24, 34)
+            $t.ForeColor = $Script:UiTexto
+            $t.BorderStyle = 'FixedSingle'
+            $t.Text = $Valor
+            [void]$Pai.Controls.Add($t)
+            return $t
+        }
+
+        New-ToolLabel $f "ÍNDICES DO BANCO" 20 14 12 -Negrito | Out-Null
+        New-ToolLabel $f "Consulta as sugestões do SQL Server, mostra o resultado e só cria os índices marcados depois da confirmação." 20 42 9 -Cor $Script:UiSuave -W 940 | Out-Null
+
+        $cardConn = & $novoCartao 20 70 940 90
+        New-ToolLabel $cardConn "CONEXÃO" 14 8 10 -Negrito | Out-Null
+        New-ToolLabel $cardConn "Servidor:" 14 38 9 -Cor $Script:UiSuave | Out-Null
+        $txtIdxServidor = & $novoCampo $cardConn 72 35 130 "localhost"
+        New-ToolLabel $cardConn "Usuário:" 212 38 9 -Cor $Script:UiSuave | Out-Null
+        $cmbIdxUsuario = New-Object System.Windows.Forms.ComboBox
+        $cmbIdxUsuario.Location = New-Object System.Drawing.Point(266, 35)
+        $cmbIdxUsuario.Width = 64
+        $cmbIdxUsuario.DropDownStyle = 'DropDown'
+        $cmbIdxUsuario.FlatStyle = 'Flat'
+        $cmbIdxUsuario.BackColor = [System.Drawing.Color]::FromArgb(20, 24, 34)
+        $cmbIdxUsuario.ForeColor = $Script:UiTexto
+        foreach ($usr in $Script:SqlUsuariosPadrao) { [void]$cmbIdxUsuario.Items.Add($usr) }
+        $cmbIdxUsuario.Text = (Get-SqlUsuarioSalvo)
+        [void]$cardConn.Controls.Add($cmbIdxUsuario)
+        New-ToolLabel $cardConn "Senha:" 340 38 9 -Cor $Script:UiSuave | Out-Null
+        $txtIdxSenha = & $novoCampo $cardConn 384 35 110 "netcontroll"
+        $btnIdxTestar = New-ToolButton $cardConn "TESTAR CONEXÃO" 508 34 150 27 $Script:UiAzul $null "Conecta no SQL Server e lista os bancos"
+        New-ToolLabel $cardConn "Banco:" 676 38 9 -Cor $Script:UiSuave | Out-Null
+        $cmbIdxBanco = New-Object System.Windows.Forms.ComboBox
+        $cmbIdxBanco.Location = New-Object System.Drawing.Point(724, 35)
+        $cmbIdxBanco.Width = 190
+        $cmbIdxBanco.DropDownStyle = 'DropDownList'
+        $cmbIdxBanco.FlatStyle = 'Flat'
+        $cmbIdxBanco.BackColor = [System.Drawing.Color]::FromArgb(20, 24, 34)
+        $cmbIdxBanco.ForeColor = $Script:UiTexto
+        [void]$cardConn.Controls.Add($cmbIdxBanco)
+        $lblIdxConn = New-ToolLabel $cardConn "Informe os dados e clique em TESTAR CONEXÃO." 14 64 9 -Cor $Script:UiSuave -W 900
+
+        $lvIdx = New-Object System.Windows.Forms.ListView
+        $lvIdx.Location = New-Object System.Drawing.Point(20, 176)
+        $lvIdx.Size = New-Object System.Drawing.Size(940, 265)
+        $lvIdx.Anchor = 'Top,Left,Right'
+        $lvIdx.View = 'Details'
+        $lvIdx.FullRowSelect = $true
+        $lvIdx.GridLines = $true
+        $lvIdx.CheckBoxes = $true
+        $lvIdx.BackColor = [System.Drawing.Color]::FromArgb(12, 12, 25)
+        $lvIdx.ForeColor = $Script:UiTexto
+        $lvIdx.Font = New-Object System.Drawing.Font("Segoe UI", 8.5)
+        [void]$lvIdx.Columns.Add("Impacto", 90)
+        [void]$lvIdx.Columns.Add("Tabela", 180)
+        [void]$lvIdx.Columns.Add("Seeks", 70)
+        [void]$lvIdx.Columns.Add("Scans", 70)
+        [void]$lvIdx.Columns.Add("Última busca", 125)
+        [void]$lvIdx.Columns.Add("Status", 110)
+        [void]$lvIdx.Columns.Add("CREATE INDEX", 290)
+        [void]$f.Controls.Add($lvIdx)
+
+        $txtIdxSql = New-Object System.Windows.Forms.TextBox
+        $txtIdxSql.Location = New-Object System.Drawing.Point(20, 452)
+        $txtIdxSql.Size = New-Object System.Drawing.Size(940, 98)
+        $txtIdxSql.Anchor = 'Top,Left,Right'
+        $txtIdxSql.Multiline = $true
+        $txtIdxSql.ScrollBars = 'Vertical'
+        $txtIdxSql.ReadOnly = $true
+        $txtIdxSql.BackColor = [System.Drawing.Color]::FromArgb(20, 24, 34)
+        $txtIdxSql.ForeColor = $Script:UiTexto
+        $txtIdxSql.BorderStyle = 'FixedSingle'
+        $txtIdxSql.Font = New-Object System.Drawing.Font("Consolas", 8.5)
+        [void]$f.Controls.Add($txtIdxSql)
+
+        $btnIdxBuscar = New-ToolButton $f "BUSCAR SUGESTÕES" 20 566 170 34 $Script:UiAzul $null "Roda a consulta de índices faltantes do SQL Server no banco selecionado"
+        $btnIdxBuscar.Enabled = $false
+        $btnIdxTop = New-ToolButton $f "MARCAR TOP 10" 200 566 130 34 $Script:UiCinza $null "Marca as 10 sugestões de maior impacto"
+        $btnIdxLimpar = New-ToolButton $f "DESMARCAR" 340 566 120 34 $Script:UiCinza $null "Desmarca todas as sugestões"
+        $btnIdxCopiar = New-ToolButton $f "COPIAR SQL" 470 566 120 34 $Script:UiCinza $null "Copia os CREATE INDEX marcados; se nada estiver marcado, copia o selecionado"
+        $btnIdxAplicar = New-ToolButton $f "APLICAR MARCADOS" 600 566 170 34 $Script:UiVerde $null "Cria somente os índices marcados, depois de confirmação"
+        $btnIdxAplicar.Enabled = $false
+        $btnIdxFechar = New-ToolButton $f "FECHAR" 840 566 120 34 $Script:UiCinza { $f.Close() }
+        $btnIdxFechar.Anchor = 'Top,Right'
+        $lblIdxStatus = New-ToolLabel $f "Nenhuma alteração é feita ao buscar. Criar índices só acontece no botão APLICAR MARCADOS." 20 612 9 -Cor $Script:UiSuave -W 940
+
+        $getConexao = {
+            param([string]$Banco = "master", [int]$Timeout = 8)
+            return New-SqlTextoConexao -Servidor $txtIdxServidor.Text -Usuario $cmbIdxUsuario.Text -Senha $txtIdxSenha.Text -Banco $Banco -Timeout $Timeout
+        }
+        $getSqlMarcados = {
+            $items = @($lvIdx.CheckedItems)
+            if ($items.Count -eq 0 -and $lvIdx.SelectedItems.Count -gt 0) { $items = @($lvIdx.SelectedItems[0]) }
+            return @($items | ForEach-Object { $_.Tag.Sql })
+        }
+        $setOcupado = {
+            param([bool]$Ocupado)
+            $Script:IdxOcupado = $Ocupado
+            foreach ($ctl in @($btnIdxTestar, $btnIdxBuscar, $btnIdxTop, $btnIdxLimpar, $btnIdxCopiar, $btnIdxAplicar, $cmbIdxBanco, $txtIdxServidor, $cmbIdxUsuario, $txtIdxSenha)) {
+                if ($ctl) { $ctl.Enabled = -not $Ocupado }
+            }
+            if (-not $Ocupado) {
+                $btnIdxBuscar.Enabled = ($cmbIdxBanco.Items.Count -gt 0)
+                $btnIdxAplicar.Enabled = ($lvIdx.Items.Count -gt 0)
+            }
+        }
+
+        $testar = {
+            if ($Script:IdxOcupado) { return }
+            & $setOcupado $true
+            $cn = $null
+            try {
+                $lblIdxConn.ForeColor = $Script:UiAmarelo
+                $lblIdxConn.Text = "Conectando..."
+                $cn = New-Object System.Data.SqlClient.SqlConnection((& $getConexao "master" 8))
+                Wait-SqlTarefa $cn.OpenAsync()
+                $cmd = $cn.CreateCommand()
+                $cmd.CommandTimeout = 30
+                $cmd.CommandText = "SELECT CAST(SERVERPROPERTY('Edition') AS nvarchar(128)) AS edicao, CAST(SERVERPROPERTY('ProductVersion') AS nvarchar(64)) AS versao; " +
+                    "SELECT name FROM sys.databases WHERE database_id > 4 AND state = 0 ORDER BY name"
+                $t = $cmd.ExecuteReaderAsync()
+                Wait-SqlTarefa $t
+                $rd = $t.Result
+                $versaoSql = ""
+                try {
+                    if ($rd.Read()) { $versaoSql = "$($rd['edicao']) $($rd['versao'])" }
+                    [void]$rd.NextResult()
+                    $cmbIdxBanco.Items.Clear()
+                    while ($rd.Read()) { [void]$cmbIdxBanco.Items.Add("$($rd['name'])") }
+                }
+                finally { $rd.Close() }
+                if ($cmbIdxBanco.Items.Count -eq 0) { throw "Esse SQL Server não tem bancos de usuário disponíveis." }
+                [void]$cmbIdxBanco.Items.Insert(0, "(TODOS OS BANCOS)")
+                $cmbIdxBanco.SelectedIndex = 0
+                for ($i = 0; $i -lt $cmbIdxBanco.Items.Count; $i++) {
+                    if ("$($cmbIdxBanco.Items[$i])" -ieq "netwebpdv") { $cmbIdxBanco.SelectedIndex = $i; break }
+                }
+                Save-SqlUsuario "$($cmbIdxUsuario.Text)"
+                $lblIdxConn.ForeColor = $Script:UiVerde
+                $lblIdxConn.Text = "OK - $versaoSql | bancos: $($cmbIdxBanco.Items.Count)"
+                $lblIdxStatus.Text = "Conexão OK. Escolha o banco e clique em BUSCAR SUGESTÕES."
+            }
+            catch {
+                $lblIdxConn.ForeColor = $Script:UiVermelho
+                $lblIdxConn.Text = Get-BackupErroTexto -Erro $_.Exception -Pasta $Script:BackupPasta
+                Log-Message "ERRO" "Índices: falha de conexão - $($_.Exception.Message)"
+            }
+            finally {
+                if ($cn) { try { $cn.Close() } catch {} }
+                & $setOcupado $false
+            }
+        }
+
+        $buscar = {
+            if ($Script:IdxOcupado -or "$($cmbIdxBanco.Text)" -eq "") { return }
+            & $setOcupado $true
+            $cn = $null
+            try {
+                $lvIdx.Items.Clear()
+                $txtIdxSql.Clear()
+                $lblIdxStatus.ForeColor = $Script:UiAmarelo
+                $lblIdxStatus.Text = "Consultando sugestões do SQL Server..."
+                $cn = New-Object System.Data.SqlClient.SqlConnection((& $getConexao "master" 15))
+                Wait-SqlTarefa $cn.OpenAsync()
+                $cmd = $cn.CreateCommand()
+                $cmd.CommandTimeout = 60
+                $cmd.CommandText = @"
+SELECT
+mid.statement,
+  migs.avg_total_user_cost * (migs.avg_user_impact / 100.0) * (migs.user_seeks + migs.user_scans) AS improvement_measure,
+  'CREATE INDEX [missing_index_' + CONVERT (varchar, mig.index_group_handle) + '_' + CONVERT (varchar, mid.index_handle)
+  + '_' + LEFT (PARSENAME(mid.statement, 1), 32) + ']'
+  + ' ON ' + mid.statement
+  + ' (' + ISNULL (mid.equality_columns,'')
+    + CASE WHEN mid.equality_columns IS NOT NULL AND mid.inequality_columns IS NOT NULL THEN ',' ELSE '' END
+    + ISNULL (mid.inequality_columns, '')
+  + ')'
+  + ISNULL (' INCLUDE (' + mid.included_columns + ')', '') AS create_index_statement,
+  migs.*, mid.database_id, mid.[object_id]
+FROM sys.dm_db_missing_index_groups mig
+INNER JOIN sys.dm_db_missing_index_group_stats migs ON migs.group_handle = mig.index_group_handle
+INNER JOIN sys.dm_db_missing_index_details mid ON mig.index_handle = mid.index_handle
+WHERE migs.avg_total_user_cost * (migs.avg_user_impact / 100.0) * (migs.user_seeks + migs.user_scans) > 3
+  AND mid.database_id > 4
+  AND (@banco = N'' OR mid.database_id = DB_ID(@banco))
+ORDER BY migs.avg_total_user_cost * migs.avg_user_impact * (migs.user_seeks + migs.user_scans) DESC
+"@
+                $bancoFiltro = "$($cmbIdxBanco.Text)"
+                if ($bancoFiltro -eq "(TODOS OS BANCOS)") { $bancoFiltro = "" }
+                [void]$cmd.Parameters.AddWithValue("@banco", $bancoFiltro)
+                $dt = New-Object System.Data.DataTable
+                $ad = New-Object System.Data.SqlClient.SqlDataAdapter $cmd
+                [void]$ad.Fill($dt)
+                foreach ($row in $dt.Rows) {
+                    $sql = "$($row['create_index_statement'])"
+                    $impacto = [double]$row['improvement_measure']
+                    $tabela = "$($row['statement'])"
+                    $last = if ($row['last_user_seek'] -is [System.DBNull]) { "" } else { ([datetime]$row['last_user_seek']).ToString("dd/MM HH:mm") }
+                    $it = New-Object System.Windows.Forms.ListViewItem(("{0:N0}" -f $impacto))
+                    [void]$it.SubItems.Add($tabela)
+                    [void]$it.SubItems.Add("$($row['user_seeks'])")
+                    [void]$it.SubItems.Add("$($row['user_scans'])")
+                    [void]$it.SubItems.Add($last)
+                    [void]$it.SubItems.Add("Pendente")
+                    [void]$it.SubItems.Add($sql)
+                    $it.Tag = [pscustomobject]@{ Sql = $sql; Tabela = $tabela; Impacto = $impacto }
+                    [void]$lvIdx.Items.Add($it)
+                }
+                if ($dt.Rows.Count -eq 0) {
+                    $lblIdxStatus.ForeColor = $Script:UiSuave
+                    $alvoBusca = if ($bancoFiltro -eq "") { "os bancos de usuário" } else { $cmbIdxBanco.Text }
+                    $lblIdxStatus.Text = "Nenhuma sugestão encontrada para $alvoBusca."
+                }
+                else {
+                    $lblIdxStatus.ForeColor = $Script:UiVerde
+                    $lblIdxStatus.Text = "$($dt.Rows.Count) sugestão(ões) encontrada(s). Marque as que deseja aplicar ou copie o SQL para revisar."
+                }
+                $alvoLog = if ($bancoFiltro -eq "") { "todos os bancos" } else { "banco $($cmbIdxBanco.Text)" }
+                Log-Message "INFO" "Índices: $($dt.Rows.Count) sugestão(ões) encontradas em $alvoLog"
+            }
+            catch {
+                $lblIdxStatus.ForeColor = $Script:UiVermelho
+                $lblIdxStatus.Text = "Falha ao buscar sugestões: $($_.Exception.Message)"
+                Log-Message "ERRO" "Índices: falha ao buscar - $($_.Exception.Message)"
+            }
+            finally {
+                if ($cn) { try { $cn.Close() } catch {} }
+                & $setOcupado $false
+            }
+        }
+
+        $copiar = {
+            $sqls = @(& $getSqlMarcados)
+            if ($sqls.Count -eq 0) {
+                [System.Windows.Forms.MessageBox]::Show("Marque uma sugestão ou selecione uma linha.", "Copiar SQL", "OK", "Information") | Out-Null
+                return
+            }
+            $texto = ($sqls -join "`r`nGO`r`n")
+            try { Set-Clipboard -Value $texto -ErrorAction Stop }
+            catch { [System.Windows.Forms.Clipboard]::SetText($texto) }
+            $lblIdxStatus.ForeColor = $Script:UiVerde
+            $lblIdxStatus.Text = "SQL copiado: $($sqls.Count) comando(s)."
+        }
+
+        $aplicar = {
+            if ($Script:IdxOcupado) { return }
+            $alvos = @($lvIdx.CheckedItems)
+            if ($alvos.Count -eq 0) {
+                [System.Windows.Forms.MessageBox]::Show("Marque os índices que deseja criar.", "Aplicar Índices", "OK", "Information") | Out-Null
+                return
+            }
+            $resp = [System.Windows.Forms.MessageBox]::Show(
+                "Serão criados $($alvos.Count) índice(s) no banco $($cmbIdxBanco.Text).`r`n`r`nIsso é igual executar os CREATE INDEX no SQL Server Management Studio e pode levar alguns minutos em banco grande.`r`n`r`nContinuar?",
+                "Confirmar criação de índices", "YesNo", "Warning")
+            if ($resp -ne [System.Windows.Forms.DialogResult]::Yes) { return }
+
+            & $setOcupado $true
+            $cn = $null
+            $ok = 0; $falhas = 0
+            try {
+                $cn = New-Object System.Data.SqlClient.SqlConnection((& $getConexao "master" 15))
+                Wait-SqlTarefa $cn.OpenAsync()
+                $n = 0
+                foreach ($it in $alvos) {
+                    $n++
+                    $sql = "$($it.Tag.Sql)".Trim()
+                    $it.SubItems[5].Text = "Criando..."
+                    $lblIdxStatus.ForeColor = $Script:UiAmarelo
+                    $lblIdxStatus.Text = "Criando índice $n de $($alvos.Count)..."
+                    [System.Windows.Forms.Application]::DoEvents()
+                    try {
+                        if (-not $sql.StartsWith("CREATE INDEX [missing_index_")) { throw "Comando não parece ser uma sugestão de índice gerada pelo SQL Server." }
+                        $cmd = $cn.CreateCommand()
+                        $cmd.CommandTimeout = 0
+                        $cmd.CommandText = $sql
+                        $t = $cmd.ExecuteNonQueryAsync()
+                        Wait-SqlTarefa $t -IntervaloMs 500 -AoEsperar {
+                            $lblIdxStatus.Text = "Criando índice $n de $($alvos.Count)..."
+                        }
+                        $it.SubItems[5].Text = "Criado"
+                        $it.Checked = $false
+                        $ok++
+                    }
+                    catch {
+                        $it.SubItems[5].Text = "Erro"
+                        $falhas++
+                        Log-Message "ERRO" "Índices: falha ao criar índice - $($_.Exception.Message)"
+                    }
+                }
+                $lblIdxStatus.ForeColor = if ($falhas -gt 0) { $Script:UiAmarelo } else { $Script:UiVerde }
+                $lblIdxStatus.Text = "Finalizado: $ok criado(s), $falhas falha(s). Clique em BUSCAR SUGESTÕES para atualizar a lista."
+                Log-Message "SUCESSO" "Índices: finalizado no banco $($cmbIdxBanco.Text): $ok criado(s), $falhas falha(s)"
+            }
+            catch {
+                $lblIdxStatus.ForeColor = $Script:UiVermelho
+                $lblIdxStatus.Text = "Falha ao aplicar índices: $($_.Exception.Message)"
+                Log-Message "ERRO" "Índices: falha geral - $($_.Exception.Message)"
+            }
+            finally {
+                if ($cn) { try { $cn.Close() } catch {} }
+                & $setOcupado $false
+            }
+        }
+
+        $lvIdx.Add_SelectedIndexChanged({
+            if ($lvIdx.SelectedItems.Count -gt 0) { $txtIdxSql.Text = "$($lvIdx.SelectedItems[0].Tag.Sql)" }
+        })
+        $btnIdxTestar.Add_Click($testar)
+        $btnIdxBuscar.Add_Click($buscar)
+        $btnIdxTop.Add_Click({
+            for ($i = 0; $i -lt $lvIdx.Items.Count; $i++) { $lvIdx.Items[$i].Checked = ($i -lt 10) }
+        })
+        $btnIdxLimpar.Add_Click({ foreach ($it in $lvIdx.Items) { $it.Checked = $false } })
+        $btnIdxCopiar.Add_Click($copiar)
+        $btnIdxAplicar.Add_Click($aplicar)
+        $txtIdxSenha.Add_KeyDown({
+            param($s, $e)
+            if ($e.KeyCode -eq [System.Windows.Forms.Keys]::Enter) { $e.SuppressKeyPress = $true; & $testar }
+        })
+        $f.Add_FormClosing({ $Script:IdxForm = $null })
+
+        Log-Message "INFO" "Índices: janela aberta"
+        [void]$f.ShowDialog($Script:MainForm)
+    }
+    catch {
+        Log-Message "ERRO" "Falha na janela de índices: $_"
+        [System.Windows.Forms.MessageBox]::Show("Falha ao abrir a janela de índices:`r`n`r`n$($_.Exception.Message)", "Índices do Banco", "OK", "Error") | Out-Null
+    }
+}
+
 # -----------------------------------------------------------------------------
 # RELOGIO DO WINDOWS
 # Relogio errado faz a SEFAZ rejeitar NFC-e/SAT e quebra validacao de
@@ -13715,6 +14071,16 @@ Format-SupportBtn $bBkp $colorSql
 $Script:ToolTip.SetToolTip($bBkp, "Faz o backup completo do banco pelo próprio SQL Server, com o banco online: sem parar o serviço e sem desanexar. Confere o arquivo, pode compactar em .zip e salva em Arquivos Xmenu\Backup NetWebPDV. Rode no servidor.")
 $bBkp.Add_Click({ Show-BackupBanco })
 [void]$tbl.Controls.Add($bBkp)
+
+$bIdx = New-Object System.Windows.Forms.Button; $bIdx.Height = 50; $bIdx.Dock = 'Top'
+$bIdx.Text = "Índices do Banco (Sugestões)"
+$bIdx.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
+$bIdx.Cursor = 'Hand'
+Format-SupportBtn $bIdx $colorSql
+$Script:ToolTip.SetToolTip($bIdx, "Consulta as sugestões de índices do SQL Server, permite copiar o SQL e cria somente os índices marcados após confirmação.")
+$bIdx.Add_Click({ Show-SqlIndexAdvisor })
+[void]$tbl.Controls.Add($bIdx)
+Add-SupportSpacer
 
 # --- DIAGNÓSTICOS (VERDE) ---
 $bInfo = New-Object System.Windows.Forms.Button; $bInfo.Height = 50; $bInfo.Dock = 'Top'
