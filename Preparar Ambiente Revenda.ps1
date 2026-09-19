@@ -6880,7 +6880,7 @@ function Show-SqlDbDiagnostic {
         }
 
         New-ToolLabel $f "DIAGNÓSTICO DO BANCO" 20 14 12 -Negrito | Out-Null
-        New-ToolLabel $f "Leitura segura: estado, tamanho, backup, conexões, bloqueios, log, estatísticas e sugestões de índice." 20 42 9 -Cor $Script:UiSuave -W 940 | Out-Null
+        New-ToolLabel $f "Mostra o que importa no suporte: tamanho, saúde, travamentos, espaço livre e se há índices para melhorar velocidade." 20 42 9 -Cor $Script:UiSuave -W 940 | Out-Null
 
         $cardConn = New-Object System.Windows.Forms.Panel
         $cardConn.Location = New-Object System.Drawing.Point(20, 70)
@@ -6930,7 +6930,7 @@ function Show-SqlDbDiagnostic {
         [void]$lvDiag.Columns.Add("Item", 185)
         [void]$lvDiag.Columns.Add("Status", 95)
         [void]$lvDiag.Columns.Add("Detalhe", 380)
-        [void]$lvDiag.Columns.Add("Recomendação", 260)
+        [void]$lvDiag.Columns.Add("O que fazer", 260)
         [void]$f.Controls.Add($lvDiag)
 
         $txtDiagRel = New-Object System.Windows.Forms.TextBox
@@ -6948,7 +6948,7 @@ function Show-SqlDbDiagnostic {
 
         $btnDiagRodar = New-ToolButton $f "DIAGNOSTICAR" 20 582 150 34 $Script:UiAzul $null "Executa diagnóstico de leitura no banco selecionado"
         $btnDiagRodar.Enabled = $false
-        $btnDiagCheck = New-ToolButton $f "VERIFICAR INTEGRIDADE" 180 582 190 34 $Script:UiCinza $null "Roda DBCC CHECKDB com NO_INFOMSGS; pode demorar em banco grande"
+        $btnDiagCheck = New-ToolButton $f "TESTE PROFUNDO" 180 582 190 34 $Script:UiCinza $null "Verifica integridade do banco; use só quando houver suspeita de erro ou corrupção"
         $btnDiagCheck.Enabled = $false
         $btnDiagCopiar = New-ToolButton $f "COPIAR RELATÓRIO" 380 582 160 34 $Script:UiCinza $null "Copia o relatório do diagnóstico"
         $btnDiagAtualizar = New-ToolButton $f "ATUALIZAR" 550 582 120 34 $Script:UiCinza $null "Roda o diagnóstico novamente"
@@ -7055,7 +7055,6 @@ function Show-SqlDbDiagnostic {
                 $lvDiag.Items.Clear()
                 $txtDiagRel.Clear()
                 $banco = "$($cmbDiagBanco.Text)"
-                $nomeSql = & $sqlName $banco
                 $lblDiagStatus.ForeColor = $Script:UiAmarelo
                 $lblDiagStatus.Text = "Diagnosticando $banco..."
                 $cn = New-Object System.Data.SqlClient.SqlConnection((& $getConexao "master" 15))
@@ -7063,19 +7062,17 @@ function Show-SqlDbDiagnostic {
 
                 $cmdInfo = $cn.CreateCommand()
                 $cmdInfo.CommandTimeout = 60
-                $cmdInfo.CommandText = "SELECT name, state_desc, recovery_model_desc, compatibility_level, create_date, log_reuse_wait_desc FROM sys.databases WHERE name = @b"
+                $cmdInfo.CommandText = "SELECT name, state_desc FROM sys.databases WHERE name = @b"
                 [void]$cmdInfo.Parameters.AddWithValue("@b", $banco)
                 $rdInfo = $cmdInfo.ExecuteReader()
-                $estado = ""; $recovery = ""; $compat = ""; $criado = ""; $logWait = ""
+                $estado = ""
                 try {
                     if ($rdInfo.Read()) {
-                        $estado = "$($rdInfo['state_desc'])"; $recovery = "$($rdInfo['recovery_model_desc'])"; $compat = "$($rdInfo['compatibility_level'])"
-                        $criado = ([datetime]$rdInfo['create_date']).ToString("dd/MM/yyyy")
-                        $logWait = "$($rdInfo['log_reuse_wait_desc'])"
+                        $estado = "$($rdInfo['state_desc'])"
                     }
                 }
                 finally { $rdInfo.Close() }
-                $linhasRel.Add((& $addDiag "Estado do banco" ($(if ($estado -eq "ONLINE") { "OK" } else { "ERRO" })) "$estado | Recovery: $recovery | Compat: $compat | Criado em $criado" ($(if ($estado -eq "ONLINE") { "Banco disponível." } else { "Verificar estado antes de usar o PDV." }))))
+                $linhasRel.Add((& $addDiag "Situação do banco" ($(if ($estado -eq "ONLINE") { "OK" } else { "ERRO" })) ($(if ($estado -eq "ONLINE") { "Online e respondendo" } else { "Estado atual: $estado" })) ($(if ($estado -eq "ONLINE") { "Pode seguir o atendimento." } else { "Verificar o banco antes de usar o PDV." }))))
 
                 $cmdTam = $cn.CreateCommand()
                 $cmdTam.CommandTimeout = 60
@@ -7090,56 +7087,16 @@ function Show-SqlDbDiagnostic {
                     }
                 }
                 finally { $rdTam.Close() }
-                $linhasRel.Add((& $addDiag "Tamanho MDF/LDF" "INFO" ("Dados: {0:N0} MB | Log: {1:N0} MB" -f $dataMb, $logMb) "Log muito maior que dados merece atenção."))
-                $statusLogWait = if ($logWait -eq "NOTHING") { "OK" } else { "ATENÇÃO" }
-                $linhasRel.Add((& $addDiag "Reuso do log" $statusLogWait $logWait ($(if ($logWait -eq "NOTHING") { "Sem bloqueio aparente para reutilizar log." } else { "Verificar backup/log/transações abertas." }))))
+                $limiteLogMb = [Math]::Max(2048.0, ($dataMb * 0.75))
+                $statusTam = if (($dataMb -le 5120) -and ($logMb -le $limiteLogMb)) { "OK" } else { "ATENÇÃO" }
+                $acaoTam = if ($statusTam -eq "OK") { "Tamanho normal para atendimento." } else { "Banco ou log grande: analisar antes de manutenção." }
+                $linhasRel.Add((& $addDiag "Tamanho do banco" $statusTam ("Banco: {0:N0} MB | Log: {1:N0} MB" -f $dataMb, $logMb) $acaoTam))
 
-                $ultimoBackup = & $execScalar $cn "SELECT MAX(backup_finish_date) FROM msdb.dbo.backupset WHERE database_name = @b AND type = 'D'" $banco
-                if ($null -eq $ultimoBackup) {
-                    $linhasRel.Add((& $addDiag "Último backup" "ATENÇÃO" "Nenhum backup completo encontrado no histórico do SQL." "Faça backup antes de manutenção."))
-                }
-                else {
-                    $dias = [int]((Get-Date) - [datetime]$ultimoBackup).TotalDays
-                    $st = if ($dias -le 1) { "OK" } elseif ($dias -le 7) { "ATENÇÃO" } else { "CRÍTICO" }
-                    $linhasRel.Add((& $addDiag "Último backup" $st (([datetime]$ultimoBackup).ToString("dd/MM/yyyy HH:mm") + " ($dias dia(s))") "Backup recente reduz risco em manutenção."))
-                }
-
-                $conexoes = & $execScalar $cn "SELECT COUNT(*) FROM sys.sysprocesses WHERE dbid = DB_ID(@b)" $banco
-                $ativas = & $execScalar $cn "SELECT COUNT(*) FROM sys.dm_exec_requests WHERE database_id = DB_ID(@b)" $banco
                 $bloq = & $execScalar $cn "SELECT COUNT(*) FROM sys.sysprocesses WHERE dbid = DB_ID(@b) AND blocked <> 0" $banco
-                $linhasRel.Add((& $addDiag "Conexões abertas" "INFO" "$conexoes conexão(ões), $ativas requisição(ões) ativa(s)" "Muitas conexões podem indicar PDVs presos."))
-                $linhasRel.Add((& $addDiag "Bloqueios agora" ($(if ([int]$bloq -eq 0) { "OK" } else { "ATENÇÃO" })) "$bloq sessão(ões) bloqueada(s)" ($(if ([int]$bloq -eq 0) { "Sem travamento visível agora." } else { "Verificar sessões e comandos em execução." }))))
-
-                $cmdLog = $cn.CreateCommand()
-                $cmdLog.CommandTimeout = 60
-                $cmdLog.CommandText = "DBCC SQLPERF(LOGSPACE)"
-                $dtLog = New-Object System.Data.DataTable
-                $adLog = New-Object System.Data.SqlClient.SqlDataAdapter $cmdLog
-                [void]$adLog.Fill($dtLog)
-                $linhaLog = @($dtLog.Rows | Where-Object { "$($_['Database Name'])" -ieq $banco } | Select-Object -First 1)
-                if ($linhaLog.Count -gt 0) {
-                    $pctLog = [double]$linhaLog[0]['Log Space Used (%)']
-                    $stLog = if ($pctLog -lt 70) { "OK" } elseif ($pctLog -lt 90) { "ATENÇÃO" } else { "CRÍTICO" }
-                    $linhasRel.Add((& $addDiag "Uso do log" $stLog ("{0:N1}% usado" -f $pctLog) "Se estiver alto, investigar transações abertas e espaço em disco."))
-                }
+                $linhasRel.Add((& $addDiag "Travamentos agora" ($(if ([int]$bloq -eq 0) { "OK" } else { "ATENÇÃO" })) ($(if ([int]$bloq -eq 0) { "Nenhum travamento detectado" } else { "$bloq sessão(ões) travada(s)" })) ($(if ([int]$bloq -eq 0) { "Pode seguir o atendimento." } else { "Verificar sessões antes de manutenção." }))))
 
                 $miss = & $execScalar $cn "SELECT COUNT(*) FROM sys.dm_db_missing_index_details WHERE database_id = DB_ID(@b)" $banco
-                $linhasRel.Add((& $addDiag "Índices sugeridos" ($(if ([int]$miss -eq 0) { "OK" } else { "ATENÇÃO" })) "$miss sugestão(ões) no cache do SQL" "Use Índices do Banco para revisar/aplicar."))
-
-                $statsAntigas = & $execScalar $cn ("USE " + $nomeSql + "; SELECT COUNT(*) FROM sys.stats s JOIN sys.objects o ON o.object_id = s.object_id WHERE o.type = 'U' AND (STATS_DATE(s.object_id, s.stats_id) IS NULL OR STATS_DATE(s.object_id, s.stats_id) < DATEADD(day,-30,GETDATE()))") $null
-                $linhasRel.Add((& $addDiag "Estatísticas antigas" ($(if ([int]$statsAntigas -eq 0) { "OK" } else { "ATENÇÃO" })) "$statsAntigas estatística(s) sem atualização recente" "Estatísticas antigas podem causar lentidão em consultas."))
-
-                $tabelas = & $execScalar $cn ("USE " + $nomeSql + "; SELECT COUNT(*) FROM sys.tables WHERE is_ms_shipped = 0") $null
-                $linhasRel.Add((& $addDiag "Tabelas do sistema" "INFO" "$tabelas tabela(s) de usuário" "Informação geral do banco."))
-
-                $cmdTop = $cn.CreateCommand()
-                $cmdTop.CommandTimeout = 60
-                $cmdTop.CommandText = "USE " + $nomeSql + "; SELECT TOP 5 t.name, SUM(CASE WHEN p.index_id IN (0,1) THEN p.rows ELSE 0 END) AS linhas FROM sys.partitions p JOIN sys.tables t ON t.object_id = p.object_id GROUP BY t.name ORDER BY linhas DESC"
-                $rdTop = $cmdTop.ExecuteReader()
-                $maiores = @()
-                try { while ($rdTop.Read()) { $maiores += ("{0} ({1:N0})" -f "$($rdTop['name'])", [long]$rdTop['linhas']) } }
-                finally { $rdTop.Close() }
-                if ($maiores.Count -gt 0) { $linhasRel.Add((& $addDiag "Maiores tabelas" "INFO" ($maiores -join "; ") "Ajuda a entender onde o banco pesa mais.")) }
+                $linhasRel.Add((& $addDiag "Melhorar velocidade" ($(if ([int]$miss -eq 0) { "OK" } else { "ATENÇÃO" })) ($(if ([int]$miss -eq 0) { "Nenhuma sugestão de índice agora" } else { "$miss sugestão(ões) de índice encontradas" })) ($(if ([int]$miss -eq 0) { "Nada para aplicar agora." } else { "Abra Índices do Banco e aplique pelo Preparador." }))))
 
                 try {
                     $maquinaSql = & $execScalar $cn "SELECT CAST(SERVERPROPERTY('MachineName') AS nvarchar(128))" $null
@@ -7150,7 +7107,7 @@ function Show-SqlDbDiagnostic {
                             $di = New-Object System.IO.DriveInfo($raiz)
                             $livreGb = $di.AvailableFreeSpace / 1GB
                             $stDisco = if ($livreGb -ge 10) { "OK" } elseif ($livreGb -ge 5) { "ATENÇÃO" } else { "CRÍTICO" }
-                            $linhasRel.Add((& $addDiag "Espaço em disco" $stDisco ("{0:N1} GB livres em {1}" -f $livreGb, $raiz.TrimEnd('\')) "Pouco espaço pode parar venda, backup e crescimento do banco."))
+                            $linhasRel.Add((& $addDiag "Espaço livre" $stDisco ("{0:N1} GB livres em {1}" -f $livreGb, $raiz.TrimEnd('\')) "Pouco espaço pode parar venda, backup e crescimento do banco."))
                         }
                     }
                 }
@@ -7174,32 +7131,32 @@ function Show-SqlDbDiagnostic {
 
         $checkdb = {
             if ($Script:DbDiagOcupado -or "$($cmbDiagBanco.Text)" -eq "") { return }
-            $resp = [System.Windows.Forms.MessageBox]::Show("A verificação de integridade é somente leitura, mas pode demorar em banco grande.`r`n`r`nExecutar agora?", "Verificar Integridade", "YesNo", "Warning")
+            $resp = [System.Windows.Forms.MessageBox]::Show("Esse teste procura erro interno no banco. Ele não altera dados, mas pode demorar em banco grande.`r`n`r`nExecutar agora?", "Teste Profundo do Banco", "YesNo", "Warning")
             if ($resp -ne [System.Windows.Forms.DialogResult]::Yes) { return }
             & $setOcupado $true
             $cn = $null
             try {
                 $banco = "$($cmbDiagBanco.Text)"
                 $lblDiagStatus.ForeColor = $Script:UiAmarelo
-                $lblDiagStatus.Text = "Executando DBCC CHECKDB em $banco..."
+                $lblDiagStatus.Text = "Executando teste profundo em $banco..."
                 $cn = New-Object System.Data.SqlClient.SqlConnection((& $getConexao "master" 15))
                 Wait-SqlTarefa $cn.OpenAsync()
                 $cmd = $cn.CreateCommand()
                 $cmd.CommandTimeout = 0
                 $cmd.CommandText = "DBCC CHECKDB(" + (& $sqlName $banco) + ") WITH NO_INFOMSGS"
                 $t = $cmd.ExecuteNonQueryAsync()
-                Wait-SqlTarefa $t -IntervaloMs 700 -AoEsperar { $lblDiagStatus.Text = "Verificando integridade de $banco..." }
-                [void](& $addDiag "Integridade CHECKDB" "OK" "DBCC CHECKDB terminou sem erro." "Banco não retornou erro de integridade.")
-                $txtDiagRel.Text += "`r`nIntegridade CHECKDB: OK - sem erro."
+                Wait-SqlTarefa $t -IntervaloMs 700 -AoEsperar { $lblDiagStatus.Text = "Rodando teste profundo em $banco..." }
+                [void](& $addDiag "Teste profundo" "OK" "Nenhum erro interno encontrado." "Banco passou no teste profundo.")
+                $txtDiagRel.Text += "`r`nTeste profundo: OK - sem erro."
                 $lblDiagStatus.ForeColor = $Script:UiVerde
-                $lblDiagStatus.Text = "Integridade OK."
+                $lblDiagStatus.Text = "Teste profundo OK."
                 Log-Message "SUCESSO" "Diagnóstico banco: CHECKDB OK em $banco"
             }
             catch {
-                [void](& $addDiag "Integridade CHECKDB" "CRÍTICO" "$($_.Exception.Message)" "Registrar e avaliar restauração/reparo com cuidado.")
-                $txtDiagRel.Text += "`r`nIntegridade CHECKDB: ERRO - $($_.Exception.Message)"
+                [void](& $addDiag "Teste profundo" "CRÍTICO" "$($_.Exception.Message)" "Registrar e avaliar restauração/reparo com cuidado.")
+                $txtDiagRel.Text += "`r`nTeste profundo: ERRO - $($_.Exception.Message)"
                 $lblDiagStatus.ForeColor = $Script:UiVermelho
-                $lblDiagStatus.Text = "CHECKDB retornou erro."
+                $lblDiagStatus.Text = "Teste profundo retornou erro."
                 Log-Message "ERRO" "Diagnóstico banco: CHECKDB falhou - $($_.Exception.Message)"
             }
             finally {
