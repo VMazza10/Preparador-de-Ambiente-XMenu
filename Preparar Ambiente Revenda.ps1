@@ -14031,7 +14031,7 @@ $obterInfoCabecalho = {
     if ($Largura -lt 430) {
         $cols = 2
         $permitidos = @('Host', 'IP', 'RAM')
-        $incluiDisco = $false
+        $incluiDisco = $true
     }
     elseif ($Largura -lt 620) {
         $cols = 2
