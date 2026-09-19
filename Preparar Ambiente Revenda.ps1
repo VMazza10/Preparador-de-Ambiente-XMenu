@@ -1,6 +1,6 @@
 ﻿# =============================================================================
 # PREPARADOR XMENU - VERSAO REVENDA
-# Baseado na v5.16
+# Baseado na v5.25
 # Alteracoes Revenda:
 #   - Wallpaper: fundo_revenda.png
 #   - Removido: Atalhos de Suporte e Pasta Netcontroll
@@ -3435,6 +3435,7 @@ function Show-XmlDownloader {
                 $cmd = $cn.CreateCommand()
                 $cmd.CommandTimeout = 30
                 $cmd.CommandText = "SELECT @@VERSION AS versao, DB_NAME() AS banco"
+                Log-SqlBancoComando "XMLs NFC-e" $cmd.CommandText "teste de conexão"
                 $rd = & $executarLeitor $cmd
                 if ($rd -is [System.Array]) { $rd = $rd[0] }
                 $versao = ""; $banco = ""
@@ -3447,6 +3448,7 @@ function Show-XmlDownloader {
                 $cmd2 = $cn.CreateCommand()
                 $cmd2.CommandTimeout = 30
                 $cmd2.CommandText = "SELECT IDParceiro, COUNT(*) AS notas FROM NFCeTokenID GROUP BY IDParceiro ORDER BY notas DESC"
+                Log-SqlBancoComando "XMLs NFC-e" $cmd2.CommandText "lista de parceiros"
                 $rd2 = & $executarLeitor $cmd2
                 if ($rd2 -is [System.Array]) { $rd2 = $rd2[0] }
                 $cmbParceiro.Items.Clear()
@@ -3914,6 +3916,7 @@ function Show-XmlDownloader {
                 & $setStatus "Consultando o banco..." $Script:UiAmarelo
                 & $mostraCarregando "Consultando o banco..."
                 $cn = & $abrirConexao
+                $Script:XmlLogouSqlBusca = $false
 
                 $sb = & $sqlBase
                 $cteLogs = $sb.CteLogs; $colunas = $sb.Colunas; $juncao = $sb.Juncao
@@ -3950,6 +3953,10 @@ function Show-XmlDownloader {
                         $cmd = $cn.CreateCommand()
                         $cmd.CommandTimeout = 120
                         $cmd.CommandText = $sql
+                        if (-not $Script:XmlLogouSqlBusca) {
+                            Log-SqlBancoComando "XMLs NFC-e" $sql "modo=série; parceiro=$parceiro; série=$serie; bloco=$($bloco.Count)"
+                            $Script:XmlLogouSqlBusca = $true
+                        }
                         $par = $cmd.Parameters.Add("@parceiro", [System.Data.SqlDbType]::BigInt); $par.Value = $parceiro
                         $par = $cmd.Parameters.Add("@serie", [System.Data.SqlDbType]::Int); $par.Value = $serie
                         & $addServidor $cmd
@@ -3984,6 +3991,7 @@ function Show-XmlDownloader {
                             $cmdB = $cn.CreateCommand()
                             $cmdB.CommandTimeout = 120
                             $cmdB.CommandText = $sqlB
+                            Log-SqlBancoComando "XMLs NFC-e" $sqlB "modo=série plano B; parceiro=$parceiro; série=$serie; bloco=$($bloco.Count)"
                             $par = $cmdB.Parameters.Add("@parceiro", [System.Data.SqlDbType]::BigInt); $par.Value = $parceiro
                             $par = $cmdB.Parameters.Add("@serie", [System.Data.SqlDbType]::Int); $par.Value = $serie
                             & $addServidor $cmdB
@@ -4190,6 +4198,10 @@ function Show-XmlDownloader {
                         "AND (@serie IS NULL OR g.SerieTokenID = @serie)" + $sb.FiltroG + ") SELECT TOP (@pagina) " + $colunas +
                         " " + $juncao + " WHERE " + $filtroPeriodo + $ordemPagina
                         $cmd = & $novoCmdPeriodo $sql
+                        if (-not $Script:XmlLogouSqlBusca) {
+                            Log-SqlBancoComando "XMLs NFC-e" $sql "modo=período; parceiro=$parceiro; total=$totalPeriodo"
+                            $Script:XmlLogouSqlBusca = $true
+                        }
                         $par = $cmd.Parameters.Add("@pagina", [System.Data.SqlDbType]::Int); $par.Value = $pagina
                         $par = $cmd.Parameters.Add("@ultSerie", [System.Data.SqlDbType]::Int); $par.Value = $ultSerie
                         $par = $cmd.Parameters.Add("@ultId", [System.Data.SqlDbType]::BigInt); $par.Value = $ultId
@@ -4258,6 +4270,10 @@ function Show-XmlDownloader {
                         $cmd = $cn.CreateCommand()
                         $cmd.CommandTimeout = 120
                         $cmd.CommandText = $sql
+                        if (-not $Script:XmlLogouSqlBusca) {
+                            Log-SqlBancoComando "XMLs NFC-e" $sql "modo=pedido; parceiro=$parceiro; bloco=$($bloco.Count)"
+                            $Script:XmlLogouSqlBusca = $true
+                        }
                         & $addServidor $cmd
                         $par = $cmd.Parameters.Add("@parceiro", [System.Data.SqlDbType]::BigInt); $par.Value = $parceiro
                         $par = $cmd.Parameters.Add("@dia", [System.Data.SqlDbType]::DateTime)
@@ -4311,6 +4327,10 @@ function Show-XmlDownloader {
                         $cmd = $cn.CreateCommand()
                         $cmd.CommandTimeout = 120
                         $cmd.CommandText = $sql
+                        if (-not $Script:XmlLogouSqlBusca) {
+                            Log-SqlBancoComando "XMLs NFC-e" $sql "modo=chave; bloco=$($bloco.Count)"
+                            $Script:XmlLogouSqlBusca = $true
+                        }
                         for ($i = 0; $i -lt $bloco.Count; $i++) {
                             $par = $cmd.Parameters.Add("@k$i", [System.Data.SqlDbType]::VarChar, 44)
                             $par.Value = [string]$bloco[$i]
@@ -5676,6 +5696,21 @@ function Save-SqlUsuario {
     catch {}
 }
 
+function Format-SqlLogTexto {
+    param([string]$Sql)
+    $texto = "$Sql" -replace "\s+", " "
+    $texto = $texto.Trim()
+    if ($texto.Length -gt 1200) { $texto = $texto.Substring(0, 1200) + " ..." }
+    return $texto
+}
+
+function Log-SqlBancoComando {
+    param([string]$Area, [string]$Sql, [string]$Detalhe = "")
+    $msg = "${Area}: SQL -> $(Format-SqlLogTexto $Sql)"
+    if ("$Detalhe".Trim() -ne "") { $msg += " | $Detalhe" }
+    Log-Message "INFO" $msg
+}
+
 function New-SqlTextoConexao {
     # Texto de conexao com o usuario informado (sa por padrao). Servidor remoto vai
     # forcado por TCP: sem protocolo, quando o TCP falha o SqlClient ainda tenta Named
@@ -6017,6 +6052,7 @@ function Invoke-BackupBanco {
             [void]$cmdVigia.Parameters.AddWithValue("@s", $spid)
             if (& $bkpParar) { $bkpEstado.PediuParar = $true; throw "Backup cancelado." }
             & $bkpAvisa $Etapa 0
+            Log-SqlBancoComando "Backup banco" $Sql "arquivo=$Caminho"
             $tarefaLonga = $cmdLongo.ExecuteNonQueryAsync()
             Wait-SqlTarefa $tarefaLonga -IntervaloMs 500 -AoEsperar {
                 if (-not $bkpEstado.PediuParar -and (& $bkpParar)) {
@@ -6119,6 +6155,634 @@ function Invoke-BackupBanco {
         $res.Duracao = $bkpRelogio.Elapsed
     }
     return $res
+}
+
+function Show-DbSwapNetWebPdv {
+    try {
+        if ($null -ne $Script:DbSwapForm -and -not $Script:DbSwapForm.IsDisposed) {
+            $Script:DbSwapForm.Activate(); return
+        }
+
+        $Script:DbSwapOcupado = $false
+        $Script:DbSwapAtual = $null
+        $Script:DbSwapCandidatos = @()
+        $Script:DbSwapMdfZeroKb = 24320
+        $Script:DbSwapLdfZeroKb = 1792
+
+        $f = New-ToolForm "Trocar Banco NetWebPDV" 980 760
+        $f.MinimumSize = New-Object System.Drawing.Size(900, 720)
+        $Script:DbSwapForm = $f
+
+        $novoCampo = {
+            param($Pai, [int]$X, [int]$Y, [int]$W, [string]$Valor)
+            $t = New-Object System.Windows.Forms.TextBox
+            $t.Location = New-Object System.Drawing.Point($X, $Y)
+            $t.Size = New-Object System.Drawing.Size($W, 25)
+            $t.BackColor = [System.Drawing.Color]::FromArgb(20, 24, 34)
+            $t.ForeColor = $Script:UiTexto
+            $t.BorderStyle = 'FixedSingle'
+            $t.Font = New-Object System.Drawing.Font("Segoe UI", 9)
+            $t.Text = $Valor
+            [void]$Pai.Controls.Add($t)
+            return $t
+        }
+
+        New-ToolLabel $f "TROCAR BANCO NETWEBPDV" 20 14 12 -Negrito | Out-Null
+        New-ToolLabel $f "Localize a instalação, confira o banco novo e revise os alertas antes da troca." 20 42 9 -Cor $Script:UiSuave -W 920 | Out-Null
+
+        $cardConn = New-Object System.Windows.Forms.Panel
+        $cardConn.Location = New-Object System.Drawing.Point(20, 72)
+        $cardConn.Size = New-Object System.Drawing.Size(920, 104)
+        $cardConn.Anchor = 'Top,Left,Right'
+        $cardConn.BackColor = $Script:UiCartao
+        [void]$f.Controls.Add($cardConn)
+
+        New-ToolLabel $cardConn "1  CONEXÃO COM O SQL" 14 9 10 -Negrito | Out-Null
+        New-ToolLabel $cardConn "Servidor:" 14 41 9 -Cor $Script:UiSuave | Out-Null
+        $txtSrv = & $novoCampo $cardConn 72 38 150 "localhost"
+        New-ToolLabel $cardConn "Usuário:" 234 41 9 -Cor $Script:UiSuave | Out-Null
+        $cmbUsr = New-Object System.Windows.Forms.ComboBox
+        $cmbUsr.Location = New-Object System.Drawing.Point(288, 38)
+        $cmbUsr.Width = 72
+        $cmbUsr.DropDownStyle = 'DropDown'
+        $cmbUsr.FlatStyle = 'Flat'
+        $cmbUsr.BackColor = [System.Drawing.Color]::FromArgb(20, 24, 34)
+        $cmbUsr.ForeColor = $Script:UiTexto
+        foreach ($usr in $Script:SqlUsuariosPadrao) { [void]$cmbUsr.Items.Add($usr) }
+        $cmbUsr.Text = (Get-SqlUsuarioSalvo)
+        [void]$cardConn.Controls.Add($cmbUsr)
+        New-ToolLabel $cardConn "Senha:" 372 41 9 -Cor $Script:UiSuave | Out-Null
+        $txtSenha = & $novoCampo $cardConn 420 38 118 "netcontroll"
+        New-ToolLabel $cardConn "Banco:" 552 41 9 -Cor $Script:UiSuave | Out-Null
+        $txtBanco = & $novoCampo $cardConn 600 38 130 "NetWebPDV"
+        $btnLocalizar = New-ToolButton $cardConn "LOCALIZAR BANCOS" 746 69 158 28 $Script:UiAzul $null "Conecta no SQL, identifica o banco atual e procura a nova versão"
+        $btnLocalizar.Anchor = 'Top,Right'
+        $lblConn = New-ToolLabel $cardConn "Pronto para localizar o banco atual e as versões disponíveis." 14 76 9 -Cor $Script:UiSuave -W 630
+        $lblConn.AutoEllipsis = $true
+
+        $cardPastas = New-Object System.Windows.Forms.Panel
+        $cardPastas.Location = New-Object System.Drawing.Point(20, 188)
+        $cardPastas.Size = New-Object System.Drawing.Size(920, 104)
+        $cardPastas.Anchor = 'Top,Left,Right'
+        $cardPastas.BackColor = $Script:UiCartao
+        [void]$f.Controls.Add($cardPastas)
+        New-ToolLabel $cardPastas "2  LOCALIZAÇÃO DOS ARQUIVOS" 14 9 10 -Negrito | Out-Null
+        New-ToolLabel $cardPastas "Pasta NetControll:" 14 41 9 -Cor $Script:UiSuave | Out-Null
+        $txtRaiz = & $novoCampo $cardPastas 116 38 244 "C:\netcontroll"
+        New-ToolLabel $cardPastas "Procurar banco novo em:" 378 41 9 -Cor $Script:UiSuave | Out-Null
+        $txtNovaRaiz = & $novoCampo $cardPastas 520 38 384 "C:\netcontroll\concentrador\Versoes\UltimaVersao"
+        $txtNovaRaiz.Anchor = 'Top,Left,Right'
+        $lblAtual = New-ToolLabel $cardPastas "Banco atual: será identificado ao localizar." 14 75 9 -Cor $Script:UiSuave -W 890
+        $lblAtual.AutoEllipsis = $true
+
+        New-ToolLabel $f "3  ESCOLHA O BANCO NOVO" 20 309 10 -Negrito | Out-Null
+        $lblResumoCandidatos = New-ToolLabel $f "Nenhuma busca realizada" 690 310 9 -Cor $Script:UiSuave -W 250
+        $lblResumoCandidatos.TextAlign = 'MiddleRight'
+        $lblResumoCandidatos.Anchor = 'Top,Right'
+        $lv = New-Object System.Windows.Forms.ListView
+        $lv.Location = New-Object System.Drawing.Point(20, 334)
+        $lv.Size = New-Object System.Drawing.Size(920, 136)
+        $lv.Anchor = 'Top,Left,Right'
+        $lv.View = 'Details'
+        $lv.FullRowSelect = $true
+        $lv.GridLines = $true
+        $lv.HideSelection = $false
+        $lv.HeaderStyle = 'Nonclickable'
+        $lv.BackColor = [System.Drawing.Color]::FromArgb(12, 12, 25)
+        $lv.ForeColor = $Script:UiTexto
+        $lv.Font = New-Object System.Drawing.Font("Segoe UI", 9)
+        [void]$lv.Columns.Add("Situação", 150)
+        [void]$lv.Columns.Add("Data da versão", 130)
+        [void]$lv.Columns.Add("Banco (MDF)", 125)
+        [void]$lv.Columns.Add("Log (LDF)", 115)
+        [void]$lv.Columns.Add("Pasta encontrada", 380)
+        [void]$f.Controls.Add($lv)
+        $ajustarColunasBanco = {
+            param($Controle)
+            if ($null -eq $Controle -or $Controle -isnot [System.Windows.Forms.ListView]) { $Controle = $lv }
+            if ($Controle.Columns.Count -ge 5) {
+                $Controle.Columns[4].Width = [Math]::Max(200, ($Controle.ClientSize.Width - 590))
+                $Controle.Refresh()
+            }
+        }
+        $lv.Add_SizeChanged({ & $ajustarColunasBanco $this })
+        & $ajustarColunasBanco $lv
+        $itemInicial = New-Object System.Windows.Forms.ListViewItem("Aguardando busca")
+        [void]$itemInicial.SubItems.Add("Clique em Localizar bancos")
+        [void]$itemInicial.SubItems.Add("-")
+        [void]$itemInicial.SubItems.Add("-")
+        [void]$itemInicial.SubItems.Add("Nenhum arquivo foi alterado")
+        $itemInicial.ForeColor = $Script:UiSuave
+        [void]$lv.Items.Add($itemInicial)
+
+        $cardSelecionado = New-Object System.Windows.Forms.Panel
+        $cardSelecionado.Location = New-Object System.Drawing.Point(20, 482)
+        $cardSelecionado.Size = New-Object System.Drawing.Size(920, 58)
+        $cardSelecionado.Anchor = 'Top,Left,Right'
+        $cardSelecionado.BackColor = [System.Drawing.Color]::FromArgb(18, 45, 43)
+        [void]$f.Controls.Add($cardSelecionado)
+        New-ToolLabel $cardSelecionado "BANCO SELECIONADO" 14 8 8.5 -Negrito -Cor $Script:UiVerde | Out-Null
+        $lblSelecionado = New-ToolLabel $cardSelecionado "Selecione uma versão encontrada para ver os arquivos." 14 28 9 -Cor $Script:UiSuave -W 890
+        $lblSelecionado.AutoEllipsis = $true
+        $lblSelecionado.Anchor = 'Top,Left,Right'
+
+        New-ToolLabel $f "ACOMPANHAMENTO" 20 554 9 -Negrito | Out-Null
+        $txtLog = New-Object System.Windows.Forms.TextBox
+        $txtLog.Location = New-Object System.Drawing.Point(20, 578)
+        $txtLog.Size = New-Object System.Drawing.Size(920, 62)
+        $txtLog.Anchor = 'Top,Bottom,Left,Right'
+        $txtLog.Multiline = $true
+        $txtLog.ScrollBars = 'Vertical'
+        $txtLog.ReadOnly = $true
+        $txtLog.BackColor = [System.Drawing.Color]::FromArgb(20, 24, 34)
+        $txtLog.ForeColor = $Script:UiTexto
+        $txtLog.BorderStyle = 'FixedSingle'
+        $txtLog.Font = New-Object System.Drawing.Font("Consolas", 8.5)
+        [void]$f.Controls.Add($txtLog)
+
+        $lblStatus = New-ToolLabel $f "Nenhuma alteração será feita sem sua confirmação." 20 653 9 -Cor $Script:UiSuave -W 920
+        $lblStatus.Anchor = 'Bottom,Left,Right'
+        $lblStatus.AutoEllipsis = $true
+
+        $btnTrocar = New-ToolButton $f "TROCAR BANCO AGORA" 20 678 200 36 $Script:UiVermelho $null "Cria backup dos arquivos atuais e troca pelo banco selecionado"
+        $btnTrocar.Enabled = $false
+        $btnTrocar.Anchor = 'Bottom,Left'
+        $btnAtualizar = New-ToolButton $f "PROCURAR NOVAMENTE" 232 678 190 36 $Script:UiCinza $null "Atualiza a localização do banco atual e procura novamente"
+        $btnAtualizar.Anchor = 'Bottom,Left'
+        $btnFechar = New-ToolButton $f "FECHAR" 820 678 120 36 $Script:UiCinza { $f.Close() }
+        $btnFechar.Anchor = 'Bottom,Right'
+
+        $txtSrv.TabIndex = 0
+        $cmbUsr.TabIndex = 1
+        $txtSenha.TabIndex = 2
+        $txtBanco.TabIndex = 3
+        $btnLocalizar.TabIndex = 4
+        $txtRaiz.TabIndex = 5
+        $txtNovaRaiz.TabIndex = 6
+        $lv.TabIndex = 7
+        $btnTrocar.TabIndex = 8
+        $btnAtualizar.TabIndex = 9
+        $btnFechar.TabIndex = 10
+        $f.AcceptButton = $btnLocalizar
+        $f.CancelButton = $btnFechar
+
+        $addLog = {
+            param([string]$Texto)
+            $txtLog.AppendText("[$((Get-Date).ToString('HH:mm:ss'))] $Texto`r`n")
+            $txtLog.SelectionStart = $txtLog.Text.Length
+            $txtLog.ScrollToCaret()
+            [System.Windows.Forms.Application]::DoEvents()
+        }
+        $setOcupado = {
+            param([bool]$Ocupado)
+            $Script:DbSwapOcupado = $Ocupado
+            foreach ($ctl in @($btnLocalizar, $btnTrocar, $btnAtualizar, $btnFechar, $txtSrv, $cmbUsr, $txtSenha, $txtBanco, $txtRaiz, $txtNovaRaiz, $lv)) {
+                if ($ctl) { $ctl.Enabled = -not $Ocupado }
+            }
+            if (-not $Ocupado) { $btnTrocar.Enabled = ($lv.SelectedItems.Count -gt 0 -and $null -ne $Script:DbSwapAtual) }
+        }
+        $getConn = {
+            param([string]$Banco = "master", [int]$Timeout = 8)
+            return New-SqlTextoConexao -Servidor $txtSrv.Text -Usuario $cmbUsr.Text -Senha $txtSenha.Text -Banco $Banco -Timeout $Timeout
+        }
+        $sqlName = { param([string]$Nome) return "[" + $Nome.Replace("]", "]]") + "]" }
+        $sqlLit = { param([string]$Valor) return "N'" + "$Valor".Replace("'", "''") + "'" }
+        $grantPath = {
+            param([string]$Path)
+            if ("$Path".Trim() -eq "" -or -not (Test-Path -LiteralPath $Path)) { return }
+            try {
+                if ((Get-Item -LiteralPath $Path).PSIsContainer) {
+                    $args = @($Path, "/inheritance:e", "/grant", "*S-1-1-0:(OI)(CI)F", "/T", "/C")
+                }
+                else {
+                    $args = @($Path, "/inheritance:e", "/grant", "*S-1-1-0:F", "/C")
+                }
+                $out = & icacls @args 2>&1
+                & $addLog "Permissões liberadas: $Path"
+            }
+            catch { & $addLog "Aviso: não consegui liberar permissões em $Path - $($_.Exception.Message)" }
+        }
+        $execNonQuery = {
+            param($Conexao, [string]$Sql)
+            $cmd = $Conexao.CreateCommand()
+            $cmd.CommandTimeout = 0
+            $cmd.CommandText = $Sql
+            Log-SqlBancoComando "Trocar banco" $Sql
+            try { & $addLog ("SQL: " + (Format-SqlLogTexto $Sql)) } catch {}
+            [void]$cmd.ExecuteNonQuery()
+        }
+        $execScalarParam = {
+            param($Conexao, [string]$Sql, [string]$Valor)
+            $cmd = $Conexao.CreateCommand()
+            $cmd.CommandTimeout = 60
+            $cmd.CommandText = $Sql
+            if ($null -ne $Valor -and "$Valor" -ne "") { [void]$cmd.Parameters.AddWithValue("@v", $Valor) }
+            $r = $cmd.ExecuteScalar()
+            if ($r -is [System.DBNull]) { return $null }
+            return $r
+        }
+        $findCandidates = {
+            $raizBusca = "$($txtNovaRaiz.Text)".Trim()
+            $raizFallback = "$($txtRaiz.Text)".Trim()
+            $usouFallback = $false
+            if (-not (Test-Path -LiteralPath $raizBusca)) {
+                if (-not (Test-Path -LiteralPath $raizFallback)) { throw "Pasta do banco novo não existe: $raizBusca" }
+                & $addLog "Pasta padrão não encontrada. Procurando NetWebPDV.mdf dentro de $raizFallback..."
+                $raizBusca = $raizFallback
+                $usouFallback = $true
+            }
+            $arquivos = @(Get-ChildItem -LiteralPath $raizBusca -Recurse -File -Filter "*.mdf" -ErrorAction Stop |
+                Where-Object { $_.BaseName -ieq "NetWebPDV" })
+            if ($usouFallback) {
+                $prioritarios = @($arquivos | Where-Object { $_.FullName -match "\\UltimaVersao\\" })
+                if ($prioritarios.Count -gt 0) {
+                    $arquivos = $prioritarios
+                    & $addLog "Usando candidatos encontrados dentro de pastas UltimaVersao."
+                }
+            }
+            $lista = @()
+            foreach ($mdf in $arquivos) {
+                if ($Script:DbSwapAtual -and ([System.IO.Path]::GetFullPath($mdf.FullName) -ieq [System.IO.Path]::GetFullPath($Script:DbSwapAtual.Mdf))) { continue }
+                $ldf = Get-ChildItem -LiteralPath $mdf.DirectoryName -File -ErrorAction SilentlyContinue |
+                    Where-Object { $_.Extension -ieq ".ldf" -and ($_.BaseName -ieq "NetWebPDV_log" -or $_.BaseName -like "*log*") } |
+                    Sort-Object LastWriteTime -Descending | Select-Object -First 1
+                if ($ldf) {
+                    $dataBanco = @($mdf.LastWriteTime, $ldf.LastWriteTime) | Sort-Object -Descending | Select-Object -First 1
+                    $mdfKb = [math]::Round($mdf.Length / 1KB)
+                    $ldfKb = [math]::Round($ldf.Length / 1KB)
+                    $mdfOk = ([math]::Abs($mdfKb - $Script:DbSwapMdfZeroKb) -le 2048)
+                    $ldfOk = ([math]::Abs($ldfKb - $Script:DbSwapLdfZeroKb) -le 512)
+                    $perfil = if ($mdfOk -and $ldfOk) { "Banco zero provável" } else { "Conferir tamanho" }
+                    $lista += [pscustomobject]@{
+                        Mdf       = $mdf.FullName
+                        Ldf       = $ldf.FullName
+                        Pasta     = $mdf.DirectoryName
+                        Data      = $dataBanco
+                        MdfKb     = $mdfKb
+                        LdfKb     = $ldfKb
+                        Perfil    = $perfil
+                        Tamanho   = $mdf.Length + $ldf.Length
+                    }
+                }
+            }
+            return @($lista | Sort-Object Data -Descending)
+        }
+        $localizar = {
+            if ($Script:DbSwapOcupado) { return }
+            & $setOcupado $true
+            $cn = $null
+            try {
+                $txtLog.Clear()
+                $lv.Items.Clear()
+                $Script:DbSwapAtual = $null
+                $lblResumoCandidatos.ForeColor = $Script:UiSuave
+                $lblResumoCandidatos.Text = "Procurando..."
+                $lblSelecionado.ForeColor = $Script:UiSuave
+                $lblSelecionado.Text = "A busca está em andamento. Nenhum arquivo será alterado."
+                & $addLog "Conectando no SQL..."
+                $cn = New-Object System.Data.SqlClient.SqlConnection((& $getConn "master" 10))
+                Wait-SqlTarefa $cn.OpenAsync()
+                $maquinaSql = & $execScalarParam $cn "SELECT CAST(SERVERPROPERTY('MachineName') AS nvarchar(128))" $null
+                if (-not (Test-SqlLocal -MaquinaSql "$maquinaSql")) { throw "Esse SQL Server está na máquina $maquinaSql. Faça a troca no servidor do banco." }
+                $versaoSql = & $execScalarParam $cn "SELECT CAST(SERVERPROPERTY('ProductVersion') AS nvarchar(128))" $null
+                $majorSql = 0
+                if (-not [int]::TryParse((("$versaoSql" -split "\.")[0]), [ref]$majorSql)) { throw "Não foi possível identificar a versão do SQL Server: $versaoSql" }
+                if ($majorSql -lt 10) { throw "SQL Server $versaoSql não suportado. Essa troca foi preparada para SQL Server 2008 ou superior." }
+                & $addLog "SQL Server detectado: $versaoSql (compatível com SQL 2008/2019)."
+                $banco = "$($txtBanco.Text)".Trim()
+                if ($null -eq (& $execScalarParam $cn "SELECT DB_ID(@v)" $banco)) { throw "Banco $banco não encontrado nesse SQL Server." }
+                $cmd = $cn.CreateCommand()
+                $cmd.CommandTimeout = 60
+                $cmd.CommandText = "SELECT type_desc, physical_name FROM sys.master_files WHERE database_id = DB_ID(@b) ORDER BY type, file_id"
+                Log-SqlBancoComando "Trocar banco" $cmd.CommandText "banco=$banco"
+                & $addLog ("SQL: " + (Format-SqlLogTexto $cmd.CommandText))
+                [void]$cmd.Parameters.AddWithValue("@b", $banco)
+                $rd = $cmd.ExecuteReader()
+                $arquivosAtuais = @()
+                try {
+                    while ($rd.Read()) {
+                        $arquivosAtuais += [pscustomobject]@{ Tipo = "$($rd['type_desc'])"; Caminho = "$($rd['physical_name'])" }
+                    }
+                }
+                finally { $rd.Close() }
+                $dadosAtuais = @($arquivosAtuais | Where-Object { $_.Tipo -eq "ROWS" })
+                $logsAtuais = @($arquivosAtuais | Where-Object { $_.Tipo -eq "LOG" })
+                if ($dadosAtuais.Count -ne 1 -or $logsAtuais.Count -ne 1) {
+                    throw "Esse banco tem um layout diferente do padrão (arquivos de dados: $($dadosAtuais.Count), logs: $($logsAtuais.Count)). Faça manualmente pelo SQL para evitar risco."
+                }
+                $mdfAtual = $dadosAtuais[0].Caminho
+                $ldfAtual = $logsAtuais[0].Caminho
+                if (-not (Test-Path -LiteralPath $mdfAtual)) { throw "Arquivo MDF atual não encontrado: $mdfAtual" }
+                if (-not (Test-Path -LiteralPath $ldfAtual)) { throw "Arquivo LOG atual não encontrado: $ldfAtual" }
+                $Script:DbSwapAtual = [pscustomobject]@{ Banco = $banco; Mdf = $mdfAtual; Ldf = $ldfAtual }
+                $lblAtual.Text = "Banco atual: $mdfAtual  |  Log: $ldfAtual"
+                & $addLog "Banco atual: $mdfAtual"
+                & $addLog "Log atual: $ldfAtual"
+
+                $Script:DbSwapCandidatos = @(& $findCandidates)
+                foreach ($cand in $Script:DbSwapCandidatos) {
+                    $it = New-Object System.Windows.Forms.ListViewItem($cand.Perfil)
+                    [void]$it.SubItems.Add($cand.Data.ToString("dd/MM/yyyy HH:mm"))
+                    [void]$it.SubItems.Add(("{0:N0} KB" -f $cand.MdfKb))
+                    [void]$it.SubItems.Add(("{0:N0} KB" -f $cand.LdfKb))
+                    [void]$it.SubItems.Add($cand.Pasta)
+                    $it.ForeColor = if ($cand.Perfil -eq "Banco zero provável") { $Script:UiVerde } else { $Script:UiAmarelo }
+                    $it.Tag = $cand
+                    [void]$lv.Items.Add($it)
+                }
+                if ($lv.Items.Count -eq 0) { throw "Nenhum NetWebPDV.mdf com log foi encontrado em $($txtNovaRaiz.Text)." }
+                $lv.Items[0].Selected = $true
+                $lv.Focus()
+                Save-SqlUsuario "$($cmbUsr.Text)"
+                $lblConn.ForeColor = $Script:UiVerde
+                $lblConn.Text = "OK - banco atual localizado e $($lv.Items.Count) candidato(s) encontrados."
+                $lblResumoCandidatos.ForeColor = $Script:UiVerde
+                $lblResumoCandidatos.Text = "$($lv.Items.Count) versão(ões) encontrada(s)"
+                $lblStatus.ForeColor = $Script:UiVerde
+                $lblStatus.Text = "Confira a versão selecionada e clique em TROCAR BANCO AGORA."
+                & $addLog "Candidatos encontrados: $($lv.Items.Count)"
+            }
+            catch {
+                $lblConn.ForeColor = $Script:UiVermelho
+                $lblConn.Text = Get-BackupErroTexto -Erro $_.Exception -Pasta "$($txtRaiz.Text)"
+                $lblResumoCandidatos.ForeColor = $Script:UiVermelho
+                $lblResumoCandidatos.Text = "Nenhuma versão pronta"
+                if ($lv.Items.Count -eq 0) {
+                    $itemErro = New-Object System.Windows.Forms.ListViewItem("Não localizado")
+                    [void]$itemErro.SubItems.Add("Confira a conexão e as pastas")
+                    [void]$itemErro.SubItems.Add("-")
+                    [void]$itemErro.SubItems.Add("-")
+                    [void]$itemErro.SubItems.Add("Veja o acompanhamento abaixo")
+                    $itemErro.ForeColor = $Script:UiVermelho
+                    [void]$lv.Items.Add($itemErro)
+                }
+                $lblSelecionado.ForeColor = $Script:UiSuave
+                $lblSelecionado.Text = "Nenhum banco novo foi selecionado."
+                $lblStatus.ForeColor = $Script:UiVermelho
+                $lblStatus.Text = "Falha ao localizar: $($_.Exception.Message)"
+                & $addLog "ERRO: $($_.Exception.Message)"
+            }
+            finally {
+                if ($cn) { try { $cn.Close() } catch {} }
+                & $setOcupado $false
+            }
+        }
+        $closeBancoApps = {
+            & $addLog "Fechando programas que podem estar usando o banco..."
+            $fechados = @()
+            foreach ($nome in @("Concentrador", "NetStart", "NetServidor", "NetTerminal", "NetPrint", "NetPDV", "LinkXMenu", "XMenu")) {
+                Get-Process -Name $nome -ErrorAction SilentlyContinue | ForEach-Object {
+                    try {
+                        Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue
+                        $fechados += $_.ProcessName
+                    }
+                    catch {}
+                }
+            }
+            $fechados = @($fechados | Select-Object -Unique)
+            if ($fechados.Count -gt 0) { & $addLog "Programas fechados: $($fechados -join ', ')" }
+            else { & $addLog "Nenhum programa NetControll estava aberto." }
+            Start-Sleep -Milliseconds 500
+        }
+        $verificarOperacaoBanco = {
+            param([string]$Banco, [string]$Etapa = "verificação prévia")
+            $cnSeguranca = $null
+            try {
+                & $addLog "Segurança ($Etapa): conferindo movimentações e caixas abertos..."
+                $cnSeguranca = New-Object System.Data.SqlClient.SqlConnection((& $getConn $Banco 15))
+                Wait-SqlTarefa $cnSeguranca.OpenAsync()
+
+                $sqlEstrutura = @"
+SELECT
+    CASE WHEN OBJECT_ID(N'dbo.Movimentacao', N'U') IS NOT NULL
+           AND COL_LENGTH(N'dbo.Movimentacao', N'Finalizado') IS NOT NULL
+           AND COL_LENGTH(N'dbo.Movimentacao', N'Deletado') IS NOT NULL THEN 1 ELSE 0 END AS TemMovimentacao,
+    CASE WHEN OBJECT_ID(N'dbo.AberturaCaixa', N'U') IS NOT NULL
+           AND COL_LENGTH(N'dbo.AberturaCaixa', N'Situacao') IS NOT NULL
+           AND COL_LENGTH(N'dbo.AberturaCaixa', N'DataFechamento') IS NOT NULL THEN 1 ELSE 0 END AS TemAberturaCaixa;
+"@
+                Log-SqlBancoComando "Trocar banco" $sqlEstrutura "$Etapa; validação da estrutura"
+                $cmdEstrutura = $cnSeguranca.CreateCommand()
+                $cmdEstrutura.CommandTimeout = 30
+                $cmdEstrutura.CommandText = $sqlEstrutura
+                $rdEstrutura = $cmdEstrutura.ExecuteReader()
+                try {
+                    if (-not $rdEstrutura.Read()) { throw "O SQL Server não retornou a estrutura necessária para a validação." }
+                    $temMovimentacao = ([int]$rdEstrutura['TemMovimentacao'] -eq 1)
+                    $temAberturaCaixa = ([int]$rdEstrutura['TemAberturaCaixa'] -eq 1)
+                }
+                finally { $rdEstrutura.Close() }
+                if (-not $temMovimentacao -or -not $temAberturaCaixa) {
+                    throw "Não foi possível validar as tabelas Movimentacao e AberturaCaixa nesse banco. A troca foi bloqueada por segurança."
+                }
+
+                $sqlPendencias = @"
+SELECT
+    (SELECT COUNT_BIG(*) FROM dbo.Movimentacao WHERE Finalizado = 0 AND Deletado = 0) AS MovimentacoesAbertas,
+    (SELECT COUNT_BIG(*) FROM dbo.AberturaCaixa WHERE Situacao = 0 OR DataFechamento IS NULL) AS CaixasAbertos;
+"@
+                Log-SqlBancoComando "Trocar banco" $sqlPendencias "$Etapa; validação operacional"
+                $cmdPendencias = $cnSeguranca.CreateCommand()
+                $cmdPendencias.CommandTimeout = 60
+                $cmdPendencias.CommandText = $sqlPendencias
+                $rdPendencias = $cmdPendencias.ExecuteReader()
+                try {
+                    if (-not $rdPendencias.Read()) { throw "O SQL Server não retornou a situação operacional do banco." }
+                    $movimentacoesAbertas = [long]$rdPendencias['MovimentacoesAbertas']
+                    $caixasAbertos = [long]$rdPendencias['CaixasAbertos']
+                }
+                finally { $rdPendencias.Close() }
+
+                & $addLog "Segurança ($Etapa): movimentações abertas = $movimentacoesAbertas; caixas abertos = $caixasAbertos."
+                Log-Message "INFO" "Trocar banco: $Etapa - movimentações abertas=$movimentacoesAbertas; caixas abertos=$caixasAbertos"
+                return [pscustomobject]@{
+                    MovimentacoesAbertas = $movimentacoesAbertas
+                    CaixasAbertos        = $caixasAbertos
+                    Seguro               = ($movimentacoesAbertas -eq 0 -and $caixasAbertos -eq 0)
+                }
+            }
+            finally {
+                if ($cnSeguranca) { try { $cnSeguranca.Close() } catch {} }
+            }
+        }
+        $trocar = {
+            if ($Script:DbSwapOcupado -or $lv.SelectedItems.Count -eq 0 -or $null -eq $Script:DbSwapAtual) { return }
+            $cand = $lv.SelectedItems[0].Tag
+            $atual = $Script:DbSwapAtual
+            if ([System.IO.Path]::GetFullPath($cand.Mdf) -ieq [System.IO.Path]::GetFullPath($atual.Mdf)) {
+                [System.Windows.Forms.MessageBox]::Show("O banco novo é o mesmo arquivo do banco atual.", "Trocar Banco", "OK", "Warning") | Out-Null
+                return
+            }
+            $seguranca = $null
+            & $setOcupado $true
+            $lblStatus.ForeColor = $Script:UiAmarelo
+            $lblStatus.Text = "Verificando movimentações e fechamento do caixa..."
+            try {
+                $seguranca = & $verificarOperacaoBanco $atual.Banco "antes da confirmação"
+            }
+            catch {
+                $erroSeguranca = $_.Exception.Message
+                $lblStatus.ForeColor = $Script:UiVermelho
+                $lblStatus.Text = "Troca bloqueada: $erroSeguranca"
+                & $addLog "BLOQUEADO: $erroSeguranca"
+                [System.Windows.Forms.MessageBox]::Show("A troca do banco foi bloqueada por segurança.`r`n`r`n$erroSeguranca", "Troca bloqueada", "OK", "Warning") | Out-Null
+                return
+            }
+            finally { & $setOcupado $false }
+            $detalheDadosAbertos = ""
+            if (-not $seguranca.Seguro) {
+                $motivos = @()
+                if ($seguranca.MovimentacoesAbertas -gt 0) { $motivos += "Movimentações abertas: $($seguranca.MovimentacoesAbertas)" }
+                if ($seguranca.CaixasAbertos -gt 0) { $motivos += "Caixas ainda abertos: $($seguranca.CaixasAbertos)" }
+                $detalheBloqueio = $motivos -join "`r`n"
+                $detalheDadosAbertos = "ATENÇÃO - HÁ DADOS EM ABERTO:`r`n$detalheBloqueio`r`n`r`nAo continuar, esses dados não existirão no banco novo e ficarão somente no backup do banco antigo."
+                $lblStatus.ForeColor = $Script:UiAmarelo
+                $lblStatus.Text = "Atenção: existem dados abertos. Revise o alerta antes de continuar."
+                & $addLog "ALERTA: $($motivos -join '; '). A troca poderá continuar após confirmação."
+            }
+
+            $resultadoSeguranca = if ($seguranca.Seguro) { "Verificação: nenhuma movimentação ou caixa aberto." } else { $detalheDadosAbertos }
+            $msg = "ATENÇÃO: isso vai desconectar o banco $($atual.Banco), mover os arquivos atuais para backup e colocar o banco selecionado no lugar.`r`n`r`n$resultadoSeguranca`r`n`r`nBanco novo:`r`n$($cand.Mdf)`r`n`r`nDeseja continuar?"
+            if ($cand.Perfil -ne "Banco zero provável") {
+                $msg += "`r`n`r`nAVISO: o tamanho não parece o banco zero padrão.`r`nEsperado aprox.: MDF 24.320 KB e LOG 1.792 KB.`r`nEncontrado: MDF $($cand.MdfKb) KB e LOG $($cand.LdfKb) KB."
+            }
+            $resp = [System.Windows.Forms.MessageBox]::Show($msg, "Confirmar troca do banco", "YesNo", "Warning")
+            if ($resp -ne [System.Windows.Forms.DialogResult]::Yes) { return }
+            & $setOcupado $true
+            $cn = $null
+            $backupDir = ""
+            $oldMdfBackup = ""
+            $oldLdfBackup = ""
+            $copiouNovo = $false
+            $desanexouAtual = $false
+            try {
+                & $closeBancoApps
+
+                $segurancaFinal = & $verificarOperacaoBanco $atual.Banco "verificação final"
+                if (-not $segurancaFinal.Seguro) {
+                    & $addLog "ALERTA FINAL: movimentações abertas=$($segurancaFinal.MovimentacoesAbertas); caixas abertos=$($segurancaFinal.CaixasAbertos)."
+                    $dadosMudaram = ($seguranca.Seguro -or
+                        $segurancaFinal.MovimentacoesAbertas -ne $seguranca.MovimentacoesAbertas -or
+                        $segurancaFinal.CaixasAbertos -ne $seguranca.CaixasAbertos)
+                    if ($dadosMudaram) {
+                        $msgFinal = "A situação mudou desde a primeira confirmação.`r`n`r`nMovimentações abertas: $($segurancaFinal.MovimentacoesAbertas)`r`nCaixas abertos: $($segurancaFinal.CaixasAbertos)`r`n`r`nEsses dados não existirão no banco novo e ficarão somente no backup do banco antigo.`r`n`r`nContinuar mesmo assim?"
+                        $respFinal = [System.Windows.Forms.MessageBox]::Show($msgFinal, "Novo alerta antes da troca", "YesNo", "Warning")
+                        if ($respFinal -ne [System.Windows.Forms.DialogResult]::Yes) {
+                            & $addLog "Troca cancelada pelo usuário após o alerta final. Nenhum arquivo foi alterado."
+                            $lblStatus.ForeColor = $Script:UiAmarelo
+                            $lblStatus.Text = "Troca cancelada. Nenhum arquivo foi alterado."
+                            return
+                        }
+                    }
+                }
+
+                $backupDir = Join-Path (Join-Path "$($txtRaiz.Text)" "BackupBanco") ((Get-Date).ToString("yyyy-MM-dd_HHmmss"))
+                New-Item -ItemType Directory -Path $backupDir -Force | Out-Null
+                & $grantPath $backupDir
+                & $grantPath (Split-Path $atual.Mdf)
+                & $grantPath $cand.Pasta
+
+                $cn = New-Object System.Data.SqlClient.SqlConnection((& $getConn "master" 20))
+                Wait-SqlTarefa $cn.OpenAsync()
+                $nomeDb = & $sqlName $atual.Banco
+                & $addLog "Desconectando usuários do banco..."
+                & $execNonQuery $cn "IF DB_ID(N'$($atual.Banco.Replace("'","''"))') IS NOT NULL ALTER DATABASE $nomeDb SET SINGLE_USER WITH ROLLBACK IMMEDIATE"
+                & $addLog "Desanexando banco atual..."
+                & $execNonQuery $cn "EXEC sp_detach_db @dbname = N'$($atual.Banco.Replace("'","''"))', @skipchecks = 'true'"
+                $desanexouAtual = $true
+                Start-Sleep -Milliseconds 600
+
+                $oldMdfBackup = Join-Path $backupDir (Split-Path $atual.Mdf -Leaf)
+                $oldLdfBackup = Join-Path $backupDir (Split-Path $atual.Ldf -Leaf)
+                & $addLog "Movendo banco atual para backup..."
+                Move-Item -LiteralPath $atual.Mdf -Destination $oldMdfBackup -Force
+                Move-Item -LiteralPath $atual.Ldf -Destination $oldLdfBackup -Force
+
+                & $addLog "Copiando banco novo para o local original..."
+                Copy-Item -LiteralPath $cand.Mdf -Destination $atual.Mdf -Force
+                Copy-Item -LiteralPath $cand.Ldf -Destination $atual.Ldf -Force
+                $copiouNovo = $true
+                & $grantPath $atual.Mdf
+                & $grantPath $atual.Ldf
+
+                & $addLog "Anexando banco novo..."
+                & $execNonQuery $cn ("CREATE DATABASE " + $nomeDb + " ON (FILENAME = " + (& $sqlLit $atual.Mdf) + "), (FILENAME = " + (& $sqlLit $atual.Ldf) + ") FOR ATTACH")
+                & $execNonQuery $cn "ALTER DATABASE $nomeDb SET MULTI_USER"
+                & $addLog "Banco trocado com sucesso. Backup antigo: $backupDir"
+                $lblStatus.ForeColor = $Script:UiVerde
+                $lblStatus.Text = "Banco trocado com sucesso. Backup em $backupDir"
+                [System.Windows.Forms.MessageBox]::Show("Banco trocado com sucesso.`r`n`r`nBackup do banco antigo:`r`n$backupDir", "Trocar Banco", "OK", "Information") | Out-Null
+            }
+            catch {
+                $erro = $_.Exception.Message
+                & $addLog "ERRO: $erro"
+                if ($desanexouAtual) { & $addLog "Tentando rollback para o banco antigo..." }
+                else { & $addLog "Troca interrompida antes de desanexar o banco; garantindo modo multiusuário..." }
+                try {
+                    if (-not $desanexouAtual) {
+                        if ($cn -and $cn.State -eq 'Open') {
+                            $nomeDb = & $sqlName $atual.Banco
+                            & $execNonQuery $cn "IF DB_ID(N'$($atual.Banco.Replace("'","''"))') IS NOT NULL ALTER DATABASE $nomeDb SET MULTI_USER"
+                        }
+                        & $addLog "Banco atual permaneceu anexado; nenhum arquivo foi substituído."
+                    }
+                    else {
+                        if ($cn -and $cn.State -eq 'Open') {
+                            $nomeDb = & $sqlName $atual.Banco
+                            try { & $execNonQuery $cn "IF DB_ID(N'$($atual.Banco.Replace("'","''"))') IS NOT NULL BEGIN ALTER DATABASE $nomeDb SET SINGLE_USER WITH ROLLBACK IMMEDIATE; EXEC sp_detach_db @dbname = N'$($atual.Banco.Replace("'","''"))', @skipchecks = 'true'; END" } catch {}
+                        }
+                        if ($copiouNovo) {
+                            Remove-Item -LiteralPath $atual.Mdf -Force -ErrorAction SilentlyContinue
+                            Remove-Item -LiteralPath $atual.Ldf -Force -ErrorAction SilentlyContinue
+                        }
+                        if ((Test-Path -LiteralPath $oldMdfBackup) -and -not (Test-Path -LiteralPath $atual.Mdf)) { Move-Item -LiteralPath $oldMdfBackup -Destination $atual.Mdf -Force }
+                        if ((Test-Path -LiteralPath $oldLdfBackup) -and -not (Test-Path -LiteralPath $atual.Ldf)) { Move-Item -LiteralPath $oldLdfBackup -Destination $atual.Ldf -Force }
+                        & $grantPath $atual.Mdf
+                        & $grantPath $atual.Ldf
+                        if ($cn -and $cn.State -eq 'Open') {
+                            $nomeDb = & $sqlName $atual.Banco
+                            & $execNonQuery $cn ("IF DB_ID(N'$($atual.Banco.Replace("'","''"))') IS NULL CREATE DATABASE " + $nomeDb + " ON (FILENAME = " + (& $sqlLit $atual.Mdf) + "), (FILENAME = " + (& $sqlLit $atual.Ldf) + ") FOR ATTACH")
+                            & $execNonQuery $cn "ALTER DATABASE $nomeDb SET MULTI_USER"
+                        }
+                        & $addLog "Rollback concluído: banco antigo restaurado."
+                    }
+                }
+                catch { & $addLog "ROLLBACK FALHOU: $($_.Exception.Message)" }
+                $lblStatus.ForeColor = $Script:UiVermelho
+                $lblStatus.Text = "Falha na troca: $erro"
+                $situacaoBanco = if ($desanexouAtual) { "O Preparador tentou restaurar o banco antigo." } else { "Nenhum arquivo foi substituído e o banco atual permaneceu anexado." }
+                [System.Windows.Forms.MessageBox]::Show("Falha ao trocar o banco:`r`n`r`n$erro`r`n`r`nVerifique o log da tela. $situacaoBanco", "Trocar Banco", "OK", "Error") | Out-Null
+            }
+            finally {
+                if ($cn) { try { $cn.Close() } catch {} }
+                & $setOcupado $false
+            }
+        }
+
+        $lv.Add_SelectedIndexChanged({
+                $candSelecionado = $null
+                if ($lv.SelectedItems.Count -gt 0) { $candSelecionado = $lv.SelectedItems[0].Tag }
+                $pronto = ($null -ne $candSelecionado -and $null -ne $Script:DbSwapAtual -and -not $Script:DbSwapOcupado)
+                $btnTrocar.Enabled = $pronto
+                if ($pronto) {
+                    $lblSelecionado.ForeColor = $Script:UiTexto
+                    $lblSelecionado.Text = ("MDF: {0} ({1:N0} KB)   |   LOG: {2} ({3:N0} KB)   |   Pasta: {4}" -f `
+                            (Split-Path $candSelecionado.Mdf -Leaf), $candSelecionado.MdfKb, `
+                            (Split-Path $candSelecionado.Ldf -Leaf), $candSelecionado.LdfKb, $candSelecionado.Pasta)
+                    if ($Script:ToolTip) { $Script:ToolTip.SetToolTip($lblSelecionado, "MDF: $($candSelecionado.Mdf)`r`nLOG: $($candSelecionado.Ldf)") }
+                }
+            })
+        $btnLocalizar.Add_Click($localizar)
+        $btnAtualizar.Add_Click($localizar)
+        $btnTrocar.Add_Click($trocar)
+        $f.Add_FormClosing({ $Script:DbSwapForm = $null })
+        Log-Message "INFO" "Trocar banco: janela aberta"
+        [void]$f.ShowDialog($Script:MainForm)
+    }
+    catch {
+        Log-Message "ERRO" "Falha na janela Trocar Banco: $_"
+        [System.Windows.Forms.MessageBox]::Show("Falha ao abrir a troca de banco:`r`n`r`n$($_.Exception.Message)", "Trocar Banco", "OK", "Error") | Out-Null
+    }
 }
 
 function Show-BackupBanco {
@@ -6276,6 +6940,7 @@ function Show-BackupBanco {
                 "SELECT d.name, SUM(CAST(mf.size AS bigint)) * 8192 AS bytes FROM sys.databases d " +
                 "JOIN sys.master_files mf ON mf.database_id = d.database_id WHERE d.database_id > 4 AND d.state = 0 " +
                 "GROUP BY d.name ORDER BY d.name"
+                Log-SqlBancoComando "Backup banco" $cmdTeste.CommandText "teste de conexão e lista de bancos"
                 $tarefaTeste = $cmdTeste.ExecuteReaderAsync()
                 Wait-SqlTarefa $tarefaTeste
                 $rdTeste = $tarefaTeste.Result
@@ -6474,8 +7139,8 @@ function Show-SqlIndexAdvisor {
         $Script:IdxOcupado = $false
         $Script:IdxBancos = @{}
 
-        $f = New-ToolForm "Índices do Banco - Sugestões SQL" 1000 690
-        $f.MinimumSize = New-Object System.Drawing.Size(980, 650)
+        $f = New-ToolForm "Índices do Banco - Sugestões SQL" 1000 780
+        $f.MinimumSize = New-Object System.Drawing.Size(900, 740)
         $Script:IdxForm = $f
 
         $novoCartao = {
@@ -6492,26 +7157,27 @@ function Show-SqlIndexAdvisor {
             param($Pai, [int]$X, [int]$Y, [int]$W, [string]$Valor)
             $t = New-Object System.Windows.Forms.TextBox
             $t.Location = New-Object System.Drawing.Point($X, $Y)
-            $t.Size = New-Object System.Drawing.Size($W, 24)
+            $t.Size = New-Object System.Drawing.Size($W, 25)
             $t.BackColor = [System.Drawing.Color]::FromArgb(20, 24, 34)
             $t.ForeColor = $Script:UiTexto
             $t.BorderStyle = 'FixedSingle'
+            $t.Font = New-Object System.Drawing.Font("Segoe UI", 9)
             $t.Text = $Valor
             [void]$Pai.Controls.Add($t)
             return $t
         }
 
         New-ToolLabel $f "ÍNDICES DO BANCO" 20 14 12 -Negrito | Out-Null
-        New-ToolLabel $f "Consulta as sugestões do SQL Server, mostra o resultado e só cria os índices marcados depois da confirmação." 20 42 9 -Cor $Script:UiSuave -W 940 | Out-Null
+        New-ToolLabel $f "Encontre melhorias sugeridas pelo SQL Server, revise e aplique somente depois da confirmação." 20 42 9 -Cor $Script:UiSuave -W 940 | Out-Null
 
-        $cardConn = & $novoCartao 20 70 940 90
-        New-ToolLabel $cardConn "CONEXÃO" 14 8 10 -Negrito | Out-Null
-        New-ToolLabel $cardConn "Servidor:" 14 38 9 -Cor $Script:UiSuave | Out-Null
-        $txtIdxServidor = & $novoCampo $cardConn 72 35 130 "localhost"
-        New-ToolLabel $cardConn "Usuário:" 212 38 9 -Cor $Script:UiSuave | Out-Null
+        $cardConn = & $novoCartao 20 70 940 104
+        New-ToolLabel $cardConn "1  CONEXÃO COM O SQL" 14 9 10 -Negrito | Out-Null
+        New-ToolLabel $cardConn "Servidor:" 14 41 9 -Cor $Script:UiSuave | Out-Null
+        $txtIdxServidor = & $novoCampo $cardConn 72 38 140 "localhost"
+        New-ToolLabel $cardConn "Usuário:" 226 41 9 -Cor $Script:UiSuave | Out-Null
         $cmbIdxUsuario = New-Object System.Windows.Forms.ComboBox
-        $cmbIdxUsuario.Location = New-Object System.Drawing.Point(266, 35)
-        $cmbIdxUsuario.Width = 64
+        $cmbIdxUsuario.Location = New-Object System.Drawing.Point(280, 38)
+        $cmbIdxUsuario.Width = 72
         $cmbIdxUsuario.DropDownStyle = 'DropDown'
         $cmbIdxUsuario.FlatStyle = 'Flat'
         $cmbIdxUsuario.BackColor = [System.Drawing.Color]::FromArgb(20, 24, 34)
@@ -6519,44 +7185,73 @@ function Show-SqlIndexAdvisor {
         foreach ($usr in $Script:SqlUsuariosPadrao) { [void]$cmbIdxUsuario.Items.Add($usr) }
         $cmbIdxUsuario.Text = (Get-SqlUsuarioSalvo)
         [void]$cardConn.Controls.Add($cmbIdxUsuario)
-        New-ToolLabel $cardConn "Senha:" 340 38 9 -Cor $Script:UiSuave | Out-Null
-        $txtIdxSenha = & $novoCampo $cardConn 384 35 110 "netcontroll"
-        $btnIdxTestar = New-ToolButton $cardConn "TESTAR CONEXÃO" 508 34 150 27 $Script:UiAzul $null "Conecta no SQL Server e lista os bancos"
-        New-ToolLabel $cardConn "Banco:" 676 38 9 -Cor $Script:UiSuave | Out-Null
+        New-ToolLabel $cardConn "Senha:" 366 41 9 -Cor $Script:UiSuave | Out-Null
+        $txtIdxSenha = & $novoCampo $cardConn 414 38 120 "netcontroll"
+        New-ToolLabel $cardConn "Banco:" 550 41 9 -Cor $Script:UiSuave | Out-Null
         $cmbIdxBanco = New-Object System.Windows.Forms.ComboBox
-        $cmbIdxBanco.Location = New-Object System.Drawing.Point(724, 35)
-        $cmbIdxBanco.Width = 190
+        $cmbIdxBanco.Location = New-Object System.Drawing.Point(598, 38)
+        $cmbIdxBanco.Width = 306
         $cmbIdxBanco.DropDownStyle = 'DropDownList'
         $cmbIdxBanco.FlatStyle = 'Flat'
         $cmbIdxBanco.BackColor = [System.Drawing.Color]::FromArgb(20, 24, 34)
         $cmbIdxBanco.ForeColor = $Script:UiTexto
+        $cmbIdxBanco.Anchor = 'Top,Left,Right'
         [void]$cardConn.Controls.Add($cmbIdxBanco)
-        $lblIdxConn = New-ToolLabel $cardConn "Informe os dados e clique em TESTAR CONEXÃO." 14 64 9 -Cor $Script:UiSuave -W 900
+        $btnIdxTestar = New-ToolButton $cardConn "TESTAR CONEXÃO" 746 69 158 28 $Script:UiAzul $null "Conecta no SQL Server e atualiza a lista de bancos"
+        $btnIdxTestar.Anchor = 'Top,Right'
+        $lblIdxConn = New-ToolLabel $cardConn "Conectando automaticamente..." 14 76 9 -Cor $Script:UiSuave -W 630
+        $lblIdxConn.AutoEllipsis = $true
 
+        New-ToolLabel $f "2  SUGESTÕES ENCONTRADAS" 20 191 10 -Negrito | Out-Null
+        $lblIdxResumo = New-ToolLabel $f "Aguardando conexão" 700 192 9 -Cor $Script:UiSuave -W 260
+        $lblIdxResumo.TextAlign = 'MiddleRight'
+        $lblIdxResumo.Anchor = 'Top,Right'
         $lvIdx = New-Object System.Windows.Forms.ListView
-        $lvIdx.Location = New-Object System.Drawing.Point(20, 176)
-        $lvIdx.Size = New-Object System.Drawing.Size(940, 265)
+        $lvIdx.Location = New-Object System.Drawing.Point(20, 216)
+        $lvIdx.Size = New-Object System.Drawing.Size(940, 250)
         $lvIdx.Anchor = 'Top,Left,Right'
         $lvIdx.View = 'Details'
         $lvIdx.FullRowSelect = $true
         $lvIdx.GridLines = $true
         $lvIdx.CheckBoxes = $true
+        $lvIdx.HideSelection = $false
+        $lvIdx.HeaderStyle = 'Nonclickable'
         $lvIdx.BackColor = [System.Drawing.Color]::FromArgb(12, 12, 25)
         $lvIdx.ForeColor = $Script:UiTexto
-        $lvIdx.Font = New-Object System.Drawing.Font("Segoe UI", 8.5)
-        [void]$lvIdx.Columns.Add("Ganho", 80)
-        [void]$lvIdx.Columns.Add("Tabela do banco", 220)
-        [void]$lvIdx.Columns.Add("Uso recente", 90)
-        [void]$lvIdx.Columns.Add("Leituras lentas", 95)
-        [void]$lvIdx.Columns.Add("Último uso", 110)
-        [void]$lvIdx.Columns.Add("Situação", 105)
-        [void]$lvIdx.Columns.Add("Comando técnico", 240)
+        $lvIdx.Font = New-Object System.Drawing.Font("Segoe UI", 9)
+        [void]$lvIdx.Columns.Add("Prioridade", 95)
+        [void]$lvIdx.Columns.Add("Tabela do banco", 225)
+        [void]$lvIdx.Columns.Add("Uso registrado", 100)
+        [void]$lvIdx.Columns.Add("Leituras completas", 115)
+        [void]$lvIdx.Columns.Add("Último uso", 105)
+        [void]$lvIdx.Columns.Add("Situação", 200)
         [void]$f.Controls.Add($lvIdx)
+        $ajustarColunasIdx = {
+            param($Controle)
+            if ($null -eq $Controle -or $Controle -isnot [System.Windows.Forms.ListView]) { $Controle = $lvIdx }
+            if ($Controle.Columns.Count -ge 6) {
+                $Controle.Columns[5].Width = [Math]::Max(120, ($Controle.ClientSize.Width - 720))
+            }
+        }
+        $lvIdx.Add_SizeChanged({ & $ajustarColunasIdx $this })
+        & $ajustarColunasIdx $lvIdx
+        $itemIdxInicial = New-Object System.Windows.Forms.ListViewItem("Buscando...")
+        [void]$itemIdxInicial.SubItems.Add("A conexão com o SQL será feita automaticamente")
+        [void]$itemIdxInicial.SubItems.Add("-")
+        [void]$itemIdxInicial.SubItems.Add("-")
+        [void]$itemIdxInicial.SubItems.Add("-")
+        [void]$itemIdxInicial.SubItems.Add("Aguarde")
+        $itemIdxInicial.ForeColor = $Script:UiSuave
+        [void]$lvIdx.Items.Add($itemIdxInicial)
 
+        New-ToolLabel $f "COMANDO DO ÍNDICE SELECIONADO" 20 482 9 -Negrito | Out-Null
+        $lblIdxSelecionado = New-ToolLabel $f "Nenhum índice selecionado" 650 483 9 -Cor $Script:UiSuave -W 310
+        $lblIdxSelecionado.TextAlign = 'MiddleRight'
+        $lblIdxSelecionado.Anchor = 'Top,Right'
         $txtIdxSql = New-Object System.Windows.Forms.TextBox
-        $txtIdxSql.Location = New-Object System.Drawing.Point(20, 448)
-        $txtIdxSql.Size = New-Object System.Drawing.Size(940, 82)
-        $txtIdxSql.Anchor = 'Top,Left,Right'
+        $txtIdxSql.Location = New-Object System.Drawing.Point(20, 506)
+        $txtIdxSql.Size = New-Object System.Drawing.Size(940, 124)
+        $txtIdxSql.Anchor = 'Top,Bottom,Left,Right'
         $txtIdxSql.Multiline = $true
         $txtIdxSql.ScrollBars = 'Vertical'
         $txtIdxSql.ReadOnly = $true
@@ -6564,48 +7259,79 @@ function Show-SqlIndexAdvisor {
         $txtIdxSql.ForeColor = $Script:UiTexto
         $txtIdxSql.BorderStyle = 'FixedSingle'
         $txtIdxSql.Font = New-Object System.Drawing.Font("Consolas", 8.5)
+        $txtIdxSql.Text = "Selecione uma sugestão para visualizar o comando que será executado."
         [void]$f.Controls.Add($txtIdxSql)
 
         $pnlIdxAcoes = New-Object System.Windows.Forms.Panel
-        $pnlIdxAcoes.Location = New-Object System.Drawing.Point(20, 542)
-        $pnlIdxAcoes.Size = New-Object System.Drawing.Size(940, 102)
+        $pnlIdxAcoes.Location = New-Object System.Drawing.Point(20, 646)
+        $pnlIdxAcoes.Size = New-Object System.Drawing.Size(940, 72)
         $pnlIdxAcoes.Anchor = 'Bottom,Left,Right'
         $pnlIdxAcoes.BackColor = $Script:UiFundo
         [void]$f.Controls.Add($pnlIdxAcoes)
 
-        $btnIdxBuscar = New-ToolButton $pnlIdxAcoes "BUSCAR SUGESTÕES" 0 0 155 34 $Script:UiAzul $null "Roda a consulta de índices faltantes do SQL Server no banco selecionado"
+        $btnIdxBuscar = New-ToolButton $pnlIdxAcoes "ATUALIZAR" 0 0 108 32 $Script:UiAzul $null "Roda novamente a consulta de índices sugeridos no banco selecionado"
         $btnIdxBuscar.Enabled = $false
-        $btnIdxTop = New-ToolButton $pnlIdxAcoes "MARCAR TOP 10" 165 0 120 34 $Script:UiCinza $null "Marca as 10 sugestões de maior ganho"
-        $btnIdxLimpar = New-ToolButton $pnlIdxAcoes "DESMARCAR" 295 0 105 34 $Script:UiCinza $null "Desmarca todas as sugestões"
-        $btnIdxCopiar = New-ToolButton $pnlIdxAcoes "COPIAR SQL" 410 0 105 34 $Script:UiCinza $null "Copia os CREATE INDEX marcados; se nada estiver marcado, copia o selecionado"
-        $btnIdxAplicar = New-ToolButton $pnlIdxAcoes "APLICAR MARCADOS" 0 42 150 34 $Script:UiVerde $null "Cria somente os índices marcados, depois de confirmação"
+        $btnIdxTop = New-ToolButton $pnlIdxAcoes "TOP 10" 116 0 88 32 $Script:UiCinza $null "Marca as 10 sugestões de maior prioridade"
+        $btnIdxLimpar = New-ToolButton $pnlIdxAcoes "DESMARCAR" 212 0 100 32 $Script:UiCinza $null "Desmarca todas as sugestões"
+        $btnIdxCopiar = New-ToolButton $pnlIdxAcoes "COPIAR SQL" 320 0 104 32 $Script:UiCinza $null "Copia os CREATE INDEX marcados; se nada estiver marcado, copia o selecionado"
+        $btnIdxAplicar = New-ToolButton $pnlIdxAcoes "APLICAR MARCADOS" 440 0 145 32 $Script:UiVerde $null "Cria somente os índices marcados, depois de confirmação"
         $btnIdxAplicar.Enabled = $false
-        $btnIdxAplicarTodos = New-ToolButton $pnlIdxAcoes "APLICAR TODOS" 160 42 150 34 $Script:UiVerde $null "Cria todas as sugestões da lista em lotes de 5 índices por vez"
+        $btnIdxAplicarTodos = New-ToolButton $pnlIdxAcoes "APLICAR TODOS" 593 0 120 32 $Script:UiVerde $null "Cria todas as sugestões da lista em lotes de 5 índices por vez"
         $btnIdxAplicarTodos.Enabled = $false
-        $btnIdxFechar = New-ToolButton $pnlIdxAcoes "FECHAR" 850 42 90 34 $Script:UiCinza { $f.Close() }
+        $btnIdxFechar = New-ToolButton $pnlIdxAcoes "FECHAR" 850 0 90 32 $Script:UiCinza { $f.Close() }
         $btnIdxFechar.Anchor = 'Top,Right'
-        $lblIdxStatus = New-ToolLabel $pnlIdxAcoes "Ao abrir, o Preparador conecta e busca sugestões. Criar índices só acontece nos botões APLICAR." 0 82 9 -Cor $Script:UiSuave -W 940
+        $lblIdxMarcados = New-ToolLabel $pnlIdxAcoes "0 marcado(s)" 700 41 9 -Cor $Script:UiSuave -W 240
+        $lblIdxMarcados.TextAlign = 'MiddleRight'
+        $lblIdxMarcados.Anchor = 'Top,Right'
+        $lblIdxStatus = New-ToolLabel $pnlIdxAcoes "Conectando e buscando sugestões automaticamente..." 0 41 9 -Cor $Script:UiSuave -W 680
         $lblIdxStatus.Anchor = 'Top,Left,Right'
+        $lblIdxStatus.AutoEllipsis = $true
+
+        $txtIdxServidor.TabIndex = 0
+        $cmbIdxUsuario.TabIndex = 1
+        $txtIdxSenha.TabIndex = 2
+        $cmbIdxBanco.TabIndex = 3
+        $btnIdxTestar.TabIndex = 4
+        $lvIdx.TabIndex = 5
+        $btnIdxBuscar.TabIndex = 6
+        $btnIdxTop.TabIndex = 7
+        $btnIdxLimpar.TabIndex = 8
+        $btnIdxCopiar.TabIndex = 9
+        $btnIdxAplicar.TabIndex = 10
+        $btnIdxAplicarTodos.TabIndex = 11
+        $btnIdxFechar.TabIndex = 12
+        $f.CancelButton = $btnIdxFechar
 
         $getConexao = {
             param([string]$Banco = "master", [int]$Timeout = 8)
             return New-SqlTextoConexao -Servidor $txtIdxServidor.Text -Usuario $cmbIdxUsuario.Text -Senha $txtIdxSenha.Text -Banco $Banco -Timeout $Timeout
         }
+        $getItensValidos = {
+            return @($lvIdx.Items | Where-Object { $null -ne $_.Tag })
+        }
+        $getMarcadosValidos = {
+            return @($lvIdx.CheckedItems | Where-Object { $null -ne $_.Tag })
+        }
         $getSqlMarcados = {
-            $items = @($lvIdx.CheckedItems)
-            if ($items.Count -eq 0 -and $lvIdx.SelectedItems.Count -gt 0) { $items = @($lvIdx.SelectedItems[0]) }
+            $items = @(& $getMarcadosValidos)
+            if ($items.Count -eq 0 -and $lvIdx.SelectedItems.Count -gt 0 -and $null -ne $lvIdx.SelectedItems[0].Tag) { $items = @($lvIdx.SelectedItems[0]) }
             return @($items | ForEach-Object { $_.Tag.Sql })
         }
         $setOcupado = {
             param([bool]$Ocupado)
             $Script:IdxOcupado = $Ocupado
-            foreach ($ctl in @($btnIdxTestar, $btnIdxBuscar, $btnIdxTop, $btnIdxLimpar, $btnIdxCopiar, $btnIdxAplicar, $btnIdxAplicarTodos, $cmbIdxBanco, $txtIdxServidor, $cmbIdxUsuario, $txtIdxSenha)) {
+            foreach ($ctl in @($btnIdxTestar, $btnIdxBuscar, $btnIdxTop, $btnIdxLimpar, $btnIdxCopiar, $btnIdxAplicar, $btnIdxAplicarTodos, $cmbIdxBanco, $txtIdxServidor, $cmbIdxUsuario, $txtIdxSenha, $lvIdx)) {
                 if ($ctl) { $ctl.Enabled = -not $Ocupado }
             }
             if (-not $Ocupado) {
+                $validos = @(& $getItensValidos)
+                $marcados = @(& $getMarcadosValidos)
                 $btnIdxBuscar.Enabled = ($cmbIdxBanco.Items.Count -gt 0)
-                $btnIdxAplicar.Enabled = ($lvIdx.Items.Count -gt 0)
-                $btnIdxAplicarTodos.Enabled = ($lvIdx.Items.Count -gt 0)
+                $btnIdxTop.Enabled = ($validos.Count -gt 0)
+                $btnIdxLimpar.Enabled = ($validos.Count -gt 0)
+                $btnIdxCopiar.Enabled = ($validos.Count -gt 0)
+                $btnIdxAplicar.Enabled = ($marcados.Count -gt 0)
+                $btnIdxAplicarTodos.Enabled = ($validos.Count -gt 0)
             }
         }
 
@@ -6622,6 +7348,7 @@ function Show-SqlIndexAdvisor {
                 $cmd.CommandTimeout = 30
                 $cmd.CommandText = "SELECT CAST(SERVERPROPERTY('Edition') AS nvarchar(128)) AS edicao, CAST(SERVERPROPERTY('ProductVersion') AS nvarchar(64)) AS versao; " +
                     "SELECT name FROM sys.databases WHERE database_id > 4 AND state = 0 ORDER BY name"
+                Log-SqlBancoComando "Índices" $cmd.CommandText "teste de conexão"
                 $t = $cmd.ExecuteReaderAsync()
                 Wait-SqlTarefa $t
                 $rd = $t.Result
@@ -6642,11 +7369,18 @@ function Show-SqlIndexAdvisor {
                 Save-SqlUsuario "$($cmbIdxUsuario.Text)"
                 $lblIdxConn.ForeColor = $Script:UiVerde
                 $lblIdxConn.Text = "OK - $versaoSql | bancos: $($cmbIdxBanco.Items.Count)"
+                $lblIdxResumo.ForeColor = $Script:UiVerde
+                $lblIdxResumo.Text = "$($cmbIdxBanco.Items.Count - 1) banco(s) disponível(is)"
+                $lblIdxStatus.ForeColor = $Script:UiSuave
                 $lblIdxStatus.Text = "Conexão OK. Escolha o banco e clique em BUSCAR SUGESTÕES."
             }
             catch {
                 $lblIdxConn.ForeColor = $Script:UiVermelho
                 $lblIdxConn.Text = Get-BackupErroTexto -Erro $_.Exception -Pasta $Script:BackupPasta
+                $lblIdxResumo.ForeColor = $Script:UiVermelho
+                $lblIdxResumo.Text = "Falha na conexão"
+                $lblIdxStatus.ForeColor = $Script:UiVermelho
+                $lblIdxStatus.Text = "Não foi possível conectar ao SQL Server. Confira os dados acima."
                 Log-Message "ERRO" "Índices: falha de conexão - $($_.Exception.Message)"
             }
             finally {
@@ -6661,7 +7395,11 @@ function Show-SqlIndexAdvisor {
             $cn = $null
             try {
                 $lvIdx.Items.Clear()
-                $txtIdxSql.Clear()
+                $txtIdxSql.Text = "Consultando o SQL Server..."
+                $lblIdxSelecionado.Text = "Nenhum índice selecionado"
+                $lblIdxMarcados.Text = "0 marcado(s)"
+                $lblIdxResumo.ForeColor = $Script:UiAmarelo
+                $lblIdxResumo.Text = "Consultando..."
                 $lblIdxStatus.ForeColor = $Script:UiAmarelo
                 $lblIdxStatus.Text = "Consultando sugestões do SQL Server..."
                 $cn = New-Object System.Data.SqlClient.SqlConnection((& $getConexao "master" 15))
@@ -6692,6 +7430,8 @@ ORDER BY migs.avg_total_user_cost * migs.avg_user_impact * (migs.user_seeks + mi
                 $bancoFiltro = "$($cmbIdxBanco.Text)"
                 if ($bancoFiltro -eq "(TODOS OS BANCOS)") { $bancoFiltro = "" }
                 [void]$cmd.Parameters.AddWithValue("@banco", $bancoFiltro)
+                $alvoLogBusca = if ($bancoFiltro -eq "") { "todos os bancos" } else { "banco=$bancoFiltro" }
+                Log-SqlBancoComando "Índices" $cmd.CommandText "consulta de sugestões; $alvoLogBusca"
                 $dt = New-Object System.Data.DataTable
                 $ad = New-Object System.Data.SqlClient.SqlDataAdapter $cmd
                 [void]$ad.Fill($dt)
@@ -6708,16 +7448,30 @@ ORDER BY migs.avg_total_user_cost * migs.avg_user_impact * (migs.user_seeks + mi
                     [void]$it.SubItems.Add("$($row['user_scans'])")
                     [void]$it.SubItems.Add($last)
                     [void]$it.SubItems.Add("Pronto para aplicar")
-                    [void]$it.SubItems.Add($sql)
                     $it.Tag = [pscustomobject]@{ Sql = $sql; Tabela = $tabela; TabelaAmigavel = $tabelaAmigavel; Impacto = $impacto }
                     [void]$lvIdx.Items.Add($it)
                 }
                 if ($dt.Rows.Count -eq 0) {
+                    $itemVazio = New-Object System.Windows.Forms.ListViewItem("Sem sugestões")
+                    [void]$itemVazio.SubItems.Add("O SQL Server não indicou novos índices")
+                    [void]$itemVazio.SubItems.Add("-")
+                    [void]$itemVazio.SubItems.Add("-")
+                    [void]$itemVazio.SubItems.Add("-")
+                    [void]$itemVazio.SubItems.Add("Banco já está adequado")
+                    $itemVazio.ForeColor = $Script:UiSuave
+                    [void]$lvIdx.Items.Add($itemVazio)
+                    $txtIdxSql.Text = "Nenhum comando foi gerado para o banco selecionado."
+                    $lblIdxResumo.ForeColor = $Script:UiSuave
+                    $lblIdxResumo.Text = "Nenhuma sugestão"
                     $lblIdxStatus.ForeColor = $Script:UiSuave
                     $alvoBusca = if ($bancoFiltro -eq "") { "os bancos de usuário" } else { $cmbIdxBanco.Text }
                     $lblIdxStatus.Text = "Nenhuma sugestão encontrada para $alvoBusca."
                 }
                 else {
+                    $lvIdx.Items[0].Selected = $true
+                    $lvIdx.EnsureVisible(0)
+                    $lblIdxResumo.ForeColor = $Script:UiVerde
+                    $lblIdxResumo.Text = "$($dt.Rows.Count) sugestão(ões) encontrada(s)"
                     $lblIdxStatus.ForeColor = $Script:UiVerde
                     $lblIdxStatus.Text = "$($dt.Rows.Count) sugestão(ões) encontrada(s). Marque as que deseja aplicar ou copie o SQL para revisar."
                 }
@@ -6725,6 +7479,19 @@ ORDER BY migs.avg_total_user_cost * migs.avg_user_impact * (migs.user_seeks + mi
                 Log-Message "INFO" "Índices: $($dt.Rows.Count) sugestão(ões) encontradas em $alvoLog"
             }
             catch {
+                if ($lvIdx.Items.Count -eq 0) {
+                    $itemErro = New-Object System.Windows.Forms.ListViewItem("Falha na consulta")
+                    [void]$itemErro.SubItems.Add("Confira a conexão e tente novamente")
+                    [void]$itemErro.SubItems.Add("-")
+                    [void]$itemErro.SubItems.Add("-")
+                    [void]$itemErro.SubItems.Add("-")
+                    [void]$itemErro.SubItems.Add("Veja a mensagem abaixo")
+                    $itemErro.ForeColor = $Script:UiVermelho
+                    [void]$lvIdx.Items.Add($itemErro)
+                }
+                $txtIdxSql.Text = "A consulta não gerou comandos."
+                $lblIdxResumo.ForeColor = $Script:UiVermelho
+                $lblIdxResumo.Text = "Falha na consulta"
                 $lblIdxStatus.ForeColor = $Script:UiVermelho
                 $lblIdxStatus.Text = "Falha ao buscar sugestões: $($_.Exception.Message)"
                 Log-Message "ERRO" "Índices: falha ao buscar - $($_.Exception.Message)"
@@ -6786,6 +7553,7 @@ ORDER BY migs.avg_total_user_cost * migs.avg_user_impact * (migs.user_seeks + mi
                             $cmd = $cn.CreateCommand()
                             $cmd.CommandTimeout = 0
                             $cmd.CommandText = $sql
+                            Log-SqlBancoComando "Índices" $sql "criando índice $n de $($alvosValidos.Count)"
                             $t = $cmd.ExecuteNonQueryAsync()
                             Wait-SqlTarefa $t -IntervaloMs 500 -AoEsperar {
                                 $lblIdxStatus.Text = "Lote $loteNum de $loteTotal - criando índice $n de $($alvosValidos.Count)..."
@@ -6833,14 +7601,30 @@ ORDER BY migs.avg_total_user_cost * migs.avg_user_impact * (migs.user_seeks + mi
         }
 
         $lvIdx.Add_SelectedIndexChanged({
-            if ($lvIdx.SelectedItems.Count -gt 0) { $txtIdxSql.Text = "$($lvIdx.SelectedItems[0].Tag.Sql)" }
-        })
+                if ($lvIdx.SelectedItems.Count -gt 0 -and $null -ne $lvIdx.SelectedItems[0].Tag) {
+                    $selecionado = $lvIdx.SelectedItems[0].Tag
+                    $txtIdxSql.Text = "$($selecionado.Sql)"
+                    $lblIdxSelecionado.Text = "$($selecionado.TabelaAmigavel) | prioridade $([Math]::Round($selecionado.Impacto))"
+                }
+            })
+        $lvIdx.Add_ItemCheck({
+                param($s, $e)
+                $marcados = @(& $getMarcadosValidos).Count
+                $itemAlterado = $lvIdx.Items[$e.Index]
+                if ($null -ne $itemAlterado.Tag) {
+                    if ($e.NewValue -eq [System.Windows.Forms.CheckState]::Checked -and $e.CurrentValue -ne [System.Windows.Forms.CheckState]::Checked) { $marcados++ }
+                    elseif ($e.NewValue -ne [System.Windows.Forms.CheckState]::Checked -and $e.CurrentValue -eq [System.Windows.Forms.CheckState]::Checked) { $marcados-- }
+                }
+                $lblIdxMarcados.Text = "$([Math]::Max(0, $marcados)) marcado(s)"
+                $btnIdxAplicar.Enabled = (-not $Script:IdxOcupado -and $marcados -gt 0)
+            })
         $btnIdxTestar.Add_Click($testar)
         $btnIdxBuscar.Add_Click($buscar)
         $btnIdxTop.Add_Click({
-            for ($i = 0; $i -lt $lvIdx.Items.Count; $i++) { $lvIdx.Items[$i].Checked = ($i -lt 10) }
+            $validos = @(& $getItensValidos)
+            for ($i = 0; $i -lt $validos.Count; $i++) { $validos[$i].Checked = ($i -lt 10) }
         })
-        $btnIdxLimpar.Add_Click({ foreach ($it in $lvIdx.Items) { $it.Checked = $false } })
+        $btnIdxLimpar.Add_Click({ foreach ($it in @(& $getItensValidos)) { $it.Checked = $false } })
         $btnIdxCopiar.Add_Click($copiar)
         $btnIdxAplicar.Add_Click($aplicar)
         $btnIdxAplicarTodos.Add_Click($aplicarTodos)
@@ -7001,6 +7785,7 @@ function Show-SqlDbDiagnostic {
             $cmd.CommandTimeout = 60
             $cmd.CommandText = $Sql
             if ($null -ne $Parametro) { [void]$cmd.Parameters.AddWithValue("@b", $Parametro) }
+            Log-SqlBancoComando "Diagnóstico banco" $Sql $(if ($null -ne $Parametro) { "banco=$Parametro" } else { "" })
             $v = $cmd.ExecuteScalar()
             if ($v -is [System.DBNull]) { return $null }
             return $v
@@ -7023,6 +7808,7 @@ function Show-SqlDbDiagnostic {
                 $cmd.CommandTimeout = 30
                 $cmd.CommandText = "SELECT CAST(SERVERPROPERTY('Edition') AS nvarchar(128)) AS edicao, CAST(SERVERPROPERTY('ProductVersion') AS nvarchar(64)) AS versao; " +
                     "SELECT name FROM sys.databases WHERE database_id > 4 AND state = 0 ORDER BY name"
+                Log-SqlBancoComando "Diagnóstico banco" $cmd.CommandText "teste de conexão"
                 $t = $cmd.ExecuteReaderAsync()
                 Wait-SqlTarefa $t
                 $rd = $t.Result
@@ -7071,6 +7857,7 @@ function Show-SqlDbDiagnostic {
                 $cmdInfo = $cn.CreateCommand()
                 $cmdInfo.CommandTimeout = 60
                 $cmdInfo.CommandText = "SELECT name, state_desc FROM sys.databases WHERE name = @b"
+                Log-SqlBancoComando "Diagnóstico banco" $cmdInfo.CommandText "banco=$banco"
                 [void]$cmdInfo.Parameters.AddWithValue("@b", $banco)
                 $rdInfo = $cmdInfo.ExecuteReader()
                 $estado = ""
@@ -7085,6 +7872,7 @@ function Show-SqlDbDiagnostic {
                 $cmdTam = $cn.CreateCommand()
                 $cmdTam.CommandTimeout = 60
                 $cmdTam.CommandText = "SELECT type_desc, SUM(CAST(size AS bigint)) * 8.0 / 1024.0 AS mb FROM sys.master_files WHERE database_id = DB_ID(@b) GROUP BY type_desc"
+                Log-SqlBancoComando "Diagnóstico banco" $cmdTam.CommandText "banco=$banco"
                 [void]$cmdTam.Parameters.AddWithValue("@b", $banco)
                 $rdTam = $cmdTam.ExecuteReader()
                 $dataMb = 0.0; $logMb = 0.0
@@ -7152,6 +7940,7 @@ function Show-SqlDbDiagnostic {
                 $cmd = $cn.CreateCommand()
                 $cmd.CommandTimeout = 0
                 $cmd.CommandText = "DBCC CHECKDB(" + (& $sqlName $banco) + ") WITH NO_INFOMSGS"
+                Log-SqlBancoComando "Diagnóstico banco" $cmd.CommandText "teste profundo"
                 $t = $cmd.ExecuteNonQueryAsync()
                 Wait-SqlTarefa $t -IntervaloMs 700 -AoEsperar { $lblDiagStatus.Text = "Rodando teste profundo em $banco..." }
                 [void](& $addDiag "Teste profundo" "OK" "Nenhum erro interno encontrado." "Banco passou no teste profundo.")
@@ -13877,7 +14666,7 @@ $formWidth = if ($screen.Width -lt 1000) { 900 } else { 1000 }
 $formHeight = if ($screen.Height -lt 800) { 700 } else { 800 }
 
 $form = New-Object System.Windows.Forms.Form
-$form.Text = "Preparador XMenu – Suporte Técnico v5.16 - REVENDA"
+$form.Text = "Preparador XMenu – Suporte Técnico v5.25 - REVENDA"
 $form.Size = New-Object System.Drawing.Size($formWidth, $formHeight)
 $form.StartPosition = "CenterScreen"
 $form.BackColor = [System.Drawing.Color]::FromArgb(25, 25, 30); $form.ForeColor = 'White'
@@ -14482,6 +15271,15 @@ $Script:ToolTip.SetToolTip($bDiagBanco, "Diagnóstico seguro do SQL: estado, tam
 $bDiagBanco.Add_Click({ Show-SqlDbDiagnostic })
 [void]$tbl.Controls.Add($bDiagBanco)
 
+$bSwapBanco = New-Object System.Windows.Forms.Button; $bSwapBanco.Height = 50; $bSwapBanco.Dock = 'Top'
+$bSwapBanco.Text = "Trocar Banco NetWebPDV"
+$bSwapBanco.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
+$bSwapBanco.Cursor = 'Hand'
+Format-SupportBtn $bSwapBanco $colorSql
+$Script:ToolTip.SetToolTip($bSwapBanco, "Troca assistida do banco: localiza o NetWebPDV atual, acha o banco novo em C:\netcontroll\concentrador\Versoes\UltimaVersao, cria backup dos arquivos atuais, libera permissões e anexa o banco novo.")
+$bSwapBanco.Add_Click({ Show-DbSwapNetWebPdv })
+[void]$tbl.Controls.Add($bSwapBanco)
+
 $bIdx = New-Object System.Windows.Forms.Button; $bIdx.Height = 50; $bIdx.Dock = 'Top'
 $bIdx.Text = "Índices do Banco (Sugestões)"
 $bIdx.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
@@ -14490,6 +15288,7 @@ Format-SupportBtn $bIdx $colorSql
 $Script:ToolTip.SetToolTip($bIdx, "Consulta as sugestões de índices do SQL Server, permite copiar o SQL e cria somente os índices marcados após confirmação.")
 $bIdx.Add_Click({ Show-SqlIndexAdvisor })
 [void]$tbl.Controls.Add($bIdx)
+Add-SupportSpacer
 
 # --- DIAGNÓSTICOS (VERDE) ---
 $bInfo = New-Object System.Windows.Forms.Button; $bInfo.Height = 50; $bInfo.Dock = 'Top'
@@ -14603,7 +15402,7 @@ $bClock.Add_Click({ Invoke-ClockSync })
 [void]$tbl.Controls.Add($bClock)
 
 # Mensagem de abertura: explica o programa para quem abre pela primeira vez
-Log-Message "INFO" "Preparador XMenu v5.16 - REVENDA - preparo e suporte de computadores com XMenu e NetPDV"
+Log-Message "INFO" "Preparador XMenu v5.25 - REVENDA - preparo e suporte de computadores com XMenu e NetPDV"
 Log-Message "LOG" "==============================================================="
 Log-Message "LOG" "COMO USAR"
 Log-Message "LOG" "  PREPARAR AMBIENTE WINDOWS .. ajusta energia, UAC e desempenho do PC num clique"
@@ -14613,7 +15412,16 @@ Log-Message "LOG" "  EXTERNOS ................... acesso remoto, Chrome, TEF HUB
 Log-Message "LOG" "  SUPORTE E DIAGNÓSTICO ...... impressoras, rede, SQL, backup, XMLs e reparos do Windows"
 Log-Message "LOG" "  Passe o mouse sobre um botão para ver o que ele faz antes de clicar."
 Log-Message "LOG" "---------------------------------------------------------------"
-Log-Message "LOG" "NOVO NA v5.16"
+Log-Message "LOG" "NOVO NA v5.25"
+Log-Message "SUCESSO" "  Banco: movimentação ou caixa aberto gera alerta sem bloqueio automático"
+Log-Message "SUCESSO" "  Banco: ações de índices mais compactas e diretas"
+Log-Message "SUCESSO" "  Banco: verificação operacional repetida antes de desanexar"
+Log-Message "SUCESSO" "  Banco: tela de índices reorganizada e mais simples de entender"
+Log-Message "SUCESSO" "  Banco: tela de troca reorganizada, mais clara e adaptável"
+Log-Message "SUCESSO" "  Banco: logs mostram os comandos SQL/ações principais executados"
+Log-Message "SUCESSO" "  Banco: troca mostra tamanho do MDF/LOG e avisa quando não parece banco zero"
+Log-Message "SUCESSO" "  Banco: validação compatível com SQL Server 2008 e 2019"
+Log-Message "SUCESSO" "  Banco: troca assistida do NetWebPDV com backup, permissões liberadas e rollback"
 Log-Message "SUCESSO" "  NetPDV: versão 1.3.68.0 (ZIP) na lista de versões, já vem selecionada"
 Log-Message "SUCESSO" "  XMLs e Backup: servidor padrão agora é localhost (127.0.0.1 não conectava em algumas máquinas)"
 Log-Message "SUCESSO" "  XMLs e Backup: campo Usuário do SQL (sa ou sa2, ou digite outro) e senha editável"
