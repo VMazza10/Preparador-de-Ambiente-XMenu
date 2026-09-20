@@ -1,6 +1,6 @@
 ﻿# =============================================================================
 # PREPARADOR XMENU - VERSAO REVENDA
-# Baseado na v5.36
+# Baseado na v5.37
 # Alteracoes Revenda:
 #   - Wallpaper: fundo_revenda.png
 #   - Removido: Atalhos de Suporte e Pasta Netcontroll
@@ -6471,6 +6471,1132 @@ function Invoke-BackupArquivosBanco {
     return $res
 }
 
+# -----------------------------------------------------------------------------
+# RESTAURAR BACKUP
+# Volta um backup feito pelo Preparador: o .bak (FAZER BACKUP), o .zip com o .bak dentro
+# (FAZER BACKUP compactado) ou o .zip do BACKUP MANUAL (arquivos MDF e LDF). O destino pode
+# ser o banco atual (substitui, depois de uma copia de seguranca) ou um banco novo.
+# Tudo que a rotina faz vai para o Log (tela e arquivo), com o prefixo "Restaurar backup:".
+# -----------------------------------------------------------------------------
+function Get-BackupArquivoInfo {
+    # Olha o arquivo escolhido sem falar com o SQL. Tipo: bak | zip-bak | zip-arquivos | desconhecido
+    # Devolve hashtable: Tipo / Nome / Bytes / Data / Entradas (Nome, NomeCompleto, Bytes) / Banco / Erro
+    param([string]$Caminho)
+    $info = @{ Tipo = "desconhecido"; Nome = ""; Bytes = [long]0; Data = [datetime]::MinValue; Entradas = @(); Banco = ""; Erro = "" }
+    try {
+        if (-not (Test-Path -LiteralPath $Caminho -PathType Leaf)) { $info.Erro = "O arquivo não existe: $Caminho"; return $info }
+        $item = Get-Item -LiteralPath $Caminho
+        $info.Nome = $item.Name
+        $info.Bytes = [long]$item.Length
+        $info.Data = $item.LastWriteTime
+        $extensao = $item.Extension.ToLowerInvariant()
+        if ($extensao -eq ".bak") {
+            $info.Tipo = "bak"
+            $info.Banco = (($item.BaseName -replace '^Antes de restaurar - ', '') -split ' - ')[0].Trim()
+            return $info
+        }
+        if ($extensao -ne ".zip") { $info.Erro = "Escolha um arquivo .bak ou .zip."; return $info }
+        Add-Type -AssemblyName System.IO.Compression
+        Add-Type -AssemblyName System.IO.Compression.FileSystem
+        $pacoteZip = [System.IO.Compression.ZipFile]::OpenRead($Caminho)
+        try {
+            $entradas = @($pacoteZip.Entries | Where-Object { $_.Name -ne "" } | ForEach-Object { [pscustomobject]@{ Nome = $_.Name; NomeCompleto = $_.FullName; Bytes = [long]$_.Length } })
+            $info.Entradas = $entradas
+            $entradasBak = @($entradas | Where-Object { $_.Nome -like "*.bak" })
+            $entradasMdf = @($entradas | Where-Object { $_.Nome -like "*.mdf" })
+            if ($entradasBak.Count -gt 0) {
+                $info.Tipo = "zip-bak"
+                $info.Banco = (([System.IO.Path]::GetFileNameWithoutExtension($entradasBak[0].Nome) -replace '^Antes de restaurar - ', '') -split ' - ')[0].Trim()
+            }
+            elseif ($entradasMdf.Count -gt 0) {
+                $info.Tipo = "zip-arquivos"
+                $info.Banco = [System.IO.Path]::GetFileNameWithoutExtension($entradasMdf[0].Nome)
+                # o LEIA-ME do BACKUP MANUAL diz de que banco sao os arquivos
+                $entradaLeia = $pacoteZip.GetEntry("LEIA-ME.txt")
+                if ($null -ne $entradaLeia) {
+                    $leitorLeia = New-Object System.IO.StreamReader($entradaLeia.Open(), [System.Text.Encoding]::UTF8)
+                    try {
+                        $primeiraLinha = "$($leitorLeia.ReadLine())"
+                        if ($primeiraLinha -match '^Cópia dos arquivos do banco (.+)$') { $info.Banco = $Matches[1].Trim() }
+                    }
+                    finally { $leitorLeia.Dispose() }
+                }
+            }
+            else { $info.Erro = "Esse .zip não tem um .bak nem os arquivos MDF e LDF de um banco." }
+        }
+        finally { $pacoteZip.Dispose() }
+    }
+    catch { $info.Erro = "Não consegui abrir o arquivo: $($_.Exception.Message)" }
+    return $info
+}
+
+function Copy-FluxoComProgresso {
+    # Copia de um Stream para outro com progresso e cancelamento. Devolve $false se cancelado.
+    param($Origem, $Destino, [long]$Total, [scriptblock]$AoProgredir, [scriptblock]$Cancelado)
+    $bufferCopia = New-Object byte[] (4MB)
+    $feitoCopia = [long]0
+    $relogioCopia = [System.Diagnostics.Stopwatch]::StartNew()
+    while (($lidoCopia = $Origem.Read($bufferCopia, 0, $bufferCopia.Length)) -gt 0) {
+        $Destino.Write($bufferCopia, 0, $lidoCopia)
+        $feitoCopia += $lidoCopia
+        [System.Windows.Forms.Application]::DoEvents()
+        if ($null -ne $Cancelado -and [bool](& $Cancelado)) { return $false }
+        if ($null -ne $AoProgredir -and $relogioCopia.ElapsedMilliseconds -ge 250) {
+            $relogioCopia.Restart()
+            $null = & $AoProgredir ([math]::Round(100.0 * $feitoCopia / [math]::Max($Total, 1), 1))
+        }
+    }
+    if ($null -ne $AoProgredir) { $null = & $AoProgredir 100 }
+    return $true
+}
+
+function Invoke-RestaurarBanco {
+    # Restaura o backup escolhido no banco de destino. Nao lanca excecao: o resultado diz o que aconteceu.
+    #   -Banco: nome do destino. Se ja existe, e SUBSTITUIDO (depois de uma copia de seguranca dele); senao e criado.
+    #   -PastaBackups: onde fica a copia de seguranca do banco atual
+    #   -AoProgredir { param($Etapa, $Pct) } (Pct -1 = sem porcentagem), -Cancelado { $true para parar }
+    #   -AoSemVolta { }: chamado quando ja nao da mais para cancelar
+    # Devolve hashtable: Ok / Cancelado / Erro / Aviso / Modo / Tipo / CopiaSeguranca / EstadoAntes / EstadoDepois /
+    #   Duracao / Tabelas / VoltouAoQueEstava
+    #   -PastaNetControll: onde ficam os arquivos de um banco NOVO quando nao ha um NetWebPDV para copiar a pasta
+    param([string]$TextoConexao, [string]$Arquivo, [string]$Banco, [string]$PastaBackups,
+        [scriptblock]$AoProgredir, [scriptblock]$Cancelado, [scriptblock]$AoSemVolta, [string]$PastaNetControll = "C:\netcontroll")
+
+    $res = @{
+        Ok = $false; Cancelado = $false; Erro = ""; Aviso = ""; Modo = ""; Tipo = ""; CopiaSeguranca = ""
+        EstadoAntes = ""; EstadoDepois = ""; Duracao = [timespan]::Zero; Tabelas = -1; VoltouAoQueEstava = $false
+    }
+    # Nomes proprios de proposito: estes blocos rodam de dentro de outras funcoes
+    $rstAoProgredir = $AoProgredir
+    $rstCancelado = $Cancelado
+    $rstAoSemVolta = $AoSemVolta
+    $rstEstado = @{ SemVolta = $false; PediuParar = $false }
+    $rstAvisa = { param($Etapa, $Pct) if ($null -ne $rstAoProgredir) { $null = & $rstAoProgredir $Etapa $Pct } }
+    $rstParar = { (-not $rstEstado.SemVolta) -and ($null -ne $rstCancelado) -and [bool](& $rstCancelado) }
+    $rstLog = { param([string]$Tag, [string]$Texto) Log-Message $Tag ("Restaurar backup: " + $Texto) }
+    $rstTempo = {
+        param($Intervalo)
+        if ($Intervalo.TotalSeconds -ge 60) { return ("{0}min {1:00}s" -f [int][math]::Floor($Intervalo.TotalMinutes), $Intervalo.Seconds) }
+        return ("{0:N1}s" -f $Intervalo.TotalSeconds)
+    }
+    $rstTexto = { param([string]$Valor) "N'" + $Valor.Replace("'", "''") + "'" }
+    $rstRelogio = [System.Diagnostics.Stopwatch]::StartNew()
+    $cn = $null
+    $cnVigia = $null
+    $rstLimpar = New-Object System.Collections.Generic.List[string]
+    $nomeSql = "[" + $Banco.Replace("]", "]]") + "]"
+    $spid = 0
+
+    try {
+        $info = Get-BackupArquivoInfo -Caminho $Arquivo
+        if ($info.Erro -ne "") { throw $info.Erro }
+        $res.Tipo = $info.Tipo
+        $descricaoTipo = switch ($info.Tipo) {
+            'bak' { "backup do SQL (.bak)" }
+            'zip-bak' { ".zip com o backup do SQL (.bak) dentro" }
+            'zip-arquivos' { ".zip do BACKUP MANUAL (arquivos MDF e LDF)" }
+        }
+        & $rstLog "INFO" "arquivo escolhido: $Arquivo ($(Format-BytesTexto $info.Bytes)), tipo: $descricaoTipo"
+        & $rstLog "INFO" "banco de destino: $Banco"
+
+        & $rstAvisa "Conectando" -1
+        & $rstLog "INFO" "conectando ao SQL Server"
+        $cn = New-Object System.Data.SqlClient.SqlConnection($TextoConexao)
+        Wait-SqlTarefa $cn.OpenAsync()
+        $cnVigia = New-Object System.Data.SqlClient.SqlConnection($TextoConexao)
+        Wait-SqlTarefa $cnVigia.OpenAsync()
+
+        $rstValor = {
+            param([string]$Sql, $Valor)
+            $cmdValor = $cn.CreateCommand()
+            $cmdValor.CommandTimeout = 120
+            $cmdValor.CommandText = $Sql
+            if ($null -ne $Valor) { [void]$cmdValor.Parameters.AddWithValue("@v", $Valor) }
+            $tarefaValor = $cmdValor.ExecuteScalarAsync()
+            Wait-SqlTarefa $tarefaValor
+            $v = $tarefaValor.Result
+            if ($v -is [System.DBNull]) { return $null }
+            return $v
+        }
+        # Le todas as linhas do primeiro resultado como hashtables (coluna -> valor)
+        $rstLer = {
+            param([string]$Sql, [string]$Detalhe, $Parametros)
+            $cmdLer = $cn.CreateCommand()
+            $cmdLer.CommandTimeout = 0
+            $cmdLer.CommandText = $Sql
+            if ($null -ne $Parametros) { foreach ($chave in @($Parametros.Keys)) { [void]$cmdLer.Parameters.AddWithValue($chave, $Parametros[$chave]) } }
+            Log-SqlBancoComando "Restaurar backup" $Sql $Detalhe
+            $tarefaLer = $cmdLer.ExecuteReaderAsync()
+            Wait-SqlTarefa $tarefaLer
+            $leitor = $tarefaLer.Result
+            $linhasLidas = New-Object System.Collections.Generic.List[object]
+            try {
+                while ($leitor.Read()) {
+                    $linhaLida = @{}
+                    for ($i = 0; $i -lt $leitor.FieldCount; $i++) { $linhaLida[$leitor.GetName($i)] = $leitor.GetValue($i) }
+                    $linhasLidas.Add($linhaLida)
+                }
+            }
+            finally { $leitor.Close() }
+            return @($linhasLidas.ToArray())
+        }
+        # Comando sem resultado (ALTER DATABASE, DROP, CREATE ... FOR ATTACH), com a janela respondendo
+        $rstExec = {
+            param([string]$Sql, [string]$Detalhe)
+            $cmdExec = $cn.CreateCommand()
+            $cmdExec.CommandTimeout = 0
+            $cmdExec.CommandText = $Sql
+            Log-SqlBancoComando "Restaurar backup" $Sql $Detalhe
+            $tarefaExec = $cmdExec.ExecuteNonQueryAsync()
+            Wait-SqlTarefa $tarefaExec -IntervaloMs 300
+        }
+        # Comando longo (RESTORE) com porcentagem vinda de outra conexao; cancela ate o ponto sem volta
+        $rstLongo = {
+            param([string]$Sql, [string]$Etapa, [string]$Detalhe, $Parametros)
+            $cmdLongo = $cn.CreateCommand()
+            $cmdLongo.CommandTimeout = 0
+            $cmdLongo.CommandText = $Sql
+            if ($null -ne $Parametros) { foreach ($chave in @($Parametros.Keys)) { [void]$cmdLongo.Parameters.AddWithValue($chave, $Parametros[$chave]) } }
+            $cmdVigia = $cnVigia.CreateCommand()
+            $cmdVigia.CommandTimeout = 10
+            $cmdVigia.CommandText = "SELECT percent_complete FROM sys.dm_exec_requests WHERE session_id = @s"
+            [void]$cmdVigia.Parameters.AddWithValue("@s", $spid)
+            if (& $rstParar) { $rstEstado.PediuParar = $true; throw "Restauração cancelada." }
+            & $rstAvisa $Etapa 0
+            Log-SqlBancoComando "Restaurar backup" $Sql $Detalhe
+            $tarefaLonga = $cmdLongo.ExecuteNonQueryAsync()
+            Wait-SqlTarefa $tarefaLonga -IntervaloMs 500 -AoEsperar {
+                if (-not $rstEstado.PediuParar -and (& $rstParar)) {
+                    $rstEstado.PediuParar = $true
+                    try { $cmdLongo.Cancel() } catch {}
+                }
+                try {
+                    $pctLido = $cmdVigia.ExecuteScalar()
+                    if ($null -ne $pctLido -and $pctLido -isnot [System.DBNull] -and [double]$pctLido -gt 0) { & $rstAvisa $Etapa ([math]::Round([double]$pctLido, 1)) }
+                }
+                catch {}
+            }
+            if ($rstEstado.PediuParar) { throw "Restauração cancelada." }
+            & $rstAvisa $Etapa 100
+        }
+        $spid = [int](& $rstValor "SELECT @@SPID")
+
+        $maquina = "$(& $rstValor "SELECT CAST(SERVERPROPERTY('MachineName') AS nvarchar(128))")"
+        if (-not (Test-SqlLocal -MaquinaSql $maquina)) {
+            throw "Esse SQL Server está na máquina $maquina. A restauração precisa ser feita nela: abra o Preparador no servidor."
+        }
+        $existe = ($null -ne (& $rstValor "SELECT DB_ID(@v)" $Banco))
+        $estadoAntes = ""
+        $arquivosAtuais = @()
+        if ($existe) {
+            $estadoAntes = "$(& $rstValor "SELECT state_desc FROM sys.databases WHERE name = @v" $Banco)"
+            $arquivosAtuais = @(& $rstLer "SELECT name, physical_name, type FROM sys.master_files WHERE database_id = DB_ID(@b) ORDER BY type, file_id" "banco=$Banco" @{ '@b' = $Banco })
+            & $rstLog "INFO" "o banco $Banco já existe e está ${estadoAntes}: ele será SUBSTITUÍDO pelo backup"
+        }
+        else { & $rstLog "INFO" "o banco $Banco não existe nesse SQL Server: será criado um banco novo (nenhum banco atual é alterado)" }
+        $res.EstadoAntes = $estadoAntes
+        $eBak = ($info.Tipo -eq 'bak' -or $info.Tipo -eq 'zip-bak')
+        $res.Modo = $(if ($eBak) { 'bak' } else { 'arquivos' }) + $(if ($existe) { '-substituir' } else { '-novo' })
+
+        # pasta de trabalho: dentro da pasta de dados do SQL, onde ele sempre tem permissao
+        $dirDados = ""
+        $padraoDados = & $rstValor "SELECT CAST(SERVERPROPERTY('InstanceDefaultDataPath') AS nvarchar(512))"
+        if ("$padraoDados".Trim() -ne "") { $dirDados = "$padraoDados".TrimEnd('\') }
+        if ($dirDados -eq "" -or -not (Test-Path -LiteralPath $dirDados)) {
+            $mdfMaster = "$(& $rstValor "SELECT TOP 1 physical_name FROM sys.master_files WHERE database_id = 1 AND type = 0 ORDER BY file_id")"
+            $dirDados = Split-Path -Parent $mdfMaster
+        }
+        $dirNovos = $dirDados
+        $dirTrabalho = $dirDados
+        if ($existe) {
+            $primeiroAtual = @($arquivosAtuais | Where-Object { [int]$_['type'] -eq 0 })[0]
+            if ($null -ne $primeiroAtual) { $dirTrabalho = Split-Path -Parent "$($primeiroAtual['physical_name'])" }
+        }
+        else {
+            # Banco NOVO: os arquivos ficam na pasta do NetControll, onde o NetWebPDV mora, e nao na pasta de dados do SQL.
+            # 1) a pasta do NetWebPDV que ja esta no SQL; 2) o NetWebPDV.mdf achado dentro da pasta do NetControll;
+            # 3) a propria pasta do NetControll; 4) so se ela nao existir, a pasta de dados do SQL
+            $origemPasta = ""
+            $dirNet = ""
+            $refNetWebPdv = @(& $rstLer "SELECT TOP 1 physical_name FROM sys.master_files WHERE database_id = DB_ID(N'NetWebPDV') AND type = 0 ORDER BY file_id" "procurando a pasta do NetWebPDV atual" $null)
+            if ($refNetWebPdv.Count -gt 0) { $dirNet = Split-Path -Parent "$($refNetWebPdv[0]['physical_name'])"; $origemPasta = "a pasta onde o NetWebPDV atual está no SQL Server" }
+            if ($dirNet -eq "" -and (Test-Path -LiteralPath $PastaNetControll)) {
+                $achado = @(Get-ChildItem -LiteralPath $PastaNetControll -Filter "NetWebPDV.mdf" -Recurse -Depth 4 -File -ErrorAction SilentlyContinue | Where-Object { $_.FullName -notmatch '\\(Backup[^\\]*|\.OLD|data|Versoes)\\' } | Select-Object -First 1)
+                if ($achado.Count -gt 0) { $dirNet = $achado[0].DirectoryName; $origemPasta = "a pasta do NetWebPDV.mdf achado dentro de $PastaNetControll" }
+                else { $dirNet = $PastaNetControll.TrimEnd('\'); $origemPasta = "a pasta do NetControll" }
+            }
+            if ($dirNet -ne "") {
+                $dirNovos = $dirNet
+                $dirTrabalho = $dirNet
+                & $rstLog "INFO" "o banco novo ficará dentro da pasta do NetControll: $dirNet ($origemPasta)"
+                # o SQL precisa poder gravar ali (o mesmo que o Trocar Banco faz)
+                $contasSql = @(Get-SqlContasServico -Conexao $cn)
+                $contasDadas = @(Grant-PastaBackupSql -Pasta $dirNet -Contas $contasSql)
+                if ($contasDadas.Count -gt 0) { & $rstLog "INFO" "permissão de alteração dada ao SQL Server nessa pasta: $($contasDadas -join ', ')" }
+            }
+            else { & $rstLog "INFO" "não achei a pasta do NetControll; o banco novo ficará na pasta de dados do SQL Server: $dirDados" }
+        }
+        $pastaTrab = Join-Path (Join-Path $dirTrabalho "PreparadorRestaurar") (Get-Date).ToString("yyyyMMdd_HHmmss")
+        $rstLimpar.Add($pastaTrab)
+        & $rstLog "INFO" "pasta de dados do SQL Server: $dirDados"
+
+        # extrai uma entrada do .zip para um arquivo, com progresso; $false se cancelado
+        $rstExtrai = {
+            param([string]$ArquivoZip, [string]$NomeCompleto, [string]$Destino, [long]$Tamanho, [string]$Etapa)
+            $pacoteLido = [System.IO.Compression.ZipFile]::OpenRead($ArquivoZip)
+            try {
+                $entradaLida = $pacoteLido.GetEntry($NomeCompleto)
+                if ($null -eq $entradaLida) { throw "O .zip não tem mais o arquivo $NomeCompleto." }
+                $fluxoEntrada = $entradaLida.Open()
+                $fluxoSaida = [System.IO.File]::Open($Destino, [System.IO.FileMode]::Create)
+                try {
+                    $terminou = Copy-FluxoComProgresso -Origem $fluxoEntrada -Destino $fluxoSaida -Total $Tamanho -AoProgredir { param($pctExtrai) & $rstAvisa $Etapa $pctExtrai } -Cancelado $rstParar
+                }
+                finally { $fluxoSaida.Dispose(); $fluxoEntrada.Dispose() }
+                return $terminou
+            }
+            finally { $pacoteLido.Dispose() }
+        }
+        $rstEspaco = {
+            param([string]$Pasta, [long]$Bytes, [string]$Para)
+            if (-not (Test-Path -LiteralPath $Pasta)) { [void](New-Item -ItemType Directory -Path $Pasta -Force) }
+            $espacoRst = Test-EspacoBackup -Pasta $Pasta -Bytes $Bytes
+            $raizRst = [System.IO.Path]::GetPathRoot([System.IO.Path]::GetFullPath($Pasta))
+            & $rstLog "INFO" "espaço em $raizRst para $Para - livre $(Format-BytesTexto $espacoRst.Livre), necessário $(Format-BytesTexto $espacoRst.Precisa) (com 10% de folga)"
+            if (-not $espacoRst.Ok) { throw "Não há espaço em $raizRst para $Para - precisa de $(Format-BytesTexto $espacoRst.Precisa) e há $(Format-BytesTexto $espacoRst.Livre) livres. Libere espaço e tente de novo." }
+        }
+
+        # Escolhe o caminho final de cada arquivo do banco: os do banco atual (se existir) ou novos na pasta de dados
+        $nomeBase = ($Banco -replace '[\\/:*?"<>|]', '_')
+        $rstMapa = {
+            param($Itens)   # cada item: @{ Logico; Tipo (0 dados, 1 log); Nome (nome do arquivo de origem) }
+            $mapaFeito = New-Object System.Collections.Generic.List[object]
+            $caminhosUsados = @{}
+            $temDados = 0
+            foreach ($itemMapa in $Itens) {
+                $destinoMapa = $null
+                if ($existe) {
+                    $candidato = @($arquivosAtuais | Where-Object { [int]$_['type'] -eq $itemMapa.Tipo -and -not $caminhosUsados.ContainsKey("$($_['physical_name'])".ToLowerInvariant()) -and (("$($_['name'])" -ieq $itemMapa.Logico) -or ((Split-Path -Leaf "$($_['physical_name'])") -ieq $itemMapa.Nome)) })[0]
+                    if ($null -eq $candidato) { $candidato = @($arquivosAtuais | Where-Object { [int]$_['type'] -eq $itemMapa.Tipo -and -not $caminhosUsados.ContainsKey("$($_['physical_name'])".ToLowerInvariant()) })[0] }
+                    if ($null -ne $candidato) { $destinoMapa = "$($candidato['physical_name'])" }
+                }
+                if ($null -eq $destinoMapa) {
+                    if ($itemMapa.Tipo -eq 1) { $novoNome = $nomeBase + "_log.ldf" }
+                    elseif ($temDados -eq 0) { $novoNome = $nomeBase + ".mdf" }
+                    else { $novoNome = $nomeBase + "_" + ($itemMapa.Logico -replace '[\\/:*?"<>|]', '_') + ".ndf" }
+                    $destinoMapa = Join-Path $dirNovos $novoNome
+                    if (Test-Path -LiteralPath $destinoMapa) { throw "Já existe o arquivo $destinoMapa. Escolha outro nome para o banco novo." }
+                }
+                if ($itemMapa.Tipo -eq 0) { $temDados++ }
+                $caminhosUsados[$destinoMapa.ToLowerInvariant()] = $true
+                $mapaFeito.Add(@{ Logico = $itemMapa.Logico; Tipo = $itemMapa.Tipo; Nome = $itemMapa.Nome; Destino = $destinoMapa })
+            }
+            return @($mapaFeito.ToArray())
+        }
+
+        # ------------------------------------------------------------ 1) preparar e conferir o backup (nada e alterado ainda)
+        $mapa = @()
+        $caminhoBak = ""
+        $arquivosPreparados = @()
+        if ($eBak) {
+            $caminhoBak = $Arquivo
+            if ($info.Tipo -eq 'zip-bak') {
+                $entradaBak = @($info.Entradas | Where-Object { $_.Nome -like "*.bak" })[0]
+                & $rstLog "INFO" "passo 1: extraindo o $($entradaBak.Nome) ($(Format-BytesTexto $entradaBak.Bytes)) do .zip para a pasta de trabalho do SQL"
+                & $rstEspaco $pastaTrab $entradaBak.Bytes "extrair o backup"
+                $caminhoBak = Join-Path $pastaTrab $entradaBak.Nome
+                if (-not (& $rstExtrai $Arquivo $entradaBak.NomeCompleto $caminhoBak $entradaBak.Bytes "Extraindo o backup")) { throw "Restauração cancelada." }
+                & $rstLog "INFO" "backup extraído em $caminhoBak"
+            }
+            else { & $rstLog "INFO" "passo 1: lendo o cabeçalho do backup (RESTORE HEADERONLY) e conferindo o arquivo" }
+            $tentouCopiar = $false
+            while ($true) {
+                try {
+                    $cabecalhos = @(& $rstLer "RESTORE HEADERONLY FROM DISK = @f" "arquivo=$caminhoBak" @{ '@f' = $caminhoBak })
+                    break
+                }
+                catch {
+                    if ($tentouCopiar -or $info.Tipo -ne 'bak' -or -not (Test-ErroSemPermissao $_.Exception)) { throw }
+                    # O SQL nao tem permissao de ler nessa pasta: copia o .bak para a pasta de trabalho dele
+                    $tentouCopiar = $true
+                    & $rstLog "INFO" "o SQL Server não tem permissão para ler esse arquivo onde ele está; copiando para a pasta de trabalho dele"
+                    & $rstEspaco $pastaTrab $info.Bytes "copiar o backup"
+                    $caminhoBak = Join-Path $pastaTrab $info.Nome
+                    $fluxoBakIn = [System.IO.File]::Open($Arquivo, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+                    $fluxoBakOut = [System.IO.File]::Open($caminhoBak, [System.IO.FileMode]::Create)
+                    try { $copiou = Copy-FluxoComProgresso -Origem $fluxoBakIn -Destino $fluxoBakOut -Total $info.Bytes -AoProgredir { param($pctCopia) & $rstAvisa "Copiando o backup" $pctCopia } -Cancelado $rstParar }
+                    finally { $fluxoBakOut.Dispose(); $fluxoBakIn.Dispose() }
+                    if (-not $copiou) { throw "Restauração cancelada." }
+                }
+            }
+            $cabecalho = $cabecalhos[0]
+            if ($null -eq $cabecalho) { throw "Não consegui ler o cabeçalho desse backup." }
+            if ($cabecalho['BackupFinishDate'] -isnot [datetime]) { throw "Esse backup está incompleto ou danificado: o cabeçalho dele não tem a data em que terminou." }
+            & $rstLog "INFO" "o backup é do banco $($cabecalho['DatabaseName']), feito em $(([datetime]$cabecalho['BackupFinishDate']).ToString('dd/MM/yyyy HH:mm')), com $(Format-BytesTexto ([long]$cabecalho['BackupSize']))"
+            $listaBak = @(& $rstLer "RESTORE FILELISTONLY FROM DISK = @f" "arquivo=$caminhoBak" @{ '@f' = $caminhoBak })
+            $itensBak = @()
+            $bytesBanco = [long]0
+            foreach ($fb in $listaBak) {
+                $tipoBak = "$($fb['Type'])"
+                if ($tipoBak -ne 'D' -and $tipoBak -ne 'L') { continue }
+                $itensBak += @{ Logico = "$($fb['LogicalName'])"; Tipo = $(if ($tipoBak -eq 'L') { 1 } else { 0 }); Nome = (Split-Path -Leaf "$($fb['PhysicalName'])") }
+                $bytesBanco += [long]$fb['Size']
+                & $rstLog "INFO" "  o backup guarda o arquivo $($fb['LogicalName']) ($(if ($tipoBak -eq 'L') { 'log' } else { 'dados' }), $(Format-BytesTexto ([long]$fb['Size'])))"
+            }
+            $mapa = @(& $rstMapa $itensBak)
+            & $rstLog "INFO" "conferindo se o backup está íntegro (RESTORE VERIFYONLY); se estiver com defeito, nada é alterado"
+            & $rstLongo "RESTORE VERIFYONLY FROM DISK = @f" "Conferindo o backup" "arquivo=$caminhoBak" @{ '@f' = $caminhoBak }
+            & $rstLog "SUCESSO" "o backup está íntegro"
+            if (-not $existe) { & $rstEspaco $dirNovos $bytesBanco "o banco novo" }
+        }
+        else {
+            $entradasArq = @($info.Entradas | Where-Object { $_.Nome -match '\.(mdf|ndf|ldf)$' })
+            & $rstLog "INFO" "passo 1: o .zip tem $($entradasArq.Count) arquivo(s) de banco: $((@($entradasArq | ForEach-Object { $_.Nome })) -join ', ')"
+            $totalArq = [long]0
+            foreach ($ea in $entradasArq) { $totalArq += $ea.Bytes }
+            $itensArq = @($entradasArq | ForEach-Object { @{ Logico = [System.IO.Path]::GetFileNameWithoutExtension($_.Nome); Tipo = $(if ($_.Nome -match '\.ldf$') { 1 } else { 0 }); Nome = $_.Nome } })
+            $mapa = @(& $rstMapa $itensArq)
+            $temLogNoZip = (@($entradasArq | Where-Object { $_.Nome -match '\.ldf$' }).Count -gt 0)
+            if (-not $temLogNoZip) { & $rstLog "INFO" "atenção: esse .zip não tem o arquivo de log (LDF); o SQL Server vai tentar criar um log novo ao anexar" }
+            & $rstLog "INFO" "extraindo os arquivos do .zip para a pasta de trabalho do SQL (antes de tirar o banco do ar)"
+            & $rstEspaco $pastaTrab $totalArq "extrair os arquivos"
+            [void](New-Item -ItemType Directory -Path $pastaTrab -Force)
+            foreach ($ea in $entradasArq) {
+                $preparado = Join-Path $pastaTrab $ea.Nome
+                if (-not (& $rstExtrai $Arquivo $ea.NomeCompleto $preparado $ea.Bytes "Extraindo $($ea.Nome)")) { throw "Restauração cancelada." }
+                if ((Get-Item -LiteralPath $preparado).Length -ne $ea.Bytes) { throw "O arquivo $($ea.Nome) saiu do .zip com tamanho diferente do original. O .zip pode estar danificado." }
+                $arquivosPreparados += @{ Nome = $ea.Nome; Caminho = $preparado }
+                & $rstLog "INFO" "$($ea.Nome) extraído ($(Format-BytesTexto $ea.Bytes)) e conferido"
+            }
+        }
+        foreach ($m in $mapa) { & $rstLog "INFO" "  $($m.Logico) irá para $($m.Destino)" }
+
+        # ------------------------------------------------------------ 2) copia de seguranca do banco atual
+        if ($existe) {
+            & $rstLog "INFO" "passo 2: cópia de segurança do banco atual $Banco antes de mexer nele"
+            $seguranca = $null
+            $wrapSeg = { param($EtapaSeg, $PctSeg) & $rstAvisa ("Cópia de segurança: " + $EtapaSeg) $PctSeg }
+            if ($estadoAntes -eq "ONLINE") {
+                & $rstLog "INFO" "fazendo o backup normal do banco atual (com conferência)"
+                $seguranca = Invoke-BackupBanco -TextoConexao $TextoConexao -Banco $Banco -Pasta $PastaBackups -AoProgredir $wrapSeg -Cancelado $rstParar
+                if ($seguranca.Cancelado) { throw "Restauração cancelada." }
+                if ($seguranca.Ok) { $res.CopiaSeguranca = $seguranca.Arquivo }
+                else { & $rstLog "ERRO" "o backup normal do banco atual falhou ($($seguranca.Erro)); vou copiar os arquivos do banco (backup manual)" }
+            }
+            else { & $rstLog "INFO" "o banco atual está ${estadoAntes}: o backup normal não funciona assim; vou copiar os arquivos do banco (backup manual)" }
+            if ($res.CopiaSeguranca -eq "") {
+                $seguranca = Invoke-BackupArquivosBanco -TextoConexao $TextoConexao -Banco $Banco -Pasta $PastaBackups -AoProgredir $wrapSeg -Cancelado $rstParar
+                if ($seguranca.Cancelado) { throw "Restauração cancelada." }
+                if (-not $seguranca.Ok) { throw "Não consegui fazer a cópia de segurança do banco atual, então nada foi alterado. Motivo: $($seguranca.Erro)" }
+                $res.CopiaSeguranca = $seguranca.Zip
+            }
+            $arquivoSeguranca = $res.CopiaSeguranca
+            $novoNomeSeg = Join-Path (Split-Path -Parent $arquivoSeguranca) ("Antes de restaurar - " + (Split-Path -Leaf $arquivoSeguranca))
+            $sufixoSeg = 1
+            while (Test-Path -LiteralPath $novoNomeSeg) { $sufixoSeg++; $novoNomeSeg = Join-Path (Split-Path -Parent $arquivoSeguranca) ("Antes de restaurar - " + [System.IO.Path]::GetFileNameWithoutExtension($arquivoSeguranca) + " ($sufixoSeg)" + [System.IO.Path]::GetExtension($arquivoSeguranca)) }
+            Move-Item -LiteralPath $arquivoSeguranca -Destination $novoNomeSeg -Force
+            $res.CopiaSeguranca = $novoNomeSeg
+            & $rstLog "SUCESSO" "cópia de segurança pronta: $novoNomeSeg"
+            # o backup manual mexe no estado do banco: le de novo
+            $estadoAntes = "$(& $rstValor "SELECT state_desc FROM sys.databases WHERE name = @v" $Banco)"
+            & $rstLog "INFO" "estado do banco atual depois da cópia de segurança: $estadoAntes"
+        }
+        if (& $rstParar) { throw "Restauração cancelada." }
+
+        # ------------------------------------------------------------ 3) ponto sem volta: a partir daqui o banco muda
+        $rstEstado.SemVolta = $true
+        if ($null -ne $rstAoSemVolta) { $null = & $rstAoSemVolta }
+        & $rstAvisa "Restaurando" -1
+        $tempoRestore = [System.Diagnostics.Stopwatch]::StartNew()
+
+        # monta o "MOVE 'logico' TO 'caminho'" e roda o RESTORE
+        $rstRestoreBak = {
+            param([string]$ArquivoBak, $MapaUso, [string]$EtapaRest)
+            $moves = ($MapaUso | ForEach-Object { "MOVE " + (& $rstTexto $_.Logico) + " TO " + (& $rstTexto $_.Destino) }) -join ", "
+            $sqlRestore = "RESTORE DATABASE $nomeSql FROM DISK = @f WITH REPLACE, STATS = 5, " + $moves
+            & $rstLongo $sqlRestore $EtapaRest "arquivo=$ArquivoBak" @{ '@f' = $ArquivoBak }
+        }
+
+        if ($res.Modo -eq 'bak-substituir') {
+            $modoUnico = $false
+            if ($estadoAntes -eq "OFFLINE") {
+                & $rstLog "INFO" "passo 3: o banco atual está OFFLINE; colocando ONLINE para poder restaurar"
+                & $rstExec "ALTER DATABASE $nomeSql SET ONLINE" "banco=$Banco"
+                $estadoAntes = "ONLINE"
+            }
+            if ($estadoAntes -eq "ONLINE") {
+                & $rstLog "INFO" "passo 3: tirando todo mundo do banco (usuário único, com desconexão imediata): o PDV e o Concentrador perdem a conexão"
+                & $rstExec "ALTER DATABASE $nomeSql SET SINGLE_USER WITH ROLLBACK IMMEDIATE" "banco=$Banco"
+                $modoUnico = $true
+            }
+            & $rstLog "INFO" "passo 4: restaurando o backup por cima do banco $Banco (RESTORE DATABASE ... WITH REPLACE)"
+            try {
+                & $rstRestoreBak $caminhoBak $mapa "Restaurando o backup"
+            }
+            catch {
+                $erroRestore = $_.Exception
+                & $rstLog "ERRO" "a restauração falhou: $(Get-TextoErroSql $erroRestore)"
+                # um erro grave do SQL derruba a conexao: reconecta para poder desfazer
+                if ($cn.State -ne 'Open') {
+                    & $rstLog "INFO" "o erro encerrou a conexão com o SQL Server; reconectando para desfazer"
+                    try { $cn.Dispose() } catch {}
+                    $cn = New-Object System.Data.SqlClient.SqlConnection($TextoConexao)
+                    Wait-SqlTarefa $cn.OpenAsync()
+                    $spid = [int](& $rstValor "SELECT @@SPID")
+                }
+                if ($res.CopiaSeguranca -like "*.bak") {
+                    & $rstLog "INFO" "tentando voltar o banco ao que era antes, pela cópia de segurança"
+                    try {
+                        $listaSeg = @(& $rstLer "RESTORE FILELISTONLY FROM DISK = @f" "arquivo=$($res.CopiaSeguranca)" @{ '@f' = $res.CopiaSeguranca })
+                        $itensSeg = @($listaSeg | Where-Object { "$($_['Type'])" -eq 'D' -or "$($_['Type'])" -eq 'L' } | ForEach-Object { @{ Logico = "$($_['LogicalName'])"; Tipo = $(if ("$($_['Type'])" -eq 'L') { 1 } else { 0 }); Nome = (Split-Path -Leaf "$($_['PhysicalName'])") } })
+                        & $rstRestoreBak $res.CopiaSeguranca (@(& $rstMapa $itensSeg)) "Voltando ao que era antes"
+                        $res.VoltouAoQueEstava = $true
+                        & $rstLog "SUCESSO" "o banco voltou ao que era antes da tentativa"
+                    }
+                    catch { & $rstLog "ERRO" "não consegui voltar sozinho: $(Get-TextoErroSql $_.Exception). A cópia de segurança está em $($res.CopiaSeguranca)" }
+                }
+                throw $erroRestore
+            }
+            finally {
+                if ($modoUnico) {
+                    try { & $rstExec "ALTER DATABASE $nomeSql SET MULTI_USER" "banco=$Banco" }
+                    catch { & $rstLog "ERRO" "não consegui voltar o banco para vários usuários: $(Get-TextoErroSql $_.Exception)" }
+                }
+            }
+        }
+        elseif ($res.Modo -eq 'bak-novo') {
+            & $rstLog "INFO" "passo 3: restaurando o backup como um banco novo chamado $Banco"
+            try { & $rstRestoreBak $caminhoBak $mapa "Restaurando o backup" }
+            catch {
+                $erroRestore = $_.Exception
+                & $rstLog "ERRO" "a restauração falhou: $(Get-TextoErroSql $erroRestore). Apagando o banco novo que ficou pela metade"
+                if ($cn.State -ne 'Open') {
+                    try { $cn.Dispose() } catch {}
+                    $cn = New-Object System.Data.SqlClient.SqlConnection($TextoConexao)
+                    Wait-SqlTarefa $cn.OpenAsync()
+                    $spid = [int](& $rstValor "SELECT @@SPID")
+                }
+                try { & $rstExec "DROP DATABASE $nomeSql" "banco=$Banco" } catch {}
+                foreach ($m in $mapa) { Remove-Item -LiteralPath $m.Destino -Force -ErrorAction SilentlyContinue }
+                throw $erroRestore
+            }
+        }
+        else {
+            # ---- arquivos (BACKUP MANUAL): os arquivos ja estao extraidos e conferidos na pasta de trabalho
+            $renomeados = @()
+            $sufixoAntes = ".antes-restauracao"
+            $sqlAttach = {
+                param($MapaAttach)
+                $listaAttach = ($MapaAttach | ForEach-Object { "(FILENAME = " + (& $rstTexto $_.Destino) + ")" }) -join ", "
+                $temLdfAttach = (@($MapaAttach | Where-Object { $_.Tipo -eq 1 }).Count -gt 0)
+                return "CREATE DATABASE $nomeSql ON " + $listaAttach + $(if ($temLdfAttach) { " FOR ATTACH" } else { " FOR ATTACH_REBUILD_LOG" })
+            }
+            if ($existe) {
+                if ($estadoAntes -ne "OFFLINE") {
+                    & $rstLog "INFO" "passo 3: deixando o banco $Banco offline para o SQL soltar os arquivos: o PDV e o Concentrador perdem a conexão"
+                    & $rstExec "ALTER DATABASE $nomeSql SET OFFLINE WITH ROLLBACK IMMEDIATE" "banco=$Banco"
+                }
+                else { & $rstLog "INFO" "passo 3: o banco $Banco já está OFFLINE" }
+                $atuaisAntes = @($arquivosAtuais | ForEach-Object { "$($_['physical_name'])" })
+                & $rstLog "INFO" "passo 4: guardando os arquivos atuais ao lado (com o final $sufixoAntes), para poder desfazer se algo der errado"
+                foreach ($caminhoAtual in $atuaisAntes) {
+                    if (Test-Path -LiteralPath $caminhoAtual) {
+                        $guardado = $caminhoAtual + $sufixoAntes
+                        if (Test-Path -LiteralPath $guardado) { $guardado = $caminhoAtual + $sufixoAntes + "-" + (Get-Date).ToString("HHmmss") }
+                        Move-Item -LiteralPath $caminhoAtual -Destination $guardado -Force
+                        $renomeados += @{ Original = $caminhoAtual; Guardado = $guardado }
+                        & $rstLog "INFO" "  $caminhoAtual guardado como $(Split-Path -Leaf $guardado)"
+                    }
+                }
+                & $rstLog "INFO" "passo 5: tirando o banco atual da lista do SQL Server (os arquivos já estão guardados)"
+                & $rstExec "DROP DATABASE $nomeSql" "banco=$Banco"
+            }
+            try {
+                & $rstLog "INFO" "colocando os arquivos do backup no lugar"
+                foreach ($m in $mapa) {
+                    $preparadoAqui = @($arquivosPreparados | Where-Object { $_.Nome -eq $m.Nome })[0]
+                    Move-Item -LiteralPath $preparadoAqui.Caminho -Destination $m.Destino -Force
+                    & $rstLog "INFO" "  $($m.Nome) colocado em $($m.Destino)"
+                }
+                & $rstLog "INFO" "anexando o banco (CREATE DATABASE ... FOR ATTACH)"
+                & $rstExec (& $sqlAttach $mapa) "banco=$Banco"
+            }
+            catch {
+                $erroAttach = $_.Exception
+                & $rstLog "ERRO" "não consegui anexar o banco: $(Get-TextoErroSql $erroAttach)"
+                # um erro grave do SQL (arquivo estragado) derruba a conexao: reconecta para poder desfazer
+                if ($cn.State -ne 'Open') {
+                    & $rstLog "INFO" "o erro encerrou a conexão com o SQL Server; reconectando para desfazer"
+                    try { $cn.Dispose() } catch {}
+                    $cn = New-Object System.Data.SqlClient.SqlConnection($TextoConexao)
+                    Wait-SqlTarefa $cn.OpenAsync()
+                    $spid = [int](& $rstValor "SELECT @@SPID")
+                }
+                if ($existe) {
+                    & $rstLog "INFO" "desfazendo: voltando os arquivos que estavam antes"
+                    try {
+                        try { & $rstExec "DROP DATABASE $nomeSql" "banco=$Banco" } catch {}
+                        foreach ($m in $mapa) { Remove-Item -LiteralPath $m.Destino -Force -ErrorAction SilentlyContinue }
+                        foreach ($r in $renomeados) { Move-Item -LiteralPath $r.Guardado -Destination $r.Original -Force }
+                        $mapaOriginal = @($arquivosAtuais | ForEach-Object { @{ Destino = "$($_['physical_name'])"; Tipo = [int]$_['type'] } })
+                        & $rstExec (& $sqlAttach $mapaOriginal) "banco=$Banco"
+                        $res.VoltouAoQueEstava = $true
+                        & $rstLog "SUCESSO" "o banco voltou ao que era antes da tentativa"
+                    }
+                    catch { & $rstLog "ERRO" "não consegui desfazer sozinho: $(Get-TextoErroSql $_.Exception). Os arquivos antigos estão ao lado, com o final $sufixoAntes, e a cópia de segurança está em $($res.CopiaSeguranca)" }
+                }
+                else { foreach ($m in $mapa) { Remove-Item -LiteralPath $m.Destino -Force -ErrorAction SilentlyContinue } }
+                throw $erroAttach
+            }
+            foreach ($r in $renomeados) {
+                try { Remove-Item -LiteralPath $r.Guardado -Force -ErrorAction Stop; & $rstLog "INFO" "  arquivo antigo apagado: $(Split-Path -Leaf $r.Guardado) (a cópia de segurança continua em $($res.CopiaSeguranca))" }
+                catch { & $rstLog "ERRO" "  não consegui apagar $($r.Guardado): $($_.Exception.Message)" }
+            }
+        }
+        & $rstLog "INFO" "a restauração levou $(& $rstTempo $tempoRestore.Elapsed)"
+
+        # ------------------------------------------------------------ 4) conferindo o resultado
+        & $rstAvisa "Conferindo o banco" -1
+        $res.EstadoDepois = "$(& $rstValor "SELECT state_desc FROM sys.databases WHERE name = @v" $Banco)"
+        $acessoDepois = "$(& $rstValor "SELECT user_access_desc FROM sys.databases WHERE name = @v" $Banco)"
+        & $rstLog "INFO" "estado do banco $Banco agora: $($res.EstadoDepois) ($acessoDepois)"
+        if ($acessoDepois -ne "MULTI_USER") {
+            & $rstExec "ALTER DATABASE $nomeSql SET MULTI_USER" "banco=$Banco"
+            & $rstLog "INFO" "banco voltou para vários usuários"
+        }
+        if ($res.EstadoDepois -eq "ONLINE") {
+            $res.Tabelas = [int](& $rstValor ("SELECT COUNT(*) FROM " + $nomeSql + ".sys.tables"))
+            & $rstLog "INFO" "conferência: o banco responde e tem $($res.Tabelas) tabela(s)"
+        }
+        else { $res.Aviso = "O banco ficou $($res.EstadoDepois), e não ONLINE. Veja o Diagnóstico do Banco." }
+        $res.Ok = ($res.EstadoDepois -eq "ONLINE")
+        if ($res.Ok) { & $rstLog "SUCESSO" "banco $Banco restaurado e ONLINE" }
+        else { & $rstLog "ERRO" "banco $Banco restaurado, mas está $($res.EstadoDepois)" }
+    }
+    catch {
+        if ($rstEstado.PediuParar -or "$($_.Exception.Message)" -eq "Restauração cancelada." -or (& $rstParar)) {
+            $res.Cancelado = $true
+            $res.Erro = "Restauração cancelada."
+            & $rstLog "CANCEL" "restauração cancelada pelo técnico. O banco não foi alterado."
+        }
+        else {
+            $res.Erro = "$(Get-TextoErroSql $_.Exception)"
+            & $rstLog "ERRO" "a restauração falhou: $($res.Erro)"
+        }
+    }
+    finally {
+        # arquivos de trabalho (backup extraido, copias) sempre saem no fim
+        foreach ($pastaLimpa in $rstLimpar) {
+            if (Test-Path -LiteralPath $pastaLimpa) {
+                & $rstLog "INFO" "apagando a pasta de trabalho $pastaLimpa"
+                for ($tentativa = 0; $tentativa -lt 20 -and (Test-Path -LiteralPath $pastaLimpa); $tentativa++) {
+                    try { Remove-Item -LiteralPath $pastaLimpa -Recurse -Force -ErrorAction Stop }
+                    catch { Start-Sleep -Milliseconds 250 }
+                }
+            }
+            $paiTrab = Split-Path -Parent $pastaLimpa
+            if ((Test-Path -LiteralPath $paiTrab) -and @(Get-ChildItem -LiteralPath $paiTrab -Force -ErrorAction SilentlyContinue).Count -eq 0) { Remove-Item -LiteralPath $paiTrab -Force -ErrorAction SilentlyContinue }
+        }
+        foreach ($conexaoAberta in @($cn, $cnVigia)) {
+            if ($null -ne $conexaoAberta) { try { $conexaoAberta.Close() } catch {} }
+        }
+        $res.Duracao = $rstRelogio.Elapsed
+        & $rstLog "INFO" "tempo total da operação: $(& $rstTempo $res.Duracao)"
+    }
+    return $res
+}
+
+
+# -----------------------------------------------------------------------------
+# JANELA "RESTAURAR BACKUP DO BANCO" (aberta pelo botao RESTAURAR BACKUP do Backup do Banco)
+# Escolhe o backup (.bak, .zip com o .bak ou .zip do BACKUP MANUAL), o banco de destino (o atual, que e
+# substituido depois de uma copia de seguranca, ou um nome novo) e chama Invoke-RestaurarBanco.
+# -----------------------------------------------------------------------------
+function Show-RestaurarBanco {
+    param([string]$Servidor = "localhost", [string]$Usuario = "sa", [string]$Senha = "")
+    try {
+        if ($null -ne $Script:RstForm -and -not $Script:RstForm.IsDisposed) {
+            $Script:RstForm.Activate(); return
+        }
+
+        $Script:RstCancelar = $false
+        $Script:RstOcupado = $false
+        $Script:RstSemVolta = $false
+        $Script:RstBancos = @{}
+        $Script:RstInfo = $null
+        $Script:RstArquivo = ""
+        $Script:RstConectado = $false
+        $Script:RstFecharAoTerminar = $false
+
+        $f = New-ToolForm "Restaurar Backup do Banco" 780 640
+        $f.MinimumSize = New-Object System.Drawing.Size(780, 640)
+        $Script:RstForm = $f
+        $vermelhoEscuro = [System.Drawing.Color]::FromArgb(128, 22, 22)
+
+        $novoCartao = {
+            param([int]$Y, [int]$H)
+            $p = New-Object System.Windows.Forms.Panel
+            $p.Location = New-Object System.Drawing.Point(20, $Y)
+            $p.Size = New-Object System.Drawing.Size(724, $H)
+            $p.BackColor = $Script:UiCartao
+            $p.Anchor = 'Top,Left,Right'
+            [void]$f.Controls.Add($p)
+            return $p
+        }
+
+        New-ToolLabel $f "RESTAURAR BACKUP DO BANCO" 20 14 12 -Negrito | Out-Null
+        New-ToolLabel $f "Volta um backup feito pelo Preparador: o .bak, o .zip dele ou o .zip do BACKUP MANUAL (arquivos MDF e LDF)." 20 42 9 -Cor $Script:UiSuave -W 724 | Out-Null
+
+        # 1) O BACKUP
+        $cardArq = & $novoCartao 70 226
+        New-ToolLabel $cardArq "1  ESCOLHA O BACKUP" 14 8 10 -Negrito | Out-Null
+        $lblRstPasta = New-ToolLabel $cardArq "Pasta dos backups: $($Script:BackupPasta)" 230 10 8.5 -Cor $Script:UiSuave -W 480
+        $lblRstPasta.TextAlign = 'MiddleRight'
+        $lblRstPasta.AutoEllipsis = $true
+        $lvRst = New-Object System.Windows.Forms.ListView
+        $lvRst.Location = New-Object System.Drawing.Point(14, 36)
+        $lvRst.Size = New-Object System.Drawing.Size(696, 130)
+        $lvRst.Anchor = 'Top,Left,Right'
+        $lvRst.View = 'Details'
+        $lvRst.FullRowSelect = $true
+        $lvRst.HideSelection = $false
+        $lvRst.MultiSelect = $false
+        $lvRst.HeaderStyle = 'Nonclickable'
+        $lvRst.ForeColor = $Script:UiTexto
+        [void]$lvRst.Columns.Add("Arquivo", 305)
+        [void]$lvRst.Columns.Add("Tipo", 180)
+        [void]$lvRst.Columns.Add("Tamanho", 100)
+        [void]$lvRst.Columns.Add("Data", 105)
+        [void]$cardArq.Controls.Add($lvRst)
+        Set-ListaModerna $lvRst -ColunasSuaves @(3) -ColunasDireita @(2) -MinUltima 90
+        $lblRstArquivo = New-ToolLabel $cardArq "Nenhum backup escolhido." 14 172 9.5 -Negrito -W 696
+        $lblRstArquivo.AutoEllipsis = $true
+        $btnRstEscolher = New-ToolButton $cardArq "ESCOLHER OUTRO ARQUIVO..." 14 194 214 26 $Script:UiCinza $null "Escolhe um .bak ou .zip que esteja em outra pasta (pendrive, Downloads...)"
+        $btnRstAtualizar = New-ToolButton $cardArq "ATUALIZAR LISTA" 234 194 140 26 $Script:UiCinza $null "Lê de novo a pasta dos backups"
+
+        # 2) O DESTINO
+        $cardDest = & $novoCartao 306 132
+        New-ToolLabel $cardDest "2  O QUE VAI ACONTECER" 14 8 10 -Negrito | Out-Null
+        New-ToolLabel $cardDest "Restaurar no banco:" 14 41 9 -Cor $Script:UiSuave | Out-Null
+        $cmbRstDestino = New-Object System.Windows.Forms.ComboBox
+        $cmbRstDestino.Location = New-Object System.Drawing.Point(140, 37)
+        $cmbRstDestino.Width = 260
+        $cmbRstDestino.DropDownStyle = 'DropDown'
+        $cmbRstDestino.FlatStyle = 'Flat'
+        $cmbRstDestino.BackColor = [System.Drawing.Color]::FromArgb(20, 24, 34)
+        $cmbRstDestino.ForeColor = $Script:UiTexto
+        [void]$cardDest.Controls.Add($cmbRstDestino)
+        New-ToolLabel $cardDest "Banco da lista = substitui. Nome novo = cria." 410 41 8.5 -Cor $Script:UiSuave -W 300 | Out-Null
+        $lblRstSituacao = New-ToolLabel $cardDest "" 14 68 11 -Negrito -W 696
+        $lblRstSituacao.AutoEllipsis = $true
+        $lblRstSituacao.Height = 26
+        $lblRstDetalhe = New-ToolLabel $cardDest "" 14 96 9 -Cor $Script:UiSuave -W 696
+        $lblRstDetalhe.Height = 34
+
+        # ANDAMENTO E BOTOES
+        $lblRstEtapa = New-ToolLabel $f "" 20 446 9.5 -Negrito -W 724
+        $pbRst = New-Object System.Windows.Forms.ProgressBar
+        $pbRst.Location = New-Object System.Drawing.Point(20, 470)
+        $pbRst.Size = New-Object System.Drawing.Size(610, 18)
+        $pbRst.Style = 'Continuous'
+        $pbRst.MarqueeAnimationSpeed = 30
+        $pbRst.Anchor = 'Top,Left,Right'
+        [void]$f.Controls.Add($pbRst)
+        $btnRstRestaurar = New-ToolButton $f "RESTAURAR BACKUP" 20 506 234 36 $vermelhoEscuro $null "Restaura o backup escolhido no banco de destino. Se o banco já existe, ele é SUBSTITUÍDO (depois de uma cópia de segurança dele)."
+        $btnRstRestaurar.Enabled = $false
+        $btnRstCancelar = New-ToolButton $f "CANCELAR" 640 466 104 26 $Script:UiCinza $null "Interrompe a restauração enquanto ainda dá para voltar atrás (antes do banco ser alterado)"
+        $btnRstCancelar.Enabled = $false
+        $btnRstCancelar.Anchor = 'Top,Right'
+        $btnRstAbrir = New-ToolButton $f "ABRIR PASTA" 528 510 112 28 $Script:UiCinza $null "Abre a pasta dos backups"
+        $btnRstFechar = New-ToolButton $f "FECHAR" 646 510 98 28 $Script:UiCinza $null "Fecha esta janela"
+        $btnRstFechar.Anchor = 'Top,Right'
+        $btnRstAbrir.Anchor = 'Top,Right'
+        $lblRstStatus = New-ToolLabel $f "Conectando no SQL Server..." 20 548 9 -Cor $Script:UiSuave -W 724
+        $lblRstStatus.Height = 48
+
+        # ---------------------------------------------------------------------
+        # ROTINAS DA JANELA
+        # ---------------------------------------------------------------------
+        $carregaBancos = {
+            $Script:RstConectado = $false
+            $cnLista = $null
+            try {
+                $lblRstStatus.ForeColor = $Script:UiAmarelo
+                $lblRstStatus.Text = "Conectando no SQL Server..."
+                $cnLista = New-Object System.Data.SqlClient.SqlConnection((New-SqlTextoConexao -Servidor $Servidor -Usuario $Usuario -Senha $Senha -Timeout 8))
+                Wait-SqlTarefa $cnLista.OpenAsync()
+                $cmdLista = $cnLista.CreateCommand()
+                $cmdLista.CommandTimeout = 30
+                $cmdLista.CommandText = "SELECT name, state_desc FROM sys.databases WHERE database_id > 4 AND source_database_id IS NULL ORDER BY name"
+                Log-SqlBancoComando "Restaurar backup" $cmdLista.CommandText "lista de bancos"
+                $tarefaLista = $cmdLista.ExecuteReaderAsync()
+                Wait-SqlTarefa $tarefaLista
+                $leitorLista = $tarefaLista.Result
+                $textoAntes = "$($cmbRstDestino.Text)"
+                $Script:RstBancos = @{}
+                $cmbRstDestino.Items.Clear()
+                try {
+                    while ($leitorLista.Read()) {
+                        $Script:RstBancos["$($leitorLista['name'])"] = "$($leitorLista['state_desc'])"
+                        [void]$cmbRstDestino.Items.Add("$($leitorLista['name'])")
+                    }
+                }
+                finally { $leitorLista.Close() }
+                $cmbRstDestino.Text = $textoAntes
+                $Script:RstConectado = $true
+                $lblRstStatus.ForeColor = $Script:UiSuave
+                $lblRstStatus.Text = "Conectado ao SQL Server ($($Script:RstBancos.Count) banco(s)). Escolha o backup na lista."
+            }
+            catch {
+                $lblRstStatus.ForeColor = $Script:UiVermelho
+                $lblRstStatus.Text = Get-BackupErroTexto -Erro $_.Exception -Pasta $Script:BackupPasta
+                Log-Message "ERRO" "Restaurar backup: falha de conexão - $($_.Exception.Message)"
+            }
+            finally { if ($null -ne $cnLista) { try { $cnLista.Close() } catch {} } }
+        }
+
+        $carregaLista = {
+            $lvRst.Items.Clear()
+            $achados = @()
+            if (Test-Path -LiteralPath $Script:BackupPasta) {
+                $achados = @(Get-ChildItem -LiteralPath $Script:BackupPasta -File -ErrorAction SilentlyContinue | Where-Object { $_.Extension -eq ".bak" -or $_.Extension -eq ".zip" } | Sort-Object LastWriteTime -Descending | Select-Object -First 40)
+            }
+            foreach ($achado in $achados) {
+                $infoItem = Get-BackupArquivoInfo -Caminho $achado.FullName
+                $tipoTexto = switch ($infoItem.Tipo) {
+                    'bak' { "Backup do SQL (.bak)" }
+                    'zip-bak' { ".zip com o backup (.bak)" }
+                    'zip-arquivos' { ".zip do Backup Manual" }
+                    default { "Não reconhecido" }
+                }
+                if ($achado.Name -like "Antes de restaurar - *") { $tipoTexto += " (segurança)" }
+                $itemLista = New-Object System.Windows.Forms.ListViewItem($achado.Name)
+                [void]$itemLista.SubItems.Add($tipoTexto)
+                [void]$itemLista.SubItems.Add((Format-BytesTexto ([long]$achado.Length)))
+                [void]$itemLista.SubItems.Add($achado.LastWriteTime.ToString("dd/MM/yy HH:mm"))
+                $itemLista.Tag = $achado.FullName
+                if ($infoItem.Tipo -eq 'desconhecido') { $itemLista.ForeColor = $Script:UiSuave }
+                [void]$lvRst.Items.Add($itemLista)
+            }
+            if ($lvRst.Items.Count -eq 0) {
+                $vazio = New-Object System.Windows.Forms.ListViewItem("Nenhum backup nessa pasta")
+                [void]$vazio.SubItems.Add("Use ESCOLHER OUTRO ARQUIVO...")
+                [void]$vazio.SubItems.Add("-")
+                [void]$vazio.SubItems.Add("-")
+                $vazio.ForeColor = $Script:UiSuave
+                [void]$lvRst.Items.Add($vazio)
+            }
+        }
+
+        # Mostra para o tecnico o que vai acontecer, conforme o backup e o banco de destino
+        $atualizaPlano = {
+            $nomeDest = "$($cmbRstDestino.Text)".Trim()
+            $temArquivo = ($null -ne $Script:RstInfo -and "$($Script:RstInfo.Erro)" -eq "")
+            $lblRstSituacao.ForeColor = $Script:UiSuave
+            $lblRstDetalhe.Text = ""
+            $btnRstRestaurar.Enabled = $false
+            if (-not $temArquivo) {
+                $lblRstSituacao.Text = "Escolha um backup na lista acima."
+                return
+            }
+            if ($nomeDest -eq "") { $lblRstSituacao.Text = "Escolha ou digite o banco de destino."; return }
+            if ($nomeDest -notmatch '^[A-Za-z0-9_][A-Za-z0-9_ \.\-]{0,100}$') {
+                $lblRstSituacao.ForeColor = $Script:UiVermelho
+                $lblRstSituacao.Text = "O nome do banco só pode ter letras, números, espaço, _ - e ."
+                return
+            }
+            if (-not $Script:RstConectado) {
+                $lblRstSituacao.ForeColor = $Script:UiVermelho
+                $lblRstSituacao.Text = "Sem conexão com o SQL Server: veja a mensagem no rodapé."
+                return
+            }
+            $tipoBackup = switch ($Script:RstInfo.Tipo) {
+                'bak' { "o backup do SQL (.bak)" }
+                'zip-bak' { "o .bak que está dentro do .zip" }
+                'zip-arquivos' { "os arquivos MDF e LDF do BACKUP MANUAL" }
+            }
+            if ($Script:RstBancos.ContainsKey($nomeDest)) {
+                $estadoDest = "$($Script:RstBancos[$nomeDest])"
+                $lblRstSituacao.ForeColor = $Script:UiVermelho
+                $lblRstSituacao.Text = "SUBSTITUI O BANCO $($nomeDest.ToUpper()) (agora: $estadoDest)"
+                $lblRstDetalhe.Text = "Vai restaurar $tipoBackup por cima dele. Antes, o Preparador confere o backup e guarda uma cópia do banco atual na pasta dos backups."
+            }
+            else {
+                $lblRstSituacao.ForeColor = $Script:UiVerde
+                $lblRstSituacao.Text = "CRIA UM BANCO NOVO CHAMADO $($nomeDest.ToUpper())"
+                $lblRstDetalhe.Text = "Vai restaurar $tipoBackup como banco novo, dentro da pasta do NetControll, e anexar ao SQL Server. Nenhum banco atual é alterado."
+            }
+            $btnRstRestaurar.Enabled = (-not $Script:RstOcupado)
+        }
+
+        # Analisa o arquivo escolhido e sugere o banco de destino
+        $usaArquivo = {
+            param([string]$Caminho)
+            $Script:RstArquivo = $Caminho
+            $Script:RstInfo = Get-BackupArquivoInfo -Caminho $Caminho
+            $infoAqui = $Script:RstInfo
+            if ("$($infoAqui.Erro)" -ne "") {
+                $lblRstArquivo.ForeColor = $Script:UiVermelho
+                $lblRstArquivo.Text = "$($infoAqui.Erro)"
+                Log-Message "ERRO" "Restaurar backup: arquivo escolhido não serve ($Caminho): $($infoAqui.Erro)"
+                & $atualizaPlano
+                return
+            }
+            $tipoTexto = switch ($infoAqui.Tipo) {
+                'bak' { "backup do SQL (.bak)" }
+                'zip-bak' { ".zip com o backup do SQL (.bak) dentro" }
+                'zip-arquivos' { ".zip do BACKUP MANUAL (MDF e LDF)" }
+            }
+            $lblRstArquivo.ForeColor = $Script:UiTexto
+            $lblRstArquivo.Text = "$($infoAqui.Nome)  -  $tipoTexto, $(Format-BytesTexto $infoAqui.Bytes)"
+            if ($Script:ToolTip) { $Script:ToolTip.SetToolTip($lblRstArquivo, $Caminho) }
+            Log-Message "INFO" "Restaurar backup: backup escolhido: $Caminho ($tipoTexto, $(Format-BytesTexto $infoAqui.Bytes))"
+            # sugere o banco do proprio backup: se ele existe, e o que sera substituido
+            $sugestao = "$($infoAqui.Banco)".Trim()
+            if ($sugestao -ne "") {
+                $nomeNaLista = $null
+                foreach ($nomeBanco in @($Script:RstBancos.Keys)) { if ($nomeBanco -ieq $sugestao) { $nomeNaLista = $nomeBanco } }
+                if ($null -ne $nomeNaLista) { $cmbRstDestino.Text = $nomeNaLista } else { $cmbRstDestino.Text = $sugestao }
+            }
+            & $atualizaPlano
+        }
+
+        $mostraAvisoRst = {
+            param([string]$Manchete, [string]$Resumo, [string]$Tipo, $Itens)
+            try { [void](Show-AvisoDestaque -Dono $f -Titulo "Restauração do banco" -Manchete $Manchete -Resumo $Resumo -Tipo $Tipo -Itens $Itens -TextoSim "OK") }
+            catch {
+                $textoItens = (@($Itens | ForEach-Object { "$($_.Titulo)`r`n$($_.Texto)" }) -join "`r`n`r`n")
+                [System.Windows.Forms.MessageBox]::Show("$Manchete`r`n`r`n$Resumo`r`n`r`n$textoItens", "Restauração do banco", "OK", "Warning") | Out-Null
+            }
+        }
+
+        $restaurar = {
+            if ($Script:RstOcupado -or $null -eq $Script:RstInfo -or "$($Script:RstInfo.Erro)" -ne "") { return }
+            $arquivoEscolhido = $Script:RstArquivo
+            $infoEscolhida = $Script:RstInfo
+            $nomeDigitado = "$($cmbRstDestino.Text)".Trim()
+            $bancoDestino = $nomeDigitado
+            foreach ($nomeBanco in @($Script:RstBancos.Keys)) { if ($nomeBanco -ieq $nomeDigitado) { $bancoDestino = $nomeBanco } }
+            $substitui = $Script:RstBancos.ContainsKey($bancoDestino)
+            $estadoDestino = ""
+            if ($substitui) { $estadoDestino = "$($Script:RstBancos[$bancoDestino])" }
+            Log-Message "INFO" "Restaurar backup: o técnico pediu para restaurar $arquivoEscolhido no banco $bancoDestino ($(if ($substitui) { 'substituindo o banco atual' } else { 'como banco novo' }))"
+
+            # programas do NetControll abertos agora (o Preparador so avisa, nao fecha nada)
+            $abertosRst = @()
+            foreach ($nomeProg in @("Concentrador", "NetStart", "NetServidor", "NetTerminal", "NetPrint", "NetPDV", "LinkXMenu", "XMenu")) { if (Get-Process -Name $nomeProg -ErrorAction SilentlyContinue) { $abertosRst += $nomeProg } }
+
+            $passos = switch ($infoEscolhida.Tipo) {
+                'bak' { "1) conferir o backup (RESTORE VERIFYONLY)" + $(if ($substitui) { "  2) cópia de segurança do banco atual  3) usuário único  4) RESTORE DATABASE ... WITH REPLACE  5) conferir o banco" } else { "  2) RESTORE DATABASE como banco novo  3) conferir o banco" }) }
+                'zip-bak' { "1) extrair o .bak do .zip e conferir (RESTORE VERIFYONLY)" + $(if ($substitui) { "  2) cópia de segurança do banco atual  3) usuário único  4) RESTORE DATABASE ... WITH REPLACE  5) conferir o banco" } else { "  2) RESTORE DATABASE como banco novo  3) conferir o banco" }) }
+                'zip-arquivos' { "1) extrair o MDF e o LDF do .zip e conferir" + $(if ($substitui) { "  2) cópia de segurança do banco atual  3) banco offline  4) guardar os arquivos atuais ao lado  5) tirar o banco da lista  6) colocar os arquivos do backup  7) anexar (ATTACH)  8) se der erro, voltar os arquivos de antes" } else { "  2) colocar os arquivos na pasta do NetControll  3) anexar (ATTACH)" }) }
+            }
+            $itens = @()
+            if ($substitui) {
+                $itens += @{ Tipo = 'perigo'; Titulo = 'O BANCO ATUAL SERÁ SUBSTITUÍDO'; Texto = "Tudo o que foi lançado no banco $bancoDestino depois desse backup se perde. Por isso, antes de mexer, o Preparador faz uma cópia de segurança dele." }
+                $itens += @{ Tipo = 'alerta'; Titulo = 'O SISTEMA FICA TRAVADO DURANTE A RESTAURAÇÃO'; Texto = 'O banco fica fora do ar enquanto é restaurado: o PDV e o Concentrador perdem a conexão e ninguém consegue vender nem gravar. Pode levar alguns minutos (depende do tamanho do banco).' }
+                $itens += @{ Tipo = 'ok'; Titulo = 'CÓPIA DE SEGURANÇA ANTES DE MEXER'; Texto = "Vai para $($Script:BackupPasta) com o nome ""Antes de restaurar - ..."". Se o banco atual estiver quebrado e o backup normal falhar, o Preparador copia os arquivos dele (MDF e LDF)." }
+            }
+            else {
+                $itens += @{ Tipo = 'ok'; Titulo = 'NENHUM BANCO ATUAL É ALTERADO'; Texto = "O banco $bancoDestino ainda não existe: será criado, com os arquivos dentro da pasta do NetControll, e anexado ao SQL Server." }
+            }
+            if ($abertosRst.Count -gt 0) {
+                Log-Message "INFO" "Restaurar backup: programas do NetControll abertos nesta máquina agora: $($abertosRst -join ', ')"
+                $itens += @{ Tipo = 'alerta'; Titulo = 'PROGRAMAS ABERTOS NESTA MÁQUINA'; Texto = "Abertos agora: $($abertosRst -join ', '). Eles vão perder a conexão com o banco. O ideal é fechá-los antes de continuar (o Preparador não fecha nada sozinho)." }
+            }
+            else { Log-Message "INFO" "Restaurar backup: nenhum programa do NetControll aberto nesta máquina" }
+            $itens += @{ Tipo = 'info'; Titulo = 'O QUE O PREPARADOR VAI FAZER'; Texto = $passos }
+            $itens += @{ Tipo = 'info'; Titulo = 'BACKUP ESCOLHIDO'; Texto = "$arquivoEscolhido`r`n$(Format-BytesTexto $infoEscolhida.Bytes)" }
+
+            $confirmou = $false
+            try {
+                $valorDestaque = if ($substitui) { $estadoDestino } else { "NÃO EXISTE" }
+                $detalheDestaque = if ($substitui) { "Será substituído pelo backup" } else { "Será criado um banco novo" }
+                $parametrosAviso = @{
+                    Dono = $f; Titulo = "Restauração do banco"
+                    Manchete = $(if ($substitui) { "VAI SUBSTITUIR O BANCO $($bancoDestino.ToUpper()) PELO BACKUP" } else { "VAI CRIAR O BANCO $($bancoDestino.ToUpper()) A PARTIR DO BACKUP" })
+                    Resumo = $(if ($substitui) { "O sistema trava enquanto o banco é restaurado. Antes de mexer, o Preparador confere o backup e guarda uma cópia do banco atual." } else { "Os arquivos ficam na pasta do NetControll e o banco é anexado ao SQL Server. Nenhum banco atual é alterado." })
+                    Tipo = $(if ($substitui) { 'perigo' } else { 'aviso' })
+                    Destaque = @{ Rotulo = "banco $bancoDestino agora"; Valor = $valorDestaque; Detalhe = $detalheDestaque }
+                    Itens = $itens; TextoSim = "SIM, RESTAURAR O BACKUP"; TextoNao = "CANCELAR"; CorSim = $vermelhoEscuro
+                }
+                if ($substitui) { $parametrosAviso.Ciencia = "Entendi: o banco atual será substituído pelo backup. A cópia de segurança dele fica na pasta indicada." }
+                $respRst = @(Show-AvisoDestaque @parametrosAviso)
+                $confirmou = ($respRst.Count -gt 0 -and $respRst[-1] -eq $true)
+            }
+            catch {
+                Log-Message "ERRO" "Restaurar backup: não consegui montar o aviso em destaque ($($_.Exception.Message)); usando a caixa comum."
+                $confirmou = ([System.Windows.Forms.MessageBox]::Show("O SISTEMA VAI TRAVAR.`r`n`r`nRestaurar $arquivoEscolhido no banco $bancoDestino ($(if ($substitui) { 'o banco atual será SUBSTITUÍDO' } else { 'banco novo' })).`r`n`r`nContinuar?", "Restauração do banco", "YesNo", "Warning") -eq [System.Windows.Forms.DialogResult]::Yes)
+            }
+            if (-not $confirmou) {
+                $lblRstStatus.ForeColor = $Script:UiSuave
+                $lblRstStatus.Text = "Restauração cancelada. Nada foi alterado."
+                Log-Message "CANCEL" "Restaurar backup: o técnico cancelou no aviso. Nada foi alterado."
+                return
+            }
+            Log-Message "INFO" "Restaurar backup: o técnico confirmou a restauração"
+
+            # executa
+            $Script:RstOcupado = $true
+            $Script:RstCancelar = $false
+            $Script:RstSemVolta = $false
+            $btnRstRestaurar.Enabled = $false
+            $btnRstEscolher.Enabled = $false
+            $btnRstAtualizar.Enabled = $false
+            $cmbRstDestino.Enabled = $false
+            $btnRstCancelar.Enabled = $true
+            $lblRstStatus.ForeColor = $Script:UiAmarelo
+            $lblRstStatus.Text = "Restaurando o backup no banco $bancoDestino. O sistema fica travado até terminar."
+            $textoFinal = ""
+            $corFinal = $Script:UiSuave
+            try {
+                $argsRst = @{
+                    TextoConexao = (New-SqlTextoConexao -Servidor $Servidor -Usuario $Usuario -Senha $Senha -Timeout 15)
+                    Arquivo      = $arquivoEscolhido
+                    Banco        = $bancoDestino
+                    PastaBackups = $Script:BackupPasta
+                    AoProgredir  = {
+                        param($Etapa, $Pct)
+                        if ($Pct -lt 0) {
+                            $pbRst.Style = 'Marquee'
+                            $lblRstEtapa.Text = "$Etapa..."
+                        }
+                        else {
+                            $pbRst.Style = 'Continuous'
+                            $pbRst.Value = [int][math]::Min(100, [math]::Max(0, $Pct))
+                            $lblRstEtapa.Text = "$Etapa... $([math]::Floor($Pct))%"
+                        }
+                    }
+                    Cancelado    = { $Script:RstCancelar }
+                    AoSemVolta   = {
+                        $Script:RstSemVolta = $true
+                        $btnRstCancelar.Enabled = $false
+                        $lblRstStatus.ForeColor = $Script:UiAmarelo
+                        $lblRstStatus.Text = "Restaurando o banco ${bancoDestino}: a partir daqui não dá mais para cancelar. Aguarde terminar."
+                    }
+                }
+                $resRst = Invoke-RestaurarBanco @argsRst
+                $pbRst.Style = 'Continuous'
+                $duracaoRst = "{0}min {1:00}s" -f [int][math]::Floor($resRst.Duracao.TotalMinutes), $resRst.Duracao.Seconds
+                if ($resRst.Ok) {
+                    $pbRst.Value = 100
+                    $lblRstEtapa.Text = "Concluído"
+                    $textoFinal = "Backup restaurado: banco $bancoDestino $($resRst.EstadoDepois) com $($resRst.Tabelas) tabela(s) | $duracaoRst"
+                    if ($resRst.CopiaSeguranca -ne "") { $textoFinal += " | cópia de segurança: $(Split-Path -Leaf $resRst.CopiaSeguranca)" }
+                    $corFinal = $Script:UiVerde
+                    Log-Message "SUCESSO" "Restaurar backup: $textoFinal"
+                    $itensFim = @(@{ Tipo = 'ok'; Titulo = 'BANCO RESTAURADO E FUNCIONANDO'; Texto = "O banco $bancoDestino está $($resRst.EstadoDepois), com $($resRst.Tabelas) tabela(s), em vários usuários. Tempo total: $duracaoRst." })
+                    if ($resRst.CopiaSeguranca -ne "") { $itensFim += @{ Tipo = 'info'; Titulo = 'CÓPIA DE SEGURANÇA DO BANCO DE ANTES'; Texto = "$($resRst.CopiaSeguranca)`r`nPara voltar ao que era antes, use RESTAURAR BACKUP com esse arquivo." } }
+                    $itensFim += @{ Tipo = 'info'; Titulo = 'O QUE FAZER AGORA'; Texto = 'Abra o Concentrador e o PDV e confira as vendas e o cadastro. Se o backup for de uma versão mais antiga do sistema, rode o Atualizar Banco (AjustesInstalacao) do Concentrador.' }
+                    & $mostraAvisoRst "BACKUP RESTAURADO NO BANCO $($bancoDestino.ToUpper())" "A restauração terminou e o banco já responde." 'ok' $itensFim
+                }
+                elseif ($resRst.Cancelado) {
+                    $pbRst.Value = 0
+                    $lblRstEtapa.Text = ""
+                    $textoFinal = "Restauração cancelada. O banco não foi alterado."
+                    $corFinal = $Script:UiAmarelo
+                }
+                else {
+                    $pbRst.Value = 0
+                    $lblRstEtapa.Text = ""
+                    $erroCurto = "$($resRst.Erro)"
+                    if ($erroCurto.Length -gt 500) { $erroCurto = $erroCurto.Substring(0, 500) + "..." }
+                    $textoFinal = "Não foi possível restaurar: $erroCurto"
+                    $corFinal = $Script:UiVermelho
+                    $itensErro = @(@{ Tipo = 'perigo'; Titulo = 'O QUE ACONTECEU'; Texto = $erroCurto })
+                    if ($resRst.VoltouAoQueEstava) { $itensErro += @{ Tipo = 'ok'; Titulo = 'O BANCO VOLTOU AO QUE ERA ANTES'; Texto = "O Preparador desfez a tentativa: o banco $bancoDestino está como estava antes de você clicar." } }
+                    elseif ($Script:RstSemVolta) { $itensErro += @{ Tipo = 'alerta'; Titulo = 'O BANCO PODE TER SIDO ALTERADO'; Texto = "A falha veio depois do banco ser mexido. Veja o estado dele no Diagnóstico do Banco.$(if ($resRst.CopiaSeguranca -ne '') { " A cópia de segurança do banco de antes está em: $($resRst.CopiaSeguranca)" })" } }
+                    else { $itensErro += @{ Tipo = 'ok'; Titulo = 'NADA FOI ALTERADO'; Texto = "A falha veio antes de qualquer mudança: o banco $bancoDestino continua como estava." } }
+                    & $mostraAvisoRst "NÃO FOI POSSÍVEL RESTAURAR O BACKUP" "Veja abaixo o que aconteceu e em que estado ficou o banco." 'erro' $itensErro
+                }
+            }
+            catch {
+                $textoFinal = "Não foi possível restaurar: $(Get-BackupErroTexto -Erro $_.Exception -Pasta $Script:BackupPasta)"
+                $corFinal = $Script:UiVermelho
+                Log-Message "ERRO" "Restaurar backup: $($_.Exception.Message)"
+            }
+            finally {
+                $Script:RstOcupado = $false
+                $btnRstEscolher.Enabled = $true
+                $btnRstAtualizar.Enabled = $true
+                $cmbRstDestino.Enabled = $true
+                $btnRstCancelar.Enabled = $false
+                & $carregaBancos
+                & $carregaLista
+                & $atualizaPlano
+                if ($Script:RstFecharAoTerminar) { $f.Close() }
+            }
+            if ($textoFinal -ne "") {
+                $lblRstStatus.ForeColor = $corFinal
+                $lblRstStatus.Text = $textoFinal
+            }
+        }
+
+        # ---------------------------------------------------------------------
+        # EVENTOS
+        # ---------------------------------------------------------------------
+        $lvRst.Add_SelectedIndexChanged({
+                if ($Script:RstOcupado) { return }
+                if ($lvRst.SelectedItems.Count -gt 0 -and $null -ne $lvRst.SelectedItems[0].Tag) { & $usaArquivo "$($lvRst.SelectedItems[0].Tag)" }
+            })
+        $btnRstEscolher.Add_Click({
+                if ($Script:RstOcupado) { return }
+                $dialogo = New-Object System.Windows.Forms.OpenFileDialog
+                $dialogo.Title = "Escolha o backup do banco"
+                $dialogo.Filter = "Backups do banco (*.bak;*.zip)|*.bak;*.zip|Todos os arquivos (*.*)|*.*"
+                if (Test-Path -LiteralPath $Script:BackupPasta) { $dialogo.InitialDirectory = $Script:BackupPasta }
+                try {
+                    if ($dialogo.ShowDialog($f) -eq [System.Windows.Forms.DialogResult]::OK) {
+                        $lvRst.SelectedItems.Clear()
+                        & $usaArquivo $dialogo.FileName
+                    }
+                }
+                finally { $dialogo.Dispose() }
+            })
+        $btnRstAtualizar.Add_Click({ if (-not $Script:RstOcupado) { & $carregaBancos; & $carregaLista; & $atualizaPlano } })
+        $cmbRstDestino.Add_TextChanged({ & $atualizaPlano })
+        $cmbRstDestino.Add_SelectedIndexChanged({ & $atualizaPlano })
+        $btnRstRestaurar.Add_Click($restaurar)
+        $btnRstCancelar.Add_Click({
+                $Script:RstCancelar = $true
+                $lblRstStatus.ForeColor = $Script:UiAmarelo
+                $lblRstStatus.Text = "Cancelando a restauração..."
+            })
+        $btnRstAbrir.Add_Click({
+                try {
+                    if (-not (Test-Path -LiteralPath $Script:BackupPasta)) { New-Item -ItemType Directory -Path $Script:BackupPasta -Force | Out-Null }
+                    Start-Process "explorer.exe" ("`"" + $Script:BackupPasta + "`"")
+                }
+                catch { $lblRstStatus.Text = "Não deu para abrir a pasta: $($_.Exception.Message)" }
+            })
+        $btnRstFechar.Add_Click({ $f.Close() })
+
+        $f.Add_FormClosing({
+                param($s, $e)
+                if ($Script:RstOcupado) {
+                    if ($btnRstCancelar.Enabled) {
+                        $r = [System.Windows.Forms.MessageBox]::Show("Há uma restauração em andamento.`r`n`r`nDeseja cancelar e fechar a janela?", "Restauração do banco", "YesNo", "Warning")
+                        if ($r -eq [System.Windows.Forms.DialogResult]::Yes) { $Script:RstCancelar = $true; $Script:RstFecharAoTerminar = $true }
+                    }
+                    else { [System.Windows.Forms.MessageBox]::Show("A restauração já passou do ponto em que dá para cancelar. Aguarde terminar para fechar a janela.", "Restauração do banco", "OK", "Warning") | Out-Null }
+                    $e.Cancel = $true
+                    return
+                }
+                $Script:RstForm = $null
+            })
+
+        Log-Message "INFO" "Restaurar backup: janela aberta"
+        $f.Add_Shown({ & $carregaBancos; & $carregaLista; & $atualizaPlano })
+        [void]$f.ShowDialog($Script:MainForm)
+    }
+    catch {
+        Log-Message "ERRO" "Restaurar backup: falha ao abrir a janela: $($_.Exception.Message)"
+        [System.Windows.Forms.MessageBox]::Show("Não foi possível abrir a janela de restauração: $($_.Exception.Message)", "Restauração do banco", "OK", "Error") | Out-Null
+        $Script:RstForm = $null
+    }
+}
+
+
 function Show-DbSwapNetWebPdv {
     try {
         if ($null -ne $Script:DbSwapForm -and -not $Script:DbSwapForm.IsDisposed) {
@@ -7396,8 +8522,8 @@ function Show-BackupBanco {
         $Script:BkpConectado = $false
         $Script:BkpMsgEstado = $false
 
-        $f = New-ToolForm "Backup do Banco NetWebPDV" 780 540
-        $f.MinimumSize = New-Object System.Drawing.Size(780, 540)
+        $f = New-ToolForm "Backup do Banco NetWebPDV" 780 570
+        $f.MinimumSize = New-Object System.Drawing.Size(780, 570)
         $Script:BkpForm = $f
 
         $novoCartao = {
@@ -7477,22 +8603,30 @@ function Show-BackupBanco {
         $lblBkpEtapa = New-ToolLabel $f "" 20 326 9.5 -Negrito -W 724
         $pbBkp = New-Object System.Windows.Forms.ProgressBar
         $pbBkp.Location = New-Object System.Drawing.Point(20, 350)
-        $pbBkp.Size = New-Object System.Drawing.Size(724, 18)
+        $pbBkp.Size = New-Object System.Drawing.Size(610, 18)
         $pbBkp.Style = 'Continuous'
         $pbBkp.MarqueeAnimationSpeed = 30
         $pbBkp.Anchor = 'Top,Left,Right'
         [void]$f.Controls.Add($pbBkp)
 
-        $btnBkpFazer = New-ToolButton $f "FAZER BACKUP" 20 384 150 34 $Script:UiVerde $null "Faz o backup completo, confere se o arquivo restaura e abre a pasta no fim"
+        $btnBkpFazer = New-ToolButton $f "FAZER BACKUP" 20 380 234 36 $Script:UiVerde $null "Faz o backup completo, confere se o arquivo restaura e abre a pasta no fim"
         $btnBkpFazer.Enabled = $false
-        $btnBkpCancelar = New-ToolButton $f "CANCELAR" 176 384 92 34 $Script:UiVermelho $null "Interrompe o backup e apaga o arquivo pela metade"
+        $btnBkpCancelar = New-ToolButton $f "CANCELAR" 640 347 104 24 $Script:UiVermelho $null "Interrompe o backup e apaga o arquivo pela metade"
         $btnBkpCancelar.Enabled = $false
-        $btnBkpArquivos = New-ToolButton $f "BACKUP MANUAL (TRAVA O SISTEMA)" 274 384 228 34 ([System.Drawing.Color]::FromArgb(128, 22, 22)) $null "Backup manual, do jeito antigo: copia os arquivos do banco (MDF e LDF) para um .zip, sem usar o backup do SQL. O SISTEMA TRAVA: o banco fica offline durante a cópia e o PDV e o Concentrador perdem a conexão. Serve quando o backup normal falha (banco corrompido, suspeito ou em recuperação pendente). No fim o Preparador tenta colocar o banco de volta ONLINE."
+        $btnBkpCancelar.Anchor = 'Top,Right'
+        $btnBkpArquivos = New-ToolButton $f "BACKUP MANUAL (TRAVA O SISTEMA)" 265 380 234 36 ([System.Drawing.Color]::FromArgb(128, 22, 22)) $null "Backup manual, do jeito antigo: copia os arquivos do banco (MDF e LDF) para um .zip, sem usar o backup do SQL. O SISTEMA TRAVA: o banco fica offline durante a cópia e o PDV e o Concentrador perdem a conexão. Serve quando o backup normal falha (banco corrompido, suspeito ou em recuperação pendente). No fim o Preparador tenta colocar o banco de volta ONLINE."
         $btnBkpArquivos.Enabled = $false
-        $btnBkpPasta = New-ToolButton $f "ABRIR PASTA" 508 384 108 34 $Script:UiCinza $null "Abre a pasta dos backups"
-        $btnBkpFechar = New-ToolButton $f "FECHAR" 624 384 120 34 $Script:UiCinza $null "Fecha esta janela"
+        $btnBkpPasta = New-ToolButton $f "ABRIR PASTA" 508 442 118 26 $Script:UiCinza $null "Abre a pasta dos backups"
+        $btnBkpFechar = New-ToolButton $f "FECHAR" 632 442 112 26 $Script:UiCinza $null "Fecha esta janela"
         $btnBkpFechar.Anchor = 'Top,Right'
-        $lblBkpStatus = New-ToolLabel $f "O banco continua no ar durante o backup: o PDV não trava e ninguém precisa parar de vender." 20 430 9 -Cor $Script:UiSuave -W 724
+        $btnBkpPasta.Anchor = 'Top,Right'
+        $btnBkpRestaurar = New-ToolButton $f "RESTAURAR BACKUP" 510 380 234 36 ([System.Drawing.Color]::FromArgb(30, 90, 160)) $null "Volta um backup do banco: o .bak, o .zip dele ou o .zip do BACKUP MANUAL (MDF e LDF). Abre uma janela para escolher o arquivo e o banco de destino; se o banco já existe, ele é substituído, depois de uma cópia de segurança dele."
+        $btnBkpRestaurar.Enabled = $false
+        $lblLegFazer = New-ToolLabel $f "Backup normal: o PDV continua vendendo" 24 418 8 -Cor $Script:UiSuave -W 228
+        $lblLegManual = New-ToolLabel $f "Copia MDF e LDF: o sistema trava" 269 418 8 -Cor ([System.Drawing.Color]::FromArgb(226, 128, 128)) -W 228
+        $lblLegRestaurar = New-ToolLabel $f "Volta um .bak ou .zip de backup" 514 418 8 -Cor $Script:UiSuave -W 228
+        foreach ($legenda in @($lblLegFazer, $lblLegManual, $lblLegRestaurar)) { $legenda.Height = 16 }
+        $lblBkpStatus = New-ToolLabel $f "O banco continua no ar durante o backup: o PDV não trava e ninguém precisa parar de vender." 20 476 9 -Cor $Script:UiSuave -W 724
         $lblBkpStatus.Height = 48
 
         if ($Script:ToolTip) {
@@ -7517,6 +8651,7 @@ function Show-BackupBanco {
             if ($temBanco -and $Script:BkpEstados.ContainsKey($nomeSel)) { $estadoSel = "$($Script:BkpEstados[$nomeSel])" }
             $btnBkpFazer.Enabled = ($temBanco -and $estadoSel -eq "ONLINE")
             $btnBkpArquivos.Enabled = $temBanco
+            $btnBkpRestaurar.Enabled = $Script:BkpConectado
         }
         # Avisa no rodape quando o banco escolhido nao esta ONLINE (so ao trocar de banco ou reconectar: nunca apaga o resultado de uma copia)
         $mostraEstadoBkp = {
@@ -7557,6 +8692,7 @@ function Show-BackupBanco {
             $btnBkpTestar.Enabled = $false
             $btnBkpFazer.Enabled = $false
             $btnBkpArquivos.Enabled = $false
+            $btnBkpRestaurar.Enabled = $false
             $Script:BkpConectado = $false
             try {
                 $lblBkpConn.ForeColor = $Script:UiAmarelo
@@ -7642,7 +8778,7 @@ function Show-BackupBanco {
             if ($Script:BkpOcupado -or "$($cmbBkpBanco.Text)" -eq "") { return }
             $Script:BkpOcupado = $true
             $Script:BkpCancelar = $false
-            $travados = @($btnBkpFazer, $btnBkpArquivos, $btnBkpTestar, $cmbBkpBanco, $chkBkpZip, $txtBkpServidor, $cmbBkpUsuario, $txtBkpSenha)
+            $travados = @($btnBkpFazer, $btnBkpArquivos, $btnBkpRestaurar, $btnBkpTestar, $cmbBkpBanco, $chkBkpZip, $txtBkpServidor, $cmbBkpUsuario, $txtBkpSenha)
             foreach ($ctl in $travados) { $ctl.Enabled = $false }
             $btnBkpCancelar.Enabled = $true
             $bancoEscolhido = "$($cmbBkpBanco.Text)"
@@ -7724,7 +8860,7 @@ function Show-BackupBanco {
             $bancoEscolhido = "$($cmbBkpBanco.Text)"
             $Script:BkpOcupado = $true
             $Script:BkpCancelar = $false
-            $travados = @($btnBkpFazer, $btnBkpArquivos, $btnBkpTestar, $cmbBkpBanco, $chkBkpZip, $txtBkpServidor, $cmbBkpUsuario, $txtBkpSenha)
+            $travados = @($btnBkpFazer, $btnBkpArquivos, $btnBkpRestaurar, $btnBkpTestar, $cmbBkpBanco, $chkBkpZip, $txtBkpServidor, $cmbBkpUsuario, $txtBkpSenha)
             foreach ($ctl in $travados) { $ctl.Enabled = $false }
             $textoFinal = ""
             $corFinal = $Script:UiSuave
@@ -7902,6 +9038,12 @@ function Show-BackupBanco {
         $btnBkpTestar.Add_Click({ & $testarBkp })
         $btnBkpFazer.Add_Click($fazerBkp)
         $btnBkpArquivos.Add_Click($copiarArquivos)
+        $btnBkpRestaurar.Add_Click({
+                if ($Script:BkpOcupado) { return }
+                Show-RestaurarBanco -Servidor $txtBkpServidor.Text -Usuario $cmbBkpUsuario.Text -Senha $txtBkpSenha.Text
+                # a restauracao pode ter mudado os bancos: le a lista de novo
+                & $testarBkp -Auto
+            })
         $btnBkpCancelar.Add_Click({
                 $Script:BkpCancelar = $true
                 $lblBkpStatus.ForeColor = $Script:UiAmarelo
@@ -17064,7 +18206,7 @@ $formWidth = if ($screen.Width -lt 1000) { 900 } else { 1000 }
 $formHeight = if ($screen.Height -lt 800) { 700 } else { 800 }
 
 $form = New-Object System.Windows.Forms.Form
-$form.Text = "Preparador XMenu – Suporte Técnico v5.36 - REVENDA"
+$form.Text = "Preparador XMenu – Suporte Técnico v5.37 - REVENDA"
 $form.Size = New-Object System.Drawing.Size($formWidth, $formHeight)
 $form.StartPosition = "CenterScreen"
 $form.BackColor = [System.Drawing.Color]::FromArgb(25, 25, 30); $form.ForeColor = 'White'
@@ -17802,7 +18944,7 @@ $bClock.Add_Click({ Invoke-ClockSync })
 [void]$tbl.Controls.Add($bClock)
 
 # Mensagem de abertura: explica o programa para quem abre pela primeira vez
-Log-Message "INFO" "Preparador XMenu v5.36 - REVENDA - preparo e suporte de computadores com XMenu e NetPDV"
+Log-Message "INFO" "Preparador XMenu v5.37 - REVENDA - preparo e suporte de computadores com XMenu e NetPDV"
 Log-Message "LOG" "==============================================================="
 Log-Message "LOG" "COMO USAR"
 Log-Message "LOG" "  PREPARAR AMBIENTE WINDOWS .. ajusta energia, UAC e desempenho do PC num clique"
@@ -17812,7 +18954,8 @@ Log-Message "LOG" "  EXTERNOS ................... acesso remoto, Chrome, TEF HUB
 Log-Message "LOG" "  SUPORTE E DIAGNÓSTICO ...... impressoras, rede, SQL, backup, XMLs e reparos do Windows"
 Log-Message "LOG" "  Passe o mouse sobre um botão para ver o que ele faz antes de clicar."
 Log-Message "LOG" "---------------------------------------------------------------"
-Log-Message "LOG" "NOVO NA v5.36"
+Log-Message "LOG" "NOVO NA v5.37"
+Log-Message "SUCESSO" "  Banco: novo botão RESTAURAR BACKUP no Backup do Banco: volta o .bak, o .zip com o .bak ou o .zip do BACKUP MANUAL (MDF e LDF), no banco atual (depois de conferir o backup e fazer uma cópia de segurança dele) ou como banco novo dentro da pasta do NetControll, já anexado ao SQL Server; se algo der errado, o Preparador desfaz"
 Log-Message "SUCESSO" "  Banco: o botão da cópia de arquivos agora se chama BACKUP MANUAL (TRAVA O SISTEMA), como o backup de antigamente: o botão é vermelho escuro e o aviso deixa claro que o sistema trava e mostra os programas do NetControll abertos nesta máquina"
 Log-Message "SUCESSO" "  Banco: o .zip da cópia de arquivos segue o nome do backup, com o ID da loja: NetWebPDV - ZIP - Loja 1234 - data e hora.zip (sem o nome da máquina)"
 Log-Message "SUCESSO" "  Banco: o BACKUP MANUAL (TRAVA O SISTEMA) agora registra no Log cada passo, comando SQL, arquivo copiado, progresso, conferência do .zip e o tempo com o banco offline"
