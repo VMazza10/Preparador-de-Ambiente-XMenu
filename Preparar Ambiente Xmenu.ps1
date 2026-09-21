@@ -1,5 +1,5 @@
 ﻿# =============================================================================
-# PREPARADOR XMENU v5.38
+# PREPARADOR XMENU v5.39
 # Visual: Dashboard Moderno
 # Correcoes:
 #   - CRITICO: Removido DoEvents do loop de evento de download (causava crash).
@@ -2703,6 +2703,36 @@ function Export-DanfeNfcePdf {
     Save-PdfCupom -Blocos $blocos -Caminho $Caminho -Titulo ("Espelho NFC-e " + $dados.Numero + " Serie " + $dados.Serie)
 }
 
+# Preenche uma DataTable em outra thread. O SqlDataAdapter.Fill so volta quando TODAS as linhas chegaram (e cada nota
+# traz o XML inteiro): na thread da tela isso deixava a janela em "Nao esta respondendo". O PowerShell nao roda
+# scriptblock em outra thread, entao a chamada vai num pequeno codigo C# (compilado so quando a busca e usada, como o
+# RodaDoMouse). Se nao compilar, a busca segue como antes, na thread da tela.
+function Enable-PreenchedorAsync {
+    if ("PreencheTabelaAsync" -as [type]) { return $true }
+    if ($Script:PreenchedorAsyncFalhou) { return $false }
+    try {
+        $codigoCs = @(
+            'using System.Data;',
+            'using System.Data.SqlClient;',
+            'using System.Threading.Tasks;',
+            '',
+            'public static class PreencheTabelaAsync',
+            '{',
+            '    public static Task Iniciar(SqlDataAdapter adaptador, DataTable tabela)',
+            '    {',
+            '        return Task.Factory.StartNew(() => { adaptador.Fill(tabela); });',
+            '    }',
+            '}'
+        ) -join "`n"
+        Add-Type -ReferencedAssemblies System.Data, System.Xml -TypeDefinition $codigoCs
+        return $true
+    }
+    catch {
+        $Script:PreenchedorAsyncFalhou = $true
+        Log-Message "ERRO" "XMLs: não consegui preparar a leitura em segundo plano ($($_.Exception.Message)); a busca segue como antes"
+        return $false
+    }
+}
 function Show-XmlDownloader {
     try {
         if ($null -ne $Script:XmlForm -and -not $Script:XmlForm.IsDisposed) {
@@ -3138,9 +3168,13 @@ function Show-XmlDownloader {
             $pediuCancelar = $false
             $f.UseWaitCursor = $true
             try {
+                $relogioCancelar = [System.Diagnostics.Stopwatch]::StartNew()
+                $ultimoCancelar = -1000
                 while (-not $tarefa.IsCompleted) {
-                    if ($Cancelavel -and $Script:XmlCancelar -and -not $pediuCancelar) {
+                    # O Cancel() feito antes do comando chegar ao servidor e ignorado: por isso repete a cada 300 ms
+                    if ($Cancelavel -and $Script:XmlCancelar -and ($relogioCancelar.ElapsedMilliseconds - $ultimoCancelar) -ge 300) {
                         $pediuCancelar = $true
+                        $ultimoCancelar = $relogioCancelar.ElapsedMilliseconds
                         try { $Cmd.Cancel() } catch {}
                     }
                     [System.Windows.Forms.Application]::DoEvents()
@@ -3689,17 +3723,42 @@ function Show-XmlDownloader {
             $adaptador = New-Object System.Data.SqlClient.SqlDataAdapter $Cmd
             $f.UseWaitCursor = $true
             try {
-                [void]$adaptador.Fill($tabela)
+                if (Enable-PreenchedorAsync) {
+                    # Numa outra thread: a janela continua respondendo enquanto o banco entrega as notas
+                    $tarefaFill = [PreencheTabelaAsync]::Iniciar($adaptador, $tabela)
+                    $relogioFill = [System.Diagnostics.Stopwatch]::StartNew()
+                    $textoBaseFill = "$($lblCarregando.Text)"
+                    $segFill = -1
+                    $ultimoCancelarFill = -1000
+                    while (-not $tarefaFill.IsCompleted) {
+                        # Repete o Cancel() a cada 300 ms: se for feito antes do comando chegar ao servidor, o SQL o ignora
+                        if ($Script:XmlCancelar -and ($relogioFill.ElapsedMilliseconds - $ultimoCancelarFill) -ge 300) { $ultimoCancelarFill = $relogioFill.ElapsedMilliseconds; try { $Cmd.Cancel() } catch {} }
+                        $segAgora = [int]$relogioFill.Elapsed.TotalSeconds
+                        if ($segAgora -ne $segFill -and $textoBaseFill -ne "") { $segFill = $segAgora; $lblCarregando.Text = "$textoBaseFill ($segAgora s)" }
+                        [System.Windows.Forms.Application]::DoEvents()
+                        Start-Sleep -Milliseconds 40
+                    }
+                    if ($textoBaseFill -ne "") { $lblCarregando.Text = $textoBaseFill }
+                    if ($Script:XmlCancelar) { throw "Busca cancelada." }
+                    if ($tarefaFill.IsFaulted) { throw $tarefaFill.Exception.GetBaseException() }
+                }
+                else { [void]$adaptador.Fill($tabela) }
             }
             finally {
                 $f.UseWaitCursor = $false
                 try { $adaptador.Dispose() } catch {}
             }
             $n = 0
+            $totalLinhas = $tabela.Rows.Count
+            $relogioLinhas = [System.Diagnostics.Stopwatch]::StartNew()
+            $ultimoRespiro = 0
             foreach ($linhaTab in $tabela.Rows) {
                 $Lista.Add((& $lerLinha $linhaTab $true $true))
                 $n++
-                if ($n % 200 -eq 0) {
+                # A cada ~80 ms a janela respira: com contagem fixa de notas, uma leva mais pesada segurava a tela por segundos
+                if ($relogioLinhas.ElapsedMilliseconds - $ultimoRespiro -ge 80) {
+                    $ultimoRespiro = $relogioLinhas.ElapsedMilliseconds
+                    if ($totalLinhas -ge 50) { $lblCarregando.Text = "Lendo as notas... $n de $totalLinhas" }
                     [System.Windows.Forms.Application]::DoEvents()
                     if ($Script:XmlCancelar) { throw "Busca cancelada." }
                 }
@@ -3786,7 +3845,7 @@ function Show-XmlDownloader {
             else { $lvi.Checked = $false }
             $lvi.Tag = $Item
             $Item.Linha = $lvi
-            [void]$lv.Items.Add($lvi)
+            return $lvi
         }
 
         $mostraCarregando = {
@@ -3853,6 +3912,8 @@ function Show-XmlDownloader {
 
         $repintaLista = {
             # Reaplica ordem e filtro sobre o resultado da ultima busca
+            # (a montagem deixa a janela respirar: um clique no cabecalho no meio dela nao pode comecar outra montagem por cima)
+            if ($Script:XmlRepintando) { return $lv.Items.Count }
             foreach ($lvi in $lv.Items) { if ($null -ne $lvi.Tag) { $lvi.Tag.Marcado = $lvi.Checked } }
             $vis = @($Script:XmlResultados | Where-Object { & $filtraTipo $_ })
             # Item que entra ja marcado tambem dispara o ItemChecked: com o evento
@@ -3860,10 +3921,29 @@ function Show-XmlDownloader {
             $lv.remove_ItemChecked($aoMarcarLinha)
             $lv.BeginUpdate()
             try {
+                $Script:XmlRepintando = $true
                 $lv.Items.Clear()
-                foreach ($a in $vis) { & $pintaLinha $a }
+                # Monta as linhas em blocos (a janela respira a cada ~80 ms) e entrega tudo de uma vez ao ListView:
+                # o AddRange e bem mais rapido que adicionar uma a uma, e 20 mil notas deixavam a tela parada por segundos
+                $lote = New-Object 'System.Collections.Generic.List[System.Windows.Forms.ListViewItem]'
+                $montadas = 0
+                $relogioMontagem = [System.Diagnostics.Stopwatch]::StartNew()
+                $ultimoRespiroMontagem = 0
+                foreach ($a in $vis) {
+                    $lote.Add([System.Windows.Forms.ListViewItem](& $pintaLinha $a))
+                    $montadas++
+                    # Entrega ao ListView de 150 em 150: uma entrega so, com milhares de notas, segurava a tela por segundos
+                    if ($lote.Count -ge 150) { $lv.Items.AddRange($lote.ToArray()); $lote.Clear() }
+                    if ($relogioMontagem.ElapsedMilliseconds - $ultimoRespiroMontagem -ge 80) {
+                        $ultimoRespiroMontagem = $relogioMontagem.ElapsedMilliseconds
+                        if ($vis.Count -ge 50) { $lblCarregando.Text = "Montando a lista... $montadas de $($vis.Count)" }
+                        [System.Windows.Forms.Application]::DoEvents()
+                    }
+                }
+                if ($lote.Count -gt 0) { $lv.Items.AddRange($lote.ToArray()) }
             }
             finally {
+                $Script:XmlRepintando = $false
                 $lv.EndUpdate()
                 $lv.add_ItemChecked($aoMarcarLinha)
             }
@@ -4195,9 +4275,20 @@ function Show-XmlDownloader {
                         & $setStatus $texto $Script:UiAmarelo
                         & $mostraCarregando $texto
 
-                        $sql = ";WITH logs AS (" + $cteLogs + " WHERE g.IDParceiro = @parceiro " +
+                        # Consulta de antes: a CTE numera TODO o log do parceiro (com os XMLs) a cada pagina
+                        $sqlAntigo = ";WITH logs AS (" + $cteLogs + " WHERE g.IDParceiro = @parceiro " +
                         "AND (@serie IS NULL OR g.SerieTokenID = @serie)" + $sb.FiltroG + ") SELECT TOP (@pagina) " + $colunas +
                         " " + $juncao + " WHERE " + $filtroPeriodo + $ordemPagina
+                        # Consulta leve: so os logs das notas do periodo entram na numeracao. O resultado e o mesmo (o log so
+                        # e ligado a nota que passa no filtro do periodo), mas o banco deixa de ordenar o historico inteiro.
+                        $servExiste = ""
+                        if ($Script:XmlTemServidor) { $servExiste = "AND t2.IDServidorFiscal = g.IDServidorFiscal " }
+                        $soLogsDoPeriodo = " AND EXISTS (SELECT 1 FROM NFCeTokenID t2 WHERE t2.IDParceiro = g.IDParceiro " + $servExiste +
+                        "AND t2.Serie = g.SerieTokenID AND t2.ID = g.IDTokenID AND (" + ($filtroPeriodo -replace '\bt\.', 't2.') + "))"
+                        $sqlLeve = ";WITH logs AS (" + $cteLogs + " WHERE g.IDParceiro = @parceiro " +
+                        "AND (@serie IS NULL OR g.SerieTokenID = @serie)" + $sb.FiltroG + $soLogsDoPeriodo + ") SELECT TOP (@pagina) " + $colunas +
+                        " " + $juncao + " WHERE " + $filtroPeriodo + $ordemPagina
+                        $sql = $sqlLeve
                         $cmd = & $novoCmdPeriodo $sql
                         if (-not $Script:XmlLogouSqlBusca) {
                             Log-SqlBancoComando "XMLs NFC-e" $sql "modo=período; parceiro=$parceiro; total=$totalPeriodo"
@@ -4208,7 +4299,28 @@ function Show-XmlDownloader {
                         $par = $cmd.Parameters.Add("@ultId", [System.Data.SqlDbType]::BigInt); $par.Value = $ultId
                         $par = $cmd.Parameters.Add("@ultServ", [System.Data.SqlDbType]::Int); $par.Value = $ultServ
 
-                        $veio = & $lerParaLista $cmd $achados
+                        # Se a consulta leve falhar, ou nao trouxer nada numa primeira pagina que o banco diz ter notas, vale a de antes
+                        $antesPagina = $achados.Count
+                        $veio = 0
+                        $usouLeve = $false
+                        try {
+                            $veio = & $lerParaLista $cmd $achados
+                            $usouLeve = $true
+                        }
+                        catch {
+                            $msgLeve = "$($_.Exception.Message)"
+                            if ($msgLeve -eq "Busca cancelada." -or $achados.Count -ne $antesPagina) { throw }
+                            Log-Message "ERRO" "XMLs: a consulta leve do período falhou ($msgLeve); usando a consulta de antes"
+                        }
+                        if (-not $usouLeve -or ($veio -eq 0 -and $achados.Count -eq $antesPagina -and $totalPeriodo -gt 0 -and $ultId -lt 0)) {
+                            if ($usouLeve) { Log-Message "INFO" "XMLs: a consulta leve não trouxe nada e o banco tem $totalPeriodo nota(s) no período; usando a consulta de antes" }
+                            $cmd = & $novoCmdPeriodo $sqlAntigo
+                            $par = $cmd.Parameters.Add("@pagina", [System.Data.SqlDbType]::Int); $par.Value = $pagina
+                            $par = $cmd.Parameters.Add("@ultSerie", [System.Data.SqlDbType]::Int); $par.Value = $ultSerie
+                            $par = $cmd.Parameters.Add("@ultId", [System.Data.SqlDbType]::BigInt); $par.Value = $ultId
+                            $par = $cmd.Parameters.Add("@ultServ", [System.Data.SqlDbType]::Int); $par.Value = $ultServ
+                            $veio = & $lerParaLista $cmd $achados
+                        }
                         if ($veio -gt 0) {
                             $ultimo = $achados[$achados.Count - 1]
                             $ultSerie = [int]$ultimo.Serie
@@ -18467,7 +18579,7 @@ $formWidth = if ($screen.Width -lt 1200) { $screen.Width - 50 } else { 1200 }
 $formHeight = if ($screen.Height -lt 900) { $screen.Height - 50 } else { 900 }
 
 $form = New-Object System.Windows.Forms.Form
-$form.Text = "Preparador XMenu – Suporte Técnico v5.38"
+$form.Text = "Preparador XMenu – Suporte Técnico v5.39"
 $form.Size = New-Object System.Drawing.Size($formWidth, $formHeight)
 $form.StartPosition = "CenterScreen"
 $form.BackColor = [System.Drawing.Color]::FromArgb(25, 25, 30); $form.ForeColor = 'White'
@@ -19208,7 +19320,7 @@ $bClock.Add_Click({ Invoke-ClockSync })
 [void]$tbl.Controls.Add($bClock)
 
 # Mensagem de abertura: explica o programa para quem abre pela primeira vez
-Log-Message "INFO" "Preparador XMenu v5.38 - preparo e suporte de computadores com XMenu e NetPDV"
+Log-Message "INFO" "Preparador XMenu v5.39 - preparo e suporte de computadores com XMenu e NetPDV"
 Log-Message "LOG" "==============================================================="
 Log-Message "LOG" "COMO USAR"
 Log-Message "LOG" "  PREPARAR AMBIENTE WINDOWS .. ajusta energia, UAC e desempenho do PC num clique"
@@ -19218,7 +19330,8 @@ Log-Message "LOG" "  EXTERNOS ................... acesso remoto, Chrome, TEF HUB
 Log-Message "LOG" "  SUPORTE E DIAGNÓSTICO ...... impressoras, rede, SQL, backup, XMLs e reparos do Windows"
 Log-Message "LOG" "  Passe o mouse sobre um botão para ver o que ele faz antes de clicar."
 Log-Message "LOG" "---------------------------------------------------------------"
-Log-Message "LOG" "NOVO NA v5.38"
+Log-Message "LOG" "NOVO NA v5.39"
+Log-Message "SUCESSO" "  XMLs: a busca por período ficou bem mais rápida em banco grande (só os logs das notas do período são lidos) e a janela não fica mais em Não está respondendo enquanto o banco entrega as notas; CANCELAR funciona durante a consulta (mesmo apertado cedo), a lista de notas é montada em blocos sem congelar e a tela mostra o andamento"
 Log-Message "SUCESSO" "  XMLs: ao terminar o download, o Windows abre a pasta de cima com a pasta do lote marcada, e o .zip aparece ao lado (um compactado e outro não), em vez de abrir por dentro da pasta"
 Log-Message "SUCESSO" "  Trocar Banco com a RAM cheia: mostra no log e no aviso quanta RAM está livre e quem mais gasta, espera com paciência (conexão, arquivos do SQL, programas fechando), tenta de novo os comandos que falham por memória ou tempo, não trava a janela e, se falhar, aponta a RAM como provável causa"
 Log-Message "SUCESSO" "  Banco: novo botão RESTAURAR BACKUP no Backup do Banco: volta o .bak, o .zip com o .bak ou o .zip do BACKUP MANUAL (MDF e LDF), no banco atual (depois de conferir o backup e fazer uma cópia de segurança dele) ou como banco novo dentro da pasta do NetControll, já anexado ao SQL Server; se algo der errado, o Preparador desfaz"
