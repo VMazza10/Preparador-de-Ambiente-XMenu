@@ -1,6 +1,6 @@
 ﻿# =============================================================================
 # PREPARADOR XMENU - VERSAO REVENDA
-# Baseado na v5.37
+# Baseado na v5.38
 # Alteracoes Revenda:
 #   - Wallpaper: fundo_revenda.png
 #   - Removido: Atalhos de Suporte e Pasta Netcontroll
@@ -4691,7 +4691,16 @@ function Show-XmlDownloader {
             # Varios lotes (um por empresa): abre a pasta de cima, com todos lado a lado.
             $abrirLote = $pasta
             if ($pastasLote.Count -gt 1) { $abrirLote = Split-Path $pasta -Parent; $Script:XmlUltimoLote = $abrirLote }
-            try { if (Test-Path -LiteralPath $abrirLote) { Start-Process "explorer.exe" ("`"" + $abrirLote + "`"") } } catch {}
+            try {
+                if ($pastasLote.Count -gt 1) {
+                    if (Test-Path -LiteralPath $abrirLote) { Start-Process "explorer.exe" ("`"" + $abrirLote + "`"") }
+                }
+                elseif (Test-Path -LiteralPath $pasta) {
+                    # Um lote so: abre a pasta de cima com a pasta dos XMLs marcada; o .zip do lote aparece ao lado
+                    # (dois itens: um descompactado e um compactado), em vez de abrir por dentro da pasta.
+                    Start-Process "explorer.exe" ("/select,`"" + $pasta + "`"")
+                }
+            } catch {}
         }
 
         # Espelho fiscal (DANFE NFC-e) em PDF das notas marcadas. Por chave ou por
@@ -7597,6 +7606,126 @@ function Show-RestaurarBanco {
 }
 
 
+# -----------------------------------------------------------------------------
+# MEMORIA CHEIA E ESPERAS PACIENTES (usado pelo Trocar Banco)
+# Com a RAM cheia o SQL Server fica lento: a conexao estoura o tempo, o SQL demora para soltar o MDF
+# e o LDF depois de desanexar e o ATTACH pode falhar por falta de memoria. Estas funcoes esperam com
+# paciencia, tentam de novo e explicam a causa provavel.
+# -----------------------------------------------------------------------------
+function Test-MemoriaCritica {
+    # RAM quase cheia? Menos de 800 MB livres ou 92% ou mais em uso.
+    param([double]$TotalMb, [double]$LivreMb)
+    if ($TotalMb -le 0) { return $false }
+    $pctUso = 100.0 * ($TotalMb - $LivreMb) / $TotalMb
+    return (($LivreMb -lt 800) -or ($pctUso -ge 92))
+}
+
+function Get-PressaoMemoria {
+    # Situacao da RAM da maquina e de quem mais gasta.
+    # Devolve hashtable: Lido / TotalMb / LivreMb / PctEmUso / Critica / SqlMb / Top (texto)
+    $res = @{ Lido = $false; TotalMb = 0; LivreMb = 0; PctEmUso = 0; Critica = $false; SqlMb = 0; Top = "" }
+    try {
+        $so = Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop
+        $res.TotalMb = [int][math]::Round([double]$so.TotalVisibleMemorySize / 1024)
+        $res.LivreMb = [int][math]::Round([double]$so.FreePhysicalMemory / 1024)
+        if ($res.TotalMb -gt 0) { $res.PctEmUso = [int][math]::Round(100.0 * ($res.TotalMb - $res.LivreMb) / $res.TotalMb) }
+        $res.Critica = (Test-MemoriaCritica -TotalMb $res.TotalMb -LivreMb $res.LivreMb)
+        $res.Lido = $true
+    }
+    catch { return $res }
+    try {
+        $maiores = @(Get-Process -ErrorAction SilentlyContinue | Sort-Object WorkingSet64 -Descending | Select-Object -First 5)
+        $res.Top = (@($maiores | ForEach-Object { "$($_.ProcessName) $([int][math]::Round($_.WorkingSet64 / 1MB)) MB" })) -join ", "
+        $somaSql = [long]0
+        foreach ($p in @(Get-Process -Name sqlservr -ErrorAction SilentlyContinue)) { $somaSql += $p.WorkingSet64 }
+        $res.SqlMb = [int][math]::Round($somaSql / 1MB)
+    }
+    catch {}
+    return $res
+}
+
+function Get-DicaMemoriaErro {
+    # Se o erro parece falta de memoria (ou de tempo por causa dela), devolve a explicacao; senao "".
+    # Reconhece as mensagens do SQL Server em ingles e em portugues.
+    param($Erro)
+    $texto = "$($Erro.Message)"
+    try { $texto += " " + (Get-TextoErroSql $Erro) } catch {}
+    if ($texto -match 'insufficient (system )?memory|waiting for memory resources|not enough memory|out of memory|OutOfMemory|buffer pool|mem.ria (do sistema )?(insuficiente|dispon.vel)|N.o h. mem.ria|sem mem.ria') {
+        return "O SQL Server ficou sem memória (a RAM está cheia)."
+    }
+    if ($texto -match 'Timeout expired|timeout period elapsed|Tempo limite|tempo limite|time out occurred|timed out') {
+        return "O SQL Server demorou demais para responder: a máquina está lenta, em geral por pouca RAM livre."
+    }
+    return ""
+}
+
+function Open-SqlComTentativas {
+    # Abre a conexao com paciencia: com a RAM cheia o SQL demora para atender. Tenta ate -Tentativas vezes,
+    # com a janela respondendo, e avisa cada tentativa por -AoAvisar { param($Texto) }. Devolve a conexao aberta.
+    param([string]$TextoConexao, [int]$Tentativas = 3, [int]$EsperaSeg = 5, [scriptblock]$AoAvisar)
+    for ($tentativa = 1; $tentativa -le $Tentativas; $tentativa++) {
+        $conexaoNova = New-Object System.Data.SqlClient.SqlConnection($TextoConexao)
+        try {
+            Wait-SqlTarefa $conexaoNova.OpenAsync()
+            return $conexaoNova
+        }
+        catch {
+            $motivo = "$(Get-TextoErroSql $_.Exception)"
+            try { $conexaoNova.Dispose() } catch {}
+            if ($tentativa -ge $Tentativas) { throw }
+            if ($null -ne $AoAvisar) { $null = & $AoAvisar "O SQL Server não atendeu na tentativa $tentativa de ${Tentativas} ($motivo). Esperando $EsperaSeg s e tentando de novo..." }
+            $fim = (Get-Date).AddSeconds($EsperaSeg)
+            while ((Get-Date) -lt $fim) { [System.Windows.Forms.Application]::DoEvents(); Start-Sleep -Milliseconds 100 }
+        }
+    }
+}
+
+function Wait-ArquivoLiberado {
+    # Espera o arquivo ficar livre (o SQL as vezes demora para soltar o MDF e o LDF depois de desanexar, ainda
+    # mais com pouca RAM). Devolve $true se liberou (ou se o arquivo nao existe), $false se passou do limite.
+    param([string]$Caminho, [int]$LimiteSeg = 60, [scriptblock]$AoEsperar)
+    $relogio = [System.Diagnostics.Stopwatch]::StartNew()
+    $ultimoAviso = 0
+    while ($true) {
+        try {
+            $fluxo = [System.IO.File]::Open($Caminho, [System.IO.FileMode]::Open, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None)
+            $fluxo.Dispose()
+            return $true
+        }
+        catch [System.IO.FileNotFoundException] { return $true }
+        catch [System.IO.DirectoryNotFoundException] { return $true }
+        catch {}
+        if ($relogio.Elapsed.TotalSeconds -ge $LimiteSeg) { return $false }
+        if ($null -ne $AoEsperar -and ($relogio.Elapsed.TotalSeconds - $ultimoAviso) -ge 10) {
+            $ultimoAviso = $relogio.Elapsed.TotalSeconds
+            $null = & $AoEsperar "O arquivo ainda está em uso (esperando $([int]$relogio.Elapsed.TotalSeconds) s): $Caminho"
+        }
+        [System.Windows.Forms.Application]::DoEvents()
+        Start-Sleep -Milliseconds 300
+    }
+}
+
+function Invoke-ArquivoComTentativas {
+    # Move ou copia um arquivo e tenta de novo se o disco, o antivirus ou o SQL ainda estiver segurando.
+    # -Acao Mover|Copiar; avisa cada nova tentativa por -AoTentar { param($Texto) }.
+    param([string]$Acao, [string]$Origem, [string]$Destino, [int]$Tentativas = 6, [scriptblock]$AoTentar)
+    for ($tentativa = 1; $tentativa -le $Tentativas; $tentativa++) {
+        try {
+            if ($Acao -eq 'Mover') { Move-Item -LiteralPath $Origem -Destination $Destino -Force -ErrorAction Stop }
+            else { Copy-Item -LiteralPath $Origem -Destination $Destino -Force -ErrorAction Stop }
+            return
+        }
+        catch {
+            if ($tentativa -ge $Tentativas) { throw }
+            $espera = 1.5 * $tentativa
+            if ($null -ne $AoTentar) { $null = & $AoTentar "Não consegui $($Acao.ToLower()) $(Split-Path -Leaf $Origem) (tentativa $tentativa de ${Tentativas}: $($_.Exception.Message)). Esperando $espera s..." }
+            $fim = (Get-Date).AddSeconds($espera)
+            while ((Get-Date) -lt $fim) { [System.Windows.Forms.Application]::DoEvents(); Start-Sleep -Milliseconds 100 }
+        }
+    }
+}
+
+
 function Show-DbSwapNetWebPdv {
     try {
         if ($null -ne $Script:DbSwapForm -and -not $Script:DbSwapForm.IsDisposed) {
@@ -7826,12 +7955,27 @@ function Show-DbSwapNetWebPdv {
         }
         $execNonQuery = {
             param($Conexao, [string]$Sql)
-            $cmd = $Conexao.CreateCommand()
-            $cmd.CommandTimeout = 0
-            $cmd.CommandText = $Sql
             Log-SqlBancoComando "Trocar banco" $Sql
             try { & $addLog ("SQL: " + (Format-SqlLogTexto $Sql)) } catch {}
-            [void]$cmd.ExecuteNonQuery()
+            # Com a RAM cheia o SQL pode falhar por memoria ou por tempo: espera e tenta de novo (ate 3 vezes), sem travar a janela
+            for ($tentativaSql = 1; $tentativaSql -le 3; $tentativaSql++) {
+                try {
+                    if ($Conexao.State -ne 'Open') { try { $Conexao.Close() } catch {}; Wait-SqlTarefa $Conexao.OpenAsync() }
+                    $cmd = $Conexao.CreateCommand()
+                    $cmd.CommandTimeout = 0
+                    $cmd.CommandText = $Sql
+                    $tarefaSql = $cmd.ExecuteNonQueryAsync()
+                    Wait-SqlTarefa $tarefaSql -IntervaloMs 300
+                    return
+                }
+                catch {
+                    $dicaSql = Get-DicaMemoriaErro $_.Exception
+                    if ($tentativaSql -ge 3 -or $dicaSql -eq "") { throw }
+                    & $addLog "$dicaSql A tentativa $tentativaSql de 3 falhou; esperando $(5 * $tentativaSql) s para tentar de novo..."
+                    $fimEspera = (Get-Date).AddSeconds(5 * $tentativaSql)
+                    while ((Get-Date) -lt $fimEspera) { [System.Windows.Forms.Application]::DoEvents(); Start-Sleep -Milliseconds 100 }
+                }
+            }
         }
         $execScalarParam = {
             param($Conexao, [string]$Sql, [string]$Valor)
@@ -7918,9 +8062,13 @@ function Show-DbSwapNetWebPdv {
                 $lblResumoCandidatos.Text = "Procurando..."
                 $lblSelecionado.ForeColor = $Script:UiSuave
                 $lblSelecionado.Text = "A busca está em andamento. Nenhum arquivo será alterado."
+                $memoriaBusca = Get-PressaoMemoria
+                if ($memoriaBusca.Lido) {
+                    & $addLog "Memória RAM: $($memoriaBusca.PctEmUso)% em uso ($($memoriaBusca.LivreMb) MB livres de $($memoriaBusca.TotalMb) MB). SQL Server: $($memoriaBusca.SqlMb) MB. Maiores consumidores: $($memoriaBusca.Top)"
+                    if ($memoriaBusca.Critica) { & $addLog "ALERTA: a RAM está quase cheia. O SQL Server pode ficar lento; o Preparador vai esperar com mais paciência e tentar de novo, mas o ideal é liberar memória (fechar o navegador e programas pesados) antes da troca." }
+                }
                 & $addLog "Conectando no SQL..."
-                $cn = New-Object System.Data.SqlClient.SqlConnection((& $getConn "master" 10))
-                Wait-SqlTarefa $cn.OpenAsync()
+                $cn = Open-SqlComTentativas -TextoConexao (& $getConn "master" 30) -Tentativas 3 -AoAvisar { param($Texto) & $addLog $Texto }
                 $maquinaSql = & $execScalarParam $cn "SELECT CAST(SERVERPROPERTY('MachineName') AS nvarchar(128))" $null
                 if (-not (Test-SqlLocal -MaquinaSql "$maquinaSql")) { throw "Esse SQL Server está na máquina $maquinaSql. Faça a troca no servidor do banco." }
                 $versaoSql = & $execScalarParam $cn "SELECT CAST(SERVERPROPERTY('ProductVersion') AS nvarchar(128))" $null
@@ -8036,15 +8184,22 @@ function Show-DbSwapNetWebPdv {
             $fechados = @($fechados | Select-Object -Unique)
             if ($fechados.Count -gt 0) { & $addLog "Programas fechados: $($fechados -join ', ')" }
             else { & $addLog "Nenhum programa NetControll estava aberto." }
-            Start-Sleep -Milliseconds 500
+            # Espera de verdade os programas sairem (com a RAM cheia o Windows demora para encerrar)
+            $nomesProgramas = @("Concentrador", "NetStart", "NetServidor", "NetTerminal", "NetPrint", "NetPDV", "LinkXMenu", "XMenu")
+            $limiteFechar = (Get-Date).AddSeconds(30)
+            while ((Get-Date) -lt $limiteFechar -and @(Get-Process -Name $nomesProgramas -ErrorAction SilentlyContinue).Count -gt 0) {
+                [System.Windows.Forms.Application]::DoEvents()
+                Start-Sleep -Milliseconds 300
+            }
+            $aindaAbertos = @(Get-Process -Name $nomesProgramas -ErrorAction SilentlyContinue | ForEach-Object { $_.ProcessName } | Select-Object -Unique)
+            if ($aindaAbertos.Count -gt 0) { & $addLog "AVISO: estes programas ainda estavam abertos depois de 30 s: $($aindaAbertos -join ', ')" }
         }
         $verificarOperacaoBanco = {
             param([string]$Banco, [string]$Etapa = "verificação prévia")
             $cnSeguranca = $null
             try {
                 & $addLog "Segurança ($Etapa): conferindo movimentações e caixas abertos..."
-                $cnSeguranca = New-Object System.Data.SqlClient.SqlConnection((& $getConn $Banco 15))
-                Wait-SqlTarefa $cnSeguranca.OpenAsync()
+                $cnSeguranca = Open-SqlComTentativas -TextoConexao (& $getConn $Banco 30) -Tentativas 3 -AoAvisar { param($Texto) & $addLog $Texto }
 
                 $sqlEstrutura = @"
 SELECT
@@ -8289,6 +8444,16 @@ SELECT
                 }
                 else { $itensAviso += @{ Tipo = 'info'; Titulo = ''; Texto = 'Se algum programa NetControll estiver aberto, ele será fechado automaticamente.' } }
                 $itensAviso += @{ Tipo = 'ok'; Titulo = 'BACKUP AUTOMÁTICO DO BANCO ANTIGO'; Texto = "O banco e o log atuais serão guardados juntos em um ZIP validado em: $pastaBackupData" }
+                $memoriaTroca = Get-PressaoMemoria
+                if ($memoriaTroca.Lido) {
+                    & $addLog "Memória RAM antes da troca: $($memoriaTroca.PctEmUso)% em uso ($($memoriaTroca.LivreMb) MB livres de $($memoriaTroca.TotalMb) MB). SQL Server: $($memoriaTroca.SqlMb) MB. Maiores consumidores: $($memoriaTroca.Top)"
+                    if ($memoriaTroca.Critica) {
+                        & $addLog "ALERTA: a RAM está quase cheia. O SQL Server pode ficar lento ou falhar; o Preparador vai esperar com mais paciência e tentar de novo, mas o ideal é liberar memória antes."
+                        $textoRam = "A RAM está $($memoriaTroca.PctEmUso)% em uso (só $($memoriaTroca.LivreMb) MB livres de $($memoriaTroca.TotalMb) MB). Com pouca memória o SQL Server fica lento e pode falhar ao anexar o banco novo. O Preparador espera com mais paciência e tenta de novo, mas o ideal é liberar memória antes de continuar: feche o navegador e outros programas pesados"
+                        if ($memoriaTroca.SqlMb -gt 0) { $textoRam += "; o SQL Server está usando $($memoriaTroca.SqlMb) MB" }
+                        $itensAviso += @{ Tipo = 'alerta'; Titulo = 'MEMÓRIA RAM QUASE CHEIA'; Texto = ($textoRam + ". Maiores consumidores agora: $($memoriaTroca.Top).") }
+                    }
+                }
                 if ($chkPosTroca.Checked) {
                     $itensAviso += @{ Tipo = 'info'; Titulo = 'DEPOIS DA TROCA (AUTOMÁTICO)'; Texto = 'O Preparador abre o AjustesInstalacao, clica em Atualizar Banco, espera terminar e abre o Concentrador. Para fazer isso manualmente, cancele e desmarque a caixa da tela.' }
                 }
@@ -8367,25 +8532,27 @@ SELECT
                 & $grantPath (Split-Path $atual.Mdf)
                 & $grantPath $cand.Pasta
 
-                $cn = New-Object System.Data.SqlClient.SqlConnection((& $getConn "master" 20))
-                Wait-SqlTarefa $cn.OpenAsync()
+                $cn = Open-SqlComTentativas -TextoConexao (& $getConn "master" 45) -Tentativas 3 -AoAvisar { param($Texto) & $addLog $Texto }
                 $nomeDb = & $sqlName $atual.Banco
                 & $addLog "Desconectando usuários do banco..."
                 & $execNonQuery $cn "IF DB_ID(N'$($atual.Banco.Replace("'","''"))') IS NOT NULL ALTER DATABASE $nomeDb SET SINGLE_USER WITH ROLLBACK IMMEDIATE"
                 & $addLog "Desanexando banco atual..."
                 & $execNonQuery $cn "EXEC sp_detach_db @dbname = N'$($atual.Banco.Replace("'","''"))', @skipchecks = 'true'"
                 $desanexouAtual = $true
-                Start-Sleep -Milliseconds 600
+                & $addLog "Esperando o SQL soltar os arquivos do banco (com pouca RAM isso pode demorar)..."
+                foreach ($arqLivre in @($atual.Mdf, $atual.Ldf)) {
+                    if (-not (Wait-ArquivoLiberado -Caminho $arqLivre -LimiteSeg 90 -AoEsperar { param($Texto) & $addLog $Texto })) { & $addLog "AVISO: $arqLivre ainda parece em uso depois de 90 s; vou tentar mover mesmo assim." }
+                }
 
                 $oldMdfBackup = Join-Path $backupDir "NetWebPDV_$backupTag.mdf"
                 $oldLdfBackup = Join-Path $backupDir "NetWebPDV_log_$backupTag.ldf"
                 & $addLog "Movendo MDF e LDF atuais para o backup em $pastaBackupData..."
-                Move-Item -LiteralPath $atual.Mdf -Destination $oldMdfBackup -Force
-                Move-Item -LiteralPath $atual.Ldf -Destination $oldLdfBackup -Force
+                Invoke-ArquivoComTentativas -Acao Mover -Origem $atual.Mdf -Destino $oldMdfBackup -AoTentar { param($Texto) & $addLog $Texto }
+                Invoke-ArquivoComTentativas -Acao Mover -Origem $atual.Ldf -Destino $oldLdfBackup -AoTentar { param($Texto) & $addLog $Texto }
 
                 & $addLog "Copiando banco novo para o local original..."
-                Copy-Item -LiteralPath $cand.Mdf -Destination $atual.Mdf -Force
-                Copy-Item -LiteralPath $cand.Ldf -Destination $atual.Ldf -Force
+                Invoke-ArquivoComTentativas -Acao Copiar -Origem $cand.Mdf -Destino $atual.Mdf -AoTentar { param($Texto) & $addLog $Texto }
+                Invoke-ArquivoComTentativas -Acao Copiar -Origem $cand.Ldf -Destino $atual.Ldf -AoTentar { param($Texto) & $addLog $Texto }
                 $copiouNovo = $true
                 & $grantPath $atual.Mdf
                 & $grantPath $atual.Ldf
@@ -8425,6 +8592,10 @@ SELECT
             catch {
                 $erro = $_.Exception.Message
                 & $addLog "ERRO: $erro"
+                $dicaMemoria = Get-DicaMemoriaErro $_.Exception
+                $memoriaFalha = Get-PressaoMemoria
+                if ($memoriaFalha.Lido) { & $addLog "Memória RAM na hora da falha: $($memoriaFalha.PctEmUso)% em uso ($($memoriaFalha.LivreMb) MB livres de $($memoriaFalha.TotalMb) MB). Maiores consumidores: $($memoriaFalha.Top)" }
+                if ($dicaMemoria -ne "") { & $addLog "PROVÁVEL CAUSA: $dicaMemoria" }
                 if ($desanexouAtual) { & $addLog "Tentando rollback para o banco antigo..." }
                 else { & $addLog "Troca interrompida antes de desanexar o banco; garantindo modo multiusuário..." }
                 try {
@@ -8460,9 +8631,17 @@ SELECT
                 $lblStatus.ForeColor = $Script:UiVermelho
                 $lblStatus.Text = "Falha na troca: $erro"
                 $situacaoBanco = if ($desanexouAtual) { "O Preparador tentou restaurar o banco antigo." } else { "Nenhum arquivo foi substituído e o banco atual permaneceu anexado." }
+                $itensFalha = @(@{ Tipo = 'perigo'; Titulo = 'O QUE ACONTECEU'; Texto = "$erro" })
+                if ($dicaMemoria -ne "" -or ($memoriaFalha.Lido -and $memoriaFalha.Critica)) {
+                    $textoCausa = "$dicaMemoria"
+                    if ($memoriaFalha.Lido) { $textoCausa += " Agora a RAM está $($memoriaFalha.PctEmUso)% em uso (só $($memoriaFalha.LivreMb) MB livres)." }
+                    $textoCausa += " Feche o navegador e outros programas pesados, ou reinicie o computador, e tente a troca de novo."
+                    $itensFalha += @{ Tipo = 'alerta'; Titulo = 'PROVÁVEL CAUSA: MEMÓRIA RAM CHEIA'; Texto = $textoCausa.Trim() }
+                }
+                $itensFalha += @{ Tipo = 'info'; Titulo = ''; Texto = 'Veja o acompanhamento na parte de baixo da tela para os detalhes de cada passo.' }
                 try {
                     [void](Show-AvisoDestaque -Dono $f -Titulo "Trocar Banco" -Manchete "A TROCA DO BANCO FALHOU" -Resumo "$situacaoBanco" -Tipo 'erro' `
-                            -Itens @(@{ Tipo = 'perigo'; Titulo = 'O QUE ACONTECEU'; Texto = "$erro" }, @{ Tipo = 'info'; Titulo = ''; Texto = 'Veja o acompanhamento na parte de baixo da tela para os detalhes de cada passo.' }) -TextoSim "OK")
+                            -Itens $itensFalha -TextoSim "OK")
                 }
                 catch { [System.Windows.Forms.MessageBox]::Show("Falha ao trocar o banco:`r`n`r`n$erro`r`n`r`nVerifique o log da tela. $situacaoBanco", "Trocar Banco", "OK", "Error") | Out-Null }
             }
@@ -18206,7 +18385,7 @@ $formWidth = if ($screen.Width -lt 1000) { 900 } else { 1000 }
 $formHeight = if ($screen.Height -lt 800) { 700 } else { 800 }
 
 $form = New-Object System.Windows.Forms.Form
-$form.Text = "Preparador XMenu – Suporte Técnico v5.37 - REVENDA"
+$form.Text = "Preparador XMenu – Suporte Técnico v5.38 - REVENDA"
 $form.Size = New-Object System.Drawing.Size($formWidth, $formHeight)
 $form.StartPosition = "CenterScreen"
 $form.BackColor = [System.Drawing.Color]::FromArgb(25, 25, 30); $form.ForeColor = 'White'
@@ -18944,7 +19123,7 @@ $bClock.Add_Click({ Invoke-ClockSync })
 [void]$tbl.Controls.Add($bClock)
 
 # Mensagem de abertura: explica o programa para quem abre pela primeira vez
-Log-Message "INFO" "Preparador XMenu v5.37 - REVENDA - preparo e suporte de computadores com XMenu e NetPDV"
+Log-Message "INFO" "Preparador XMenu v5.38 - REVENDA - preparo e suporte de computadores com XMenu e NetPDV"
 Log-Message "LOG" "==============================================================="
 Log-Message "LOG" "COMO USAR"
 Log-Message "LOG" "  PREPARAR AMBIENTE WINDOWS .. ajusta energia, UAC e desempenho do PC num clique"
@@ -18954,7 +19133,9 @@ Log-Message "LOG" "  EXTERNOS ................... acesso remoto, Chrome, TEF HUB
 Log-Message "LOG" "  SUPORTE E DIAGNÓSTICO ...... impressoras, rede, SQL, backup, XMLs e reparos do Windows"
 Log-Message "LOG" "  Passe o mouse sobre um botão para ver o que ele faz antes de clicar."
 Log-Message "LOG" "---------------------------------------------------------------"
-Log-Message "LOG" "NOVO NA v5.37"
+Log-Message "LOG" "NOVO NA v5.38"
+Log-Message "SUCESSO" "  XMLs: ao terminar o download, o Windows abre a pasta de cima com a pasta do lote marcada, e o .zip aparece ao lado (um compactado e outro não), em vez de abrir por dentro da pasta"
+Log-Message "SUCESSO" "  Trocar Banco com a RAM cheia: mostra no log e no aviso quanta RAM está livre e quem mais gasta, espera com paciência (conexão, arquivos do SQL, programas fechando), tenta de novo os comandos que falham por memória ou tempo, não trava a janela e, se falhar, aponta a RAM como provável causa"
 Log-Message "SUCESSO" "  Banco: novo botão RESTAURAR BACKUP no Backup do Banco: volta o .bak, o .zip com o .bak ou o .zip do BACKUP MANUAL (MDF e LDF), no banco atual (depois de conferir o backup e fazer uma cópia de segurança dele) ou como banco novo dentro da pasta do NetControll, já anexado ao SQL Server; se algo der errado, o Preparador desfaz"
 Log-Message "SUCESSO" "  Banco: o botão da cópia de arquivos agora se chama BACKUP MANUAL (TRAVA O SISTEMA), como o backup de antigamente: o botão é vermelho escuro e o aviso deixa claro que o sistema trava e mostra os programas do NetControll abertos nesta máquina"
 Log-Message "SUCESSO" "  Banco: o .zip da cópia de arquivos segue o nome do backup, com o ID da loja: NetWebPDV - ZIP - Loja 1234 - data e hora.zip (sem o nome da máquina)"
