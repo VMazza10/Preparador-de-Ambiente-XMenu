@@ -14593,6 +14593,44 @@ function Send-TesteImpressao {
     $doc = New-Object System.Drawing.Printing.PrintDocument
     $doc.DocumentName = "Teste de Impressao XMenu"
     $doc.PrinterSettings.PrinterName = $Impressora
+
+    # Impressora fiscal/termica (Elgin i9 e parecidas): a bobina normalmente e de 80 mm. Sem isso, o teste usava
+    # o tamanho de pagina padrao da fila (as vezes bem mais largo que a bobina de verdade) e o layout - desenhado
+    # para uma folha bem mais larga - saia cortado no meio do texto.
+    $areaImpressaoMm = 80
+    $paperOriginal = $null
+    try {
+        $tamAtual = $doc.DefaultPageSettings.PaperSize
+        $paperOriginal = New-Object System.Drawing.Printing.PaperSize($tamAtual.PaperName, $tamAtual.Width, $tamAtual.Height)
+        $larguraAtualMm = [Math]::Round($tamAtual.Width * 0.254, 1)
+        if ($larguraAtualMm -ge 45 -and $larguraAtualMm -le 90) {
+            # A fila ja esta configurada para uma bobina termica (58 ou 80 mm, por exemplo): mantem do jeito que esta
+            $areaImpressaoMm = $larguraAtualMm
+        }
+        else {
+            $melhor = $null
+            foreach ($tam in @($doc.PrinterSettings.PaperSizes)) {
+                $lMm = $tam.Width * 0.254
+                if ($lMm -lt 45 -or $lMm -gt 90) { continue }
+                if ($null -eq $melhor -or [Math]::Abs($lMm - 80) -lt [Math]::Abs(($melhor.Width * 0.254) - 80)) { $melhor = $tam }
+            }
+            if ($melhor) {
+                $doc.DefaultPageSettings.PaperSize = $melhor
+                $areaImpressaoMm = [Math]::Round($melhor.Width * 0.254, 1)
+            }
+            else {
+                # A fila nao tem nenhum tamanho de bobina cadastrado: forca 80 mm, a mais comum nas termicas
+                $doc.DefaultPageSettings.PaperSize = New-Object System.Drawing.Printing.PaperSize("Bobina 80mm (Preparador)", 300, 1800)
+                $areaImpressaoMm = 80
+            }
+        }
+        $doc.DefaultPageSettings.Margins = New-Object System.Drawing.Printing.Margins(4, 4, 4, 4)
+        Log-Message "INFO" "Teste de impressão: papel ajustado para ~$areaImpressaoMm mm de largura em '$Impressora'"
+    }
+    catch {
+        Log-Message "ERRO" "Teste de impressão: não consegui ajustar o tamanho do papel para a impressora térmica ($($_.Exception.Message)); segue com o tamanho padrão da fila"
+    }
+
     $qrPayload = "XMENU TESTE OK"
     $barcodePayload = ("XMENU-" + (Get-Date).ToString("HHmmss"))
     $doc.Add_PrintPage({
@@ -14618,53 +14656,66 @@ function Send-TesteImpressao {
             if ($w -lt 300) { $w = $pageWidth }
             [int]$x = [int]$bounds.Left + [int](($pageWidth - $w) / 2)
             [int]$y = [int]$bounds.Top
+            # O layout foi desenhado para uma folha de ate 5,6" de largura; numa bobina termica de 80 mm sobra
+            # bem menos area impressa. Tudo encolhe na mesma proporcao (fontes, faixas, respiros) para caber
+            # sem cortar nada, e se ainda assim faltar espaco o texto ganha reticencias em vez de ser cortado.
+            [double]$esc = [Math]::Max(0.42, [Math]::Min(1.0, $w / 560.0))
 
             $black = [System.Drawing.Brushes]::Black
             $white = [System.Drawing.Brushes]::White
             $ink = New-Object System.Drawing.SolidBrush([System.Drawing.Color]::FromArgb(25, 25, 25))
             $muted = New-Object System.Drawing.SolidBrush([System.Drawing.Color]::FromArgb(90, 90, 90))
             $linePen = New-Object System.Drawing.Pen([System.Drawing.Color]::FromArgb(30, 30, 30), 1)
-            $fontTitle = New-Object System.Drawing.Font("Segoe UI", 15, [System.Drawing.FontStyle]::Bold)
-            $fontSub = New-Object System.Drawing.Font("Segoe UI", 8.5, [System.Drawing.FontStyle]::Bold)
-            $fontText = New-Object System.Drawing.Font("Segoe UI", 8.5)
-            $fontMono = New-Object System.Drawing.Font("Consolas", 8.5)
+            $fontTitle = New-Object System.Drawing.Font("Segoe UI", [Math]::Max(7.5, [Math]::Round(15 * $esc, 1)), [System.Drawing.FontStyle]::Bold)
+            $fontSub = New-Object System.Drawing.Font("Segoe UI", [Math]::Max(6, [Math]::Round(8.5 * $esc, 1)), [System.Drawing.FontStyle]::Bold)
+            $fontText = New-Object System.Drawing.Font("Segoe UI", [Math]::Max(6, [Math]::Round(8.5 * $esc, 1)))
+            $fontMono = New-Object System.Drawing.Font("Consolas", [Math]::Max(6, [Math]::Round(8.5 * $esc, 1)))
             $sfCenter = New-Object System.Drawing.StringFormat
             $sfCenter.Alignment = [System.Drawing.StringAlignment]::Center
             $sfCenter.LineAlignment = [System.Drawing.StringAlignment]::Center
+            $sfCenter.FormatFlags = [System.Drawing.StringFormatFlags]::NoWrap
+            $sfCenter.Trimming = [System.Drawing.StringTrimming]::EllipsisCharacter
+            $sfValor = New-Object System.Drawing.StringFormat
+            $sfValor.FormatFlags = [System.Drawing.StringFormatFlags]::NoWrap
+            $sfValor.Trimming = [System.Drawing.StringTrimming]::EllipsisCharacter
 
             $g.FillRectangle($white, $bounds)
-            $g.FillRectangle($black, $x, $y, $w, 74)
-            $g.DrawString("TESTE DE IMPRESSAO", $fontTitle, $white, (New-Object System.Drawing.RectangleF($x, ($y + 10), $w, 28)), $sfCenter)
-            $g.DrawString("PREPARADOR XMENU", $fontSub, $white, (New-Object System.Drawing.RectangleF($x, ($y + 42), $w, 18)), $sfCenter)
-            $y += 88
+            [int]$headerH = [Math]::Max(46, [int](74 * $esc))
+            $g.FillRectangle($black, $x, $y, $w, $headerH)
+            $g.DrawString("TESTE DE IMPRESSAO", $fontTitle, $white, (New-Object System.Drawing.RectangleF($x, ($y + [int](10 * $esc)), $w, [int]($headerH * 0.5))), $sfCenter)
+            $g.DrawString("PREPARADOR XMENU", $fontSub, $white, (New-Object System.Drawing.RectangleF($x, ($y + [int]($headerH * 0.56)), $w, [int]($headerH * 0.4))), $sfCenter)
+            $y += $headerH + [Math]::Max(6, [int](14 * $esc))
 
-            $cardH = 116
+            $labelW = [Math]::Max(58, [int](96 * $esc))
+            $labelGap = [Math]::Max(8, [int](18 * $esc))
+            $rowH = [Math]::Max(13, [int](19 * $esc))
+            $padCard = [Math]::Max(6, [int](10 * $esc))
+            $temCompart = ($compart -ne "")
+            $cardH = ($rowH * $(if ($temCompart) { 6 } else { 5 })) + ($padCard * 2)
             $g.DrawRectangle($linePen, $x, $y, $w, $cardH)
-            $labelW = 96
-            $labelGap = 18
-            $rowH = 19
             $drawInfo = {
                 param([string]$Label, [string]$Value, [int]$Row)
-                $yy = $y + 10 + ($Row * $rowH)
+                $yy = $y + $padCard + ($Row * $rowH)
                 $labelRect = New-Object System.Drawing.RectangleF([float]($x + 14), [float]$yy, [float]$labelW, [float]$rowH)
                 $g.DrawString($Label.ToUpper(), $fontSub, $muted, $labelRect)
                 $txt = "$Value"
                 if ($txt.Trim() -eq "") { $txt = "-" }
                 $valueX = $x + 14 + $labelW + $labelGap
                 $valueRect = New-Object System.Drawing.RectangleF([float]$valueX, [float]$yy, [float]($w - ($valueX - $x) - 14), [float]$rowH)
-                $g.DrawString($txt, $fontText, $ink, $valueRect)
+                $g.DrawString($txt, $fontText, $ink, $valueRect, $sfValor)
             }
             & $drawInfo "Impressora" $Impressora 0
             & $drawInfo "Tipo" $tipo 1
             & $drawInfo "Porta" $porta 2
             & $drawInfo "IP" $ipPorta 3
             & $drawInfo "Driver" $driver 4
-            if ($compart -ne "") { & $drawInfo "Compart." $compart 5 }
-            $y += $cardH + 16
+            if ($temCompart) { & $drawInfo "Compart." $compart 5 }
+            $y += $cardH + [Math]::Max(8, [int](16 * $esc))
 
-            $g.FillRectangle($black, $x, $y, $w, 32)
-            $g.DrawString("TESTE DE PRETO 100%", $fontSub, $white, (New-Object System.Drawing.RectangleF($x, $y, $w, 32)), $sfCenter)
-            $y += 46
+            [int]$pretoH = [Math]::Max(20, [int](32 * $esc))
+            $g.FillRectangle($black, $x, $y, $w, $pretoH)
+            $g.DrawString("TESTE DE PRETO 100%", $fontSub, $white, (New-Object System.Drawing.RectangleF($x, $y, $w, $pretoH)), $sfCenter)
+            $y += $pretoH + [Math]::Max(14, [int](14 * $esc))
 
             $qr = & $criarQr $qrPayload
             [int]$qrN = $qr.Size
@@ -14686,7 +14737,7 @@ function Send-TesteImpressao {
             $g.DrawString($qrPayload, $fontMono, $ink, [float]$tx, [float]($qrY + 24))
             [int]$qrTextW = [Math]::Max(80, ($w - ($tx - $x) - 10))
             $g.DrawString("Use para conferir nitidez, contraste e leitura por câmera.", $fontText, $muted, (New-Object System.Drawing.RectangleF([float]$tx, [float]($qrY + 46), [float]$qrTextW, [float]58)))
-            $y += $actualQr + 16
+            $y += $actualQr + [Math]::Max(8, [int](16 * $esc))
 
             $patterns = @{
                 '0'='nnnwwnwnn'; '1'='wnnwnnnnw'; '2'='nnwwnnnnw'; '3'='wnwwnnnnn'; '4'='nnnwwnnnw'; '5'='wnnwwnnnn'; '6'='nnwwwnnnn'; '7'='nnnwnnwnw'; '8'='wnnwnnwnn'; '9'='nnwwnnwnn'
@@ -14703,10 +14754,10 @@ function Send-TesteImpressao {
             }
             [int]$narrow = [Math]::Max(1, [Math]::Floor(($w - 24) / [Math]::Max(1, $units)))
             [int]$wide = $narrow * 3
-            [int]$barH = 58
+            [int]$barH = [Math]::Max(30, [int](58 * $esc))
             [int]$bcX = $x + 12
             $g.DrawString("CODIGO DE BARRAS", $fontSub, $ink, [float]$bcX, [float]$y)
-            [int]$yyBar = $y + 24
+            [int]$yyBar = $y + [Math]::Max(14, [int](24 * $esc))
             foreach ($ch in $bcText.ToCharArray()) {
                 $pat = $patterns["$ch"]
                 for ($i = 0; $i -lt $pat.Length; $i++) {
@@ -14717,16 +14768,27 @@ function Send-TesteImpressao {
                 $bcX += $narrow
             }
             $g.DrawString($barcodePayload, $fontMono, $ink, (New-Object System.Drawing.RectangleF($x, ($yyBar + $barH + 4), $w, 18)), $sfCenter)
-            $y = $yyBar + $barH + 32
+            $y = $yyBar + $barH + [Math]::Max(16, [int](32 * $esc))
 
             $g.DrawLine($linePen, $x, $y, ($x + $w), $y)
-            $y += 10
+            $y += [Math]::Max(6, [int](10 * $esc))
             $rodape = "Computador: $env:COMPUTERNAME   Usuario: $env:USERNAME   Data: $((Get-Date).ToString('dd/MM/yyyy HH:mm:ss'))"
-            $g.DrawString($rodape, $fontText, $ink, (New-Object System.Drawing.RectangleF($x, $y, $w, 34)))
-            if ($Detalhe -ne "") { $g.DrawString("Detalhe: $Detalhe", $fontText, $muted, (New-Object System.Drawing.RectangleF($x, ($y + 34), $w, 34))) }
+            [int]$rodapeH = [Math]::Max(24, [int](34 * $esc))
+            $g.DrawString($rodape, $fontText, $ink, (New-Object System.Drawing.RectangleF($x, $y, $w, $rodapeH)))
+            if ($Detalhe -ne "") { $g.DrawString("Detalhe: $Detalhe", $fontText, $muted, (New-Object System.Drawing.RectangleF($x, ($y + $rodapeH), $w, $rodapeH))) }
             $eventArgs.HasMorePages = $false
         })
-    $doc.Print()
+    try {
+        $doc.Print()
+    }
+    catch {
+        # Alguns drivers recusam um tamanho de papel que o Preparador nunca tinha usado com essa fila. Nesse caso,
+        # volta pro tamanho que a fila ja tinha (o teste sai na folha padrao em vez de nao sair nada).
+        if ($null -eq $paperOriginal) { throw }
+        Log-Message "ERRO" "Teste de impressão: a impressora recusou o papel ajustado ($($_.Exception.Message)); tentando de novo com o tamanho padrão da fila"
+        $doc.DefaultPageSettings.PaperSize = $paperOriginal
+        $doc.Print()
+    }
 }
 
 function Test-EnderecoIpv4 {
@@ -15873,7 +15935,8 @@ function Show-PrinterManager {
         $lv.View = 'Details'; $lv.FullRowSelect = $true; $lv.GridLines = $false
         $lv.BackColor = [System.Drawing.Color]::FromArgb(20, 20, 25); $lv.ForeColor = 'WhiteSmoke'
         $lv.BorderStyle = 'None'; $lv.Font = New-Object System.Drawing.Font("Segoe UI", 9.5)
-        
+        $lv.ShowItemToolTips = $true
+
         $lv.Columns.Add("Impressora", 210) | Out-Null
         $lv.Columns.Add("Tipo", 95) | Out-Null
         $lv.Columns.Add("Porta", 150) | Out-Null
@@ -15887,6 +15950,33 @@ function Show-PrinterManager {
                 $printers = Get-WmiObject Win32_Printer
                 $portasLprPc = @(Get-NomesPortasMonitor -Monitor "LPR Port")
                 $portasTcpPc = @(Get-NomesPortasMonitor -Monitor "Standard TCP/IP Port")
+                # LPR aponta pro IP de outro PC direto na porta (ex.: "10.0.0.199:impressora"): se aquele PC
+                # trocar de IP (DHCP, reinicio do roteador...), a porta continua com o IP antigo e a impressora
+                # para de responder sem nenhum aviso aqui. O MAC de cada porta ja e guardado sozinho pela aba LPR
+                # COMPARTILHADA sempre que ela responde; aqui so se compara esse MAC com o que a rede (ARP) ve
+                # agora, sem escrever nada, so pra avisar que pode ter mudado.
+                $macsGuardadosLpr = @{}
+                $tabelaArpLpr = @()
+                try {
+                    $macsGuardadosLpr = Get-LprMacs
+                    if ($macsGuardadosLpr.Count -gt 0) {
+                        # O cache ARP do Windows "esquece" um IP depois de um tempo sem tráfego com ele; sem isso,
+                        # a porta podia continuar azul (sem aviso) só porque ninguém tinha "falado" com aquele PC
+                        # recentemente. Um toque rápido (515, a mesma porta do LPD) nos IPs configurados obriga o
+                        # Windows a atualizar o ARP na hora, em paralelo e com prazo curto (não trava a lista).
+                        $portaLpdLocal = 515
+                        if ($Script:LprPorta) { $portaLpdLocal = [int]$Script:LprPorta }
+                        $ipsParaTocar = @()
+                        foreach ($p0 in $printers) {
+                            $pPort0 = if ($p0.PortName) { $p0.PortName } else { "" }
+                            if ($macsGuardadosLpr.ContainsKey($pPort0) -and $pPort0 -match '^(\d{1,3}(?:\.\d{1,3}){3}):') { $ipsParaTocar += $matches[1] }
+                        }
+                        $ipsParaTocar = @($ipsParaTocar | Select-Object -Unique)
+                        if ($ipsParaTocar.Count -gt 0) { [void](Test-PortaVarios -Ips $ipsParaTocar -Porta $portaLpdLocal -TimeoutMs 500) }
+                        $tabelaArpLpr = @(ConvertFrom-TabelaArp -Linhas (arp -a))
+                    }
+                }
+                catch {}
                 foreach ($p in $printers) {
                     $pName = if ($p.Name) { $p.Name } else { "Sem Nome" }
                     $pPort = if ($p.PortName) { $p.PortName } else { "" }
@@ -15894,14 +15984,30 @@ function Show-PrinterManager {
                     $isShared = if ($p.Shared) { "Sim" } else { "Não" }
                     $pTipo = Get-TipoPortaImpressora -Porta $pPort -PortasLpr $portasLprPc -PortasTcp $portasTcpPc
 
+                    $ipMudou = $false
+                    $dicaIpMudou = ""
+                    if ($pTipo -eq "LPR" -and $pPort -match '^(\d{1,3}(?:\.\d{1,3}){3}):' -and $macsGuardadosLpr.ContainsKey($pPort)) {
+                        $ipConfigurada = $matches[1]
+                        $macDaPorta = "$($macsGuardadosLpr[$pPort])"
+                        $ipsAtuais = @(Find-IpPorMac -Mac $macDaPorta -Tabela $tabelaArpLpr)
+                        if ($ipsAtuais.Count -gt 0 -and ($ipsAtuais -notcontains $ipConfigurada)) {
+                            $ipMudou = $true
+                            $dicaIpMudou = "O PC desta impressora (MAC $macDaPorta) agora responde em $($ipsAtuais -join ', '), não mais em $ipConfigurada. Corrija na aba LPR COMPARTILHADA > ATUALIZAR IP PELO MAC."
+                        }
+                    }
+
                     $item = New-Object System.Windows.Forms.ListViewItem($pName)
-                    $item.SubItems.Add($pTipo) | Out-Null
+                    $item.SubItems.Add($(if ($ipMudou) { "LPR (IP mudou)" } else { $pTipo })) | Out-Null
                     $item.SubItems.Add($pPort) | Out-Null
                     $item.SubItems.Add($isShared) | Out-Null
                     $item.SubItems.Add($pShareName) | Out-Null
                     $item.Tag = [PSCustomObject]@{ Nome = $pName; Porta = $pPort; Tipo = $pTipo }
 
-                    if ($p.Shared) {
+                    if ($ipMudou) {
+                        $item.ForeColor = $Script:UiVermelho
+                        $item.ToolTipText = $dicaIpMudou
+                    }
+                    elseif ($p.Shared) {
                         $item.ForeColor = [System.Drawing.Color]::PaleGreen
                     }
                     elseif ($pTipo -eq "LPR") {
@@ -19429,6 +19535,8 @@ Log-Message "LOG" "  Passe o mouse sobre um botão para ver o que ele faz antes 
 Log-Message "LOG" "---------------------------------------------------------------"
 Log-Message "LOG" "NOVO NA v5.40"
 Log-Message "SUCESSO" "  Índices do Banco com muitas sugestões: agrupa as sugestões parecidas do SQL Server (caixa na tela; o maior índice de cada grupo cobre os menores, menos índices para criar), cria 2 índices ao mesmo tempo em tabelas diferentes (150 índices: 24,6 s para 12,5 s no SQL puro) e a busca das sugestões não congela mais a janela"
+Log-Message "SUCESSO" "  Teste de Impressão: a folha de teste agora se ajusta ao tamanho da bobina de impressoras térmicas/fiscais (80 mm, como a Elgin i9), sem cortar mais o texto"
+Log-Message "SUCESSO" "  Impressoras Locais: porta LPR fica vermelha na hora se o IP do PC da impressora mudou (comparado pelo MAC, com um toque rápido na rede pra confirmar)"
 Log-Message "SUCESSO" "  XMLs: a busca por período ficou bem mais rápida em banco grande (só os logs das notas do período são lidos) e a janela não fica mais em Não está respondendo enquanto o banco entrega as notas; CANCELAR funciona durante a consulta (mesmo apertado cedo), a lista de notas é montada em blocos sem congelar e a tela mostra o andamento"
 Log-Message "SUCESSO" "  XMLs: ao terminar o download, o Windows abre a pasta de cima com a pasta do lote marcada, e o .zip aparece ao lado (um compactado e outro não), em vez de abrir por dentro da pasta"
 Log-Message "SUCESSO" "  Trocar Banco com a RAM cheia: mostra no log e no aviso quanta RAM está livre e quem mais gasta, espera com paciência (conexão, arquivos do SQL, programas fechando), tenta de novo os comandos que falham por memória ou tempo, não trava a janela e, se falhar, aponta a RAM como provável causa"
