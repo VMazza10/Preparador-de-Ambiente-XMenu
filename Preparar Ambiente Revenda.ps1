@@ -1,6 +1,6 @@
 ﻿# =============================================================================
 # PREPARADOR XMENU - VERSAO REVENDA
-# Baseado na v5.40
+# Baseado na v5.41
 # Alteracoes Revenda:
 #   - Wallpaper: fundo_revenda.png
 #   - Removido: Atalhos de Suporte e Pasta Netcontroll
@@ -7325,6 +7325,17 @@ function Show-RestaurarBanco {
         [void]$f.Controls.Add($pbRst)
         $btnRstRestaurar = New-ToolButton $f "RESTAURAR BACKUP" 20 506 234 36 $vermelhoEscuro $null "Restaura o backup escolhido no banco de destino. Se o banco já existe, ele é SUBSTITUÍDO (depois de uma cópia de segurança dele)."
         $btnRstRestaurar.Enabled = $false
+        $chkRstAtualizar = New-Object System.Windows.Forms.CheckBox
+        $chkRstAtualizar.Text = "Atualizar banco e abrir o Concentrador"
+        $chkRstAtualizar.Checked = $true
+        $chkRstAtualizar.Font = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold)
+        $chkRstAtualizar.ForeColor = $Script:UiTexto
+        $chkRstAtualizar.BackColor = [System.Drawing.Color]::Transparent
+        $chkRstAtualizar.UseMnemonic = $false
+        $chkRstAtualizar.Cursor = 'Hand'
+        $chkRstAtualizar.SetBounds(264, 514, 260, 24)
+        [void]$f.Controls.Add($chkRstAtualizar)
+        if ($Script:ToolTip) { $Script:ToolTip.SetToolTip($chkRstAtualizar, "Depois de restaurar, o Preparador abre o AjustesInstalacao.exe (da pasta concentrador), clica em Atualizar Banco, espera terminar (a janela fecha sozinha) e abre o Concentrador.exe. Já começa assim que a restauração termina, antes mesmo do aviso na tela.`r`nDesmarque para fazer isso manualmente.") }
         $btnRstCancelar = New-ToolButton $f "CANCELAR" 640 466 104 26 $Script:UiCinza $null "Interrompe a restauração enquanto ainda dá para voltar atrás (antes do banco ser alterado)"
         $btnRstCancelar.Enabled = $false
         $btnRstCancelar.Anchor = 'Top,Right'
@@ -7338,6 +7349,20 @@ function Show-RestaurarBanco {
         # ---------------------------------------------------------------------
         # ROTINAS DA JANELA
         # ---------------------------------------------------------------------
+        # Esta janela nao tem um campo para digitar a pasta do NetControll (diferente do Trocar Banco): tenta
+        # achar pelo Concentrador que estiver rodando; se nao achar nenhum, usa o caminho padrao da instalacao.
+        $achaPastaNetControll = {
+            try {
+                $procConc = Get-Process -Name "Concentrador" -ErrorAction SilentlyContinue | Where-Object { "$($_.Path)" -ne "" } | Select-Object -First 1
+                if ($procConc) {
+                    $raizDetectada = Split-Path -Parent (Split-Path -Parent $procConc.Path)
+                    if (Test-Path -LiteralPath $raizDetectada) { return $raizDetectada }
+                }
+            }
+            catch {}
+            return "C:\netcontroll"
+        }
+
         $carregaBancos = {
             $Script:RstConectado = $false
             $cnLista = $null
@@ -7528,6 +7553,9 @@ function Show-RestaurarBanco {
             else { Log-Message "INFO" "Restaurar backup: nenhum programa do NetControll aberto nesta máquina" }
             $itens += @{ Tipo = 'info'; Titulo = 'O QUE O PREPARADOR VAI FAZER'; Texto = $passos }
             $itens += @{ Tipo = 'info'; Titulo = 'BACKUP ESCOLHIDO'; Texto = "$arquivoEscolhido`r`n$(Format-BytesTexto $infoEscolhida.Bytes)" }
+            if ($chkRstAtualizar.Checked) {
+                $itens += @{ Tipo = 'info'; Titulo = 'DEPOIS DE RESTAURAR (AUTOMÁTICO)'; Texto = 'O Preparador abre o AjustesInstalacao, clica em Atualizar Banco, espera terminar e abre o Concentrador. Para fazer isso manualmente, cancele e desmarque a caixa da tela.' }
+            }
 
             $confirmou = $false
             try {
@@ -7608,7 +7636,51 @@ function Show-RestaurarBanco {
                     Log-Message "SUCESSO" "Restaurar backup: $textoFinal"
                     $itensFim = @(@{ Tipo = 'ok'; Titulo = 'BANCO RESTAURADO E FUNCIONANDO'; Texto = "O banco $bancoDestino está $($resRst.EstadoDepois), com $($resRst.Tabelas) tabela(s), em vários usuários. Tempo total: $duracaoRst." })
                     if ($resRst.CopiaSeguranca -ne "") { $itensFim += @{ Tipo = 'info'; Titulo = 'CÓPIA DE SEGURANÇA DO BANCO DE ANTES'; Texto = "$($resRst.CopiaSeguranca)`r`nPara voltar ao que era antes, use RESTAURAR BACKUP com esse arquivo." } }
-                    $itensFim += @{ Tipo = 'info'; Titulo = 'O QUE FAZER AGORA'; Texto = 'Abra o Concentrador e o PDV e confira as vendas e o cadastro. Se o backup for de uma versão mais antiga do sistema, rode o Atualizar Banco (AjustesInstalacao) do Concentrador.' }
+                    if ($chkRstAtualizar.Checked) {
+                        # Comeca a atualizar por baixo dos panos antes do aviso: assim, mesmo se o tecnico fechar
+                        # a janela achando que a restauracao ja e o fim, a atualizacao ja esta em andamento.
+                        Log-Message "INFO" "Restaurar backup: iniciando a atualização automática (AjustesInstalacao)"
+                        $lblRstStatus.ForeColor = $Script:UiAmarelo
+                        $lblRstStatus.Text = "Banco restaurado. Atualizando o banco: AjustesInstalacao em andamento..."
+                        [System.Windows.Forms.Application]::DoEvents()
+                        $pastaNcRst = & $achaPastaNetControll
+                        $timeoutSegRst = if ($Script:AjustesTimeoutSeg) { [int]$Script:AjustesTimeoutSeg } else { 1200 }
+                        $esperaSegRst = if ($Script:AjustesEsperaBotaoSeg) { [int]$Script:AjustesEsperaBotaoSeg } else { 40 }
+                        $resAjustesRst = @(Invoke-AtualizarBancoAjustes -PastaNetControll $pastaNcRst -TimeoutSeg $timeoutSegRst -EsperaBotaoSeg $esperaSegRst -AoProgresso { param($seg) $lblRstStatus.Text = "Banco restaurado. Atualizando o banco: AjustesInstalacao em andamento ($seg s)..." })
+                        $resAjustesRst = $resAjustesRst[$resAjustesRst.Count - 1]
+                        if ($resAjustesRst.Status -eq 'Concluido') {
+                            $concentradorExeRst = Find-ProgramaNetControll -Pasta $pastaNcRst -Nome "Concentrador.exe"
+                            $abriuRst = $false
+                            $motivoNaoAbriuRst = ""
+                            if (Get-Process -Name "Concentrador" -ErrorAction SilentlyContinue) { $abriuRst = $true }
+                            elseif (-not $concentradorExeRst) { $motivoNaoAbriuRst = "Não encontrei o Concentrador.exe em $($pastaNcRst.TrimEnd('\'))\concentrador nem em $($pastaNcRst.TrimEnd('\')))." }
+                            else {
+                                try {
+                                    $psiConcRst = New-Object System.Diagnostics.ProcessStartInfo
+                                    $psiConcRst.FileName = $concentradorExeRst
+                                    $psiConcRst.WorkingDirectory = (Split-Path -Parent $concentradorExeRst)
+                                    $psiConcRst.UseShellExecute = $true
+                                    [void][System.Diagnostics.Process]::Start($psiConcRst)
+                                    $abriuRst = $true
+                                }
+                                catch { $motivoNaoAbriuRst = "$($_.Exception.Message)" }
+                            }
+                            $textoFinal += " | banco atualizado"
+                            if ($abriuRst) { $textoFinal += " | Concentrador aberto" }
+                            Log-Message "SUCESSO" "Restaurar backup: AjustesInstalacao concluído em $($resAjustesRst.Segundos) s$(if ($abriuRst) { '; Concentrador aberto' } else { "; Concentrador não abriu: $motivoNaoAbriuRst" })"
+                            $itensFim += @{ Tipo = 'ok'; Titulo = 'BANCO ATUALIZADO'; Texto = "O Preparador clicou em Atualizar Banco no AjustesInstalacao e esperou a barra terminar ($($resAjustesRst.Segundos) s)." }
+                            if ($abriuRst) { $itensFim += @{ Tipo = 'ok'; Titulo = 'CONCENTRADOR ABERTO'; Texto = 'O Concentrador foi aberto automaticamente.' } }
+                            else { $itensFim += @{ Tipo = 'alerta'; Titulo = 'CONCENTRADOR NÃO ABRIU'; Texto = "$motivoNaoAbriuRst Abra manualmente." } }
+                        }
+                        else {
+                            $textoComoSeguirRst = if ($resAjustesRst.Status -in @('SemBotao', 'Dialogo', 'Timeout')) { 'O AjustesInstalacao ficou aberto na tela: termine nele (botão Atualizar Banco) e depois abra o Concentrador.' } else { 'Abra o AjustesInstalacao, clique em Atualizar Banco e depois abra o Concentrador.' }
+                            Log-Message "ERRO" "Restaurar backup: a atualização automática não terminou ($($resAjustesRst.Status)): $($resAjustesRst.Mensagem)"
+                            $itensFim += @{ Tipo = 'alerta'; Titulo = 'A ATUALIZAÇÃO AUTOMÁTICA NÃO TERMINOU'; Texto = "$($resAjustesRst.Mensagem) $textoComoSeguirRst O banco já foi restaurado e está certo." }
+                        }
+                    }
+                    else {
+                        $itensFim += @{ Tipo = 'info'; Titulo = 'O QUE FAZER AGORA'; Texto = 'Abra o Concentrador e o PDV e confira as vendas e o cadastro. Se o backup for de uma versão mais antiga do sistema, rode o Atualizar Banco (AjustesInstalacao) do Concentrador.' }
+                    }
                     & $mostraAvisoRst "BACKUP RESTAURADO NO BANCO $($bancoDestino.ToUpper())" "A restauração terminou e o banco já responde." 'ok' $itensFim
                 }
                 elseif ($resRst.Cancelado) {
@@ -8410,6 +8482,13 @@ SELECT
         # Depois da troca: roda o AjustesInstalacao (clica em Atualizar Banco), espera ele terminar e abre o Concentrador.
         # Se algo sair do previsto, avisa o motivo e NAO abre o Concentrador: a troca do banco ja foi feita e continua valendo.
         $posTroca = {
+            # -BackupInfo: chamado logo apos a troca (antes de qualquer aviso bloqueante), o caminho do backup do
+            # banco antigo aparece aqui em vez de num aviso a parte - assim a atualizacao ja comeca por baixo dos
+            # panos e o unico aviso que o usuario ve e o de tudo pronto (nao tem como fechar achando que acabou
+            # antes de a atualizacao ter sequer comecado).
+            param([string]$BackupInfo = "")
+            $itemBackup = $null
+            if ($BackupInfo -ne "") { $itemBackup = @{ Tipo = 'ok'; Titulo = 'BACKUP DO BANCO ANTIGO (MDF + LOG)'; Texto = $BackupInfo } }
             $pasta = "$($txtRaiz.Text)".Trim()
             & $setOcupado $true
             try {
@@ -8446,18 +8525,22 @@ SELECT
                         $lblStatus.ForeColor = $Script:UiVerde
                         $lblStatus.Text = "Banco trocado, atualizado e Concentrador aberto."
                         try {
-                            [void](Show-AvisoDestaque -Dono $f -Titulo "Atualização do banco" -Manchete "BANCO ATUALIZADO E CONCENTRADOR ABERTO" -Resumo "O AjustesInstalacao terminou em $($resAjustes.Segundos) segundo(s) e o Concentrador foi aberto." -Tipo 'ok' `
-                                    -Itens @(@{ Tipo = 'ok'; Titulo = 'BANCO ATUALIZADO'; Texto = 'O Preparador clicou em Atualizar Banco no AjustesInstalacao e esperou a barra terminar.' }) -TextoSim "OK")
+                            $itensOk = @(@{ Tipo = 'ok'; Titulo = 'BANCO ATUALIZADO'; Texto = 'O Preparador clicou em Atualizar Banco no AjustesInstalacao e esperou a barra terminar.' })
+                            if ($itemBackup) { $itensOk += $itemBackup }
+                            [void](Show-AvisoDestaque -Dono $f -Titulo "Atualização do banco" -Manchete "BANCO TROCADO, ATUALIZADO E CONCENTRADOR ABERTO" -Resumo "O AjustesInstalacao terminou em $($resAjustes.Segundos) segundo(s) e o Concentrador foi aberto." -Tipo 'ok' `
+                                    -Itens $itensOk -TextoSim "OK")
                         }
-                        catch { [System.Windows.Forms.MessageBox]::Show("Banco atualizado e Concentrador aberto.", "Atualização do banco", "OK", "Information") | Out-Null }
+                        catch { [System.Windows.Forms.MessageBox]::Show("Banco trocado, atualizado e Concentrador aberto.", "Atualização do banco", "OK", "Information") | Out-Null }
                     }
                     else {
                         & $addLog "AVISO: banco atualizado, mas o Concentrador não abriu: $motivoNaoAbriu"
                         $lblStatus.ForeColor = $Script:UiAmarelo
                         $lblStatus.Text = "Banco atualizado, mas o Concentrador não abriu: $motivoNaoAbriu"
                         try {
-                            [void](Show-AvisoDestaque -Dono $f -Titulo "Atualização do banco" -Manchete "BANCO ATUALIZADO, MAS O CONCENTRADOR NÃO ABRIU" -Resumo "O AjustesInstalacao terminou normalmente. Abra o Concentrador manualmente." -Tipo 'aviso' `
-                                    -Itens @(@{ Tipo = 'alerta'; Titulo = 'O QUE ACONTECEU'; Texto = "$motivoNaoAbriu" }) -TextoSim "OK")
+                            $itensSemConc = @(@{ Tipo = 'alerta'; Titulo = 'O QUE ACONTECEU'; Texto = "$motivoNaoAbriu" })
+                            if ($itemBackup) { $itensSemConc += $itemBackup }
+                            [void](Show-AvisoDestaque -Dono $f -Titulo "Atualização do banco" -Manchete "BANCO TROCADO E ATUALIZADO, MAS O CONCENTRADOR NÃO ABRIU" -Resumo "O AjustesInstalacao terminou normalmente. Abra o Concentrador manualmente." -Tipo 'aviso' `
+                                    -Itens $itensSemConc -TextoSim "OK")
                         }
                         catch { [System.Windows.Forms.MessageBox]::Show("Banco atualizado, mas o Concentrador não abriu: $motivoNaoAbriu", "Atualização do banco", "OK", "Warning") | Out-Null }
                     }
@@ -8469,8 +8552,10 @@ SELECT
                     $lblStatus.ForeColor = $Script:UiAmarelo
                     $lblStatus.Text = "Banco trocado. A atualização automática não terminou: $($resAjustes.Mensagem)"
                     try {
-                        [void](Show-AvisoDestaque -Dono $f -Titulo "Atualização do banco" -Manchete "A ATUALIZAÇÃO AUTOMÁTICA NÃO TERMINOU" -Resumo "A troca do banco já foi feita e está certa. Falta só concluir o AjustesInstalacao." -Tipo 'aviso' `
-                                -Itens @(@{ Tipo = 'alerta'; Titulo = 'O QUE ACONTECEU'; Texto = "$($resAjustes.Mensagem)" }, @{ Tipo = 'info'; Titulo = 'COMO SEGUIR'; Texto = $textoComoSeguir }) -TextoSim "ENTENDI")
+                        $itensPendente = @(@{ Tipo = 'alerta'; Titulo = 'O QUE ACONTECEU'; Texto = "$($resAjustes.Mensagem)" }, @{ Tipo = 'info'; Titulo = 'COMO SEGUIR'; Texto = $textoComoSeguir })
+                        if ($itemBackup) { $itensPendente += $itemBackup }
+                        [void](Show-AvisoDestaque -Dono $f -Titulo "Atualização do banco" -Manchete "BANCO TROCADO, MAS A ATUALIZAÇÃO AUTOMÁTICA NÃO TERMINOU" -Resumo "A troca do banco já foi feita e está certa. Falta só concluir o AjustesInstalacao." -Tipo 'aviso' `
+                                -Itens $itensPendente -TextoSim "ENTENDI")
                     }
                     catch { [System.Windows.Forms.MessageBox]::Show("A atualização automática não terminou.`r`n`r`n$($resAjustes.Mensagem)`r`n`r`nA troca do banco já foi feita. Termine no AjustesInstalacao e abra o Concentrador.", "Atualização do banco", "OK", "Warning") | Out-Null }
                 }
@@ -8693,13 +8778,18 @@ SELECT
                     & $addLog "Pasta do backup aberta: $pastaBackupData"
                 }
                 catch { & $addLog "AVISO: o backup foi concluído, mas não foi possível abrir a pasta: $($_.Exception.Message)" }
-                try {
-                    [void](Show-AvisoDestaque -Dono $f -Titulo "Trocar Banco" -Manchete "BANCO TROCADO COM SUCESSO" -Resumo "O sistema já está usando o banco novo." -Tipo 'ok' `
-                            -Comparacao @{ Rotulo1 = "Banco antigo - guardado no backup"; Valor1 = (Format-TamanhoBanco $atual.TotalKb); Detalhe1 = "Banco $(Format-TamanhoBanco $atual.MdfKb) + log $(Format-TamanhoBanco $atual.LdfKb)"; Cor1 = $Script:UiSuave; `
-                                Rotulo2 = "Banco em uso agora"; Valor2 = (Format-TamanhoBanco $candTotalKb); Detalhe2 = "Banco $(Format-TamanhoBanco $cand.MdfKb) + log $(Format-TamanhoBanco $cand.LdfKb)"; Cor2 = $Script:UiVerde } `
-                            -Itens @(@{ Tipo = 'ok'; Titulo = 'BACKUP DO BANCO ANTIGO (MDF + LOG)'; Texto = "$backupDestinoFinal" }) -TextoSim "OK")
+                if (-not $chkPosTroca.Checked) {
+                    # Com a atualizacao automatica marcada (padrao), este aviso e' pulado de proposito: o
+                    # $posTroca ja comeca a atualizar por baixo dos panos antes de mostrar qualquer aviso, e o
+                    # aviso dele (mais abaixo, fora deste try) e' o unico que o usuario ve, com o backup junto.
+                    try {
+                        [void](Show-AvisoDestaque -Dono $f -Titulo "Trocar Banco" -Manchete "BANCO TROCADO COM SUCESSO" -Resumo "O sistema já está usando o banco novo." -Tipo 'ok' `
+                                -Comparacao @{ Rotulo1 = "Banco antigo - guardado no backup"; Valor1 = (Format-TamanhoBanco $atual.TotalKb); Detalhe1 = "Banco $(Format-TamanhoBanco $atual.MdfKb) + log $(Format-TamanhoBanco $atual.LdfKb)"; Cor1 = $Script:UiSuave; `
+                                    Rotulo2 = "Banco em uso agora"; Valor2 = (Format-TamanhoBanco $candTotalKb); Detalhe2 = "Banco $(Format-TamanhoBanco $cand.MdfKb) + log $(Format-TamanhoBanco $cand.LdfKb)"; Cor2 = $Script:UiVerde } `
+                                -Itens @(@{ Tipo = 'ok'; Titulo = 'BACKUP DO BANCO ANTIGO (MDF + LOG)'; Texto = "$backupDestinoFinal" }) -TextoSim "OK")
+                    }
+                    catch { [System.Windows.Forms.MessageBox]::Show("Banco trocado com sucesso.`r`n`r`nBackup do banco antigo (MDF + LDF):`r`n$backupDestinoFinal", "Trocar Banco", "OK", "Information") | Out-Null }
                 }
-                catch { [System.Windows.Forms.MessageBox]::Show("Banco trocado com sucesso.`r`n`r`nBackup do banco antigo (MDF + LDF):`r`n$backupDestinoFinal", "Trocar Banco", "OK", "Information") | Out-Null }
             }
             catch {
                 $erro = $_.Exception.Message
@@ -8763,7 +8853,7 @@ SELECT
             }
             # Fora do try da troca de proposito: uma falha aqui nunca pode acionar o desfazer de uma troca que deu certo
             if ($trocaConcluida -and $chkPosTroca.Checked) {
-                try { & $posTroca }
+                try { & $posTroca -BackupInfo $backupDestinoFinal }
                 catch { & $addLog "ERRO no passo depois da troca: $($_.Exception.Message)" }
             }
         }
@@ -18785,7 +18875,7 @@ $formWidth = if ($screen.Width -lt 1000) { 900 } else { 1000 }
 $formHeight = if ($screen.Height -lt 800) { 700 } else { 800 }
 
 $form = New-Object System.Windows.Forms.Form
-$form.Text = "Preparador XMenu – Suporte Técnico v5.40 - REVENDA"
+$form.Text = "Preparador XMenu – Suporte Técnico v5.41 - REVENDA"
 $form.Size = New-Object System.Drawing.Size($formWidth, $formHeight)
 $form.StartPosition = "CenterScreen"
 $form.BackColor = [System.Drawing.Color]::FromArgb(25, 25, 30); $form.ForeColor = 'White'
@@ -19523,7 +19613,7 @@ $bClock.Add_Click({ Invoke-ClockSync })
 [void]$tbl.Controls.Add($bClock)
 
 # Mensagem de abertura: explica o programa para quem abre pela primeira vez
-Log-Message "INFO" "Preparador XMenu v5.40 - REVENDA - preparo e suporte de computadores com XMenu e NetPDV"
+Log-Message "INFO" "Preparador XMenu v5.41 - REVENDA - preparo e suporte de computadores com XMenu e NetPDV"
 Log-Message "LOG" "==============================================================="
 Log-Message "LOG" "COMO USAR"
 Log-Message "LOG" "  PREPARAR AMBIENTE WINDOWS .. ajusta energia, UAC e desempenho do PC num clique"
@@ -19533,10 +19623,9 @@ Log-Message "LOG" "  EXTERNOS ................... acesso remoto, Chrome, TEF HUB
 Log-Message "LOG" "  SUPORTE E DIAGNÓSTICO ...... impressoras, rede, SQL, backup, XMLs e reparos do Windows"
 Log-Message "LOG" "  Passe o mouse sobre um botão para ver o que ele faz antes de clicar."
 Log-Message "LOG" "---------------------------------------------------------------"
-Log-Message "LOG" "NOVO NA v5.40"
-Log-Message "SUCESSO" "  Índices do Banco com muitas sugestões: agrupa as sugestões parecidas do SQL Server (caixa na tela; o maior índice de cada grupo cobre os menores, menos índices para criar), cria 2 índices ao mesmo tempo em tabelas diferentes (150 índices: 24,6 s para 12,5 s no SQL puro) e a busca das sugestões não congela mais a janela"
-Log-Message "SUCESSO" "  Teste de Impressão: a folha de teste agora se ajusta ao tamanho da bobina de impressoras térmicas/fiscais (80 mm, como a Elgin i9), sem cortar mais o texto"
-Log-Message "SUCESSO" "  Impressoras Locais: porta LPR fica vermelha na hora se o IP do PC da impressora mudou (comparado pelo MAC, com um toque rápido na rede pra confirmar)"
+Log-Message "LOG" "NOVO NA v5.41"
+Log-Message "SUCESSO" "  Trocar Banco: a atualização (AjustesInstalacao) já começa por baixo dos panos assim que a troca termina, antes mesmo do aviso de sucesso na tela - fechar o aviso não deixa mais a atualização pendente"
+Log-Message "SUCESSO" "  Restaurar Backup: nova caixa 'Atualizar banco e abrir o Concentrador' (marcada por padrão) faz o mesmo depois de restaurar um backup"
 Log-Message "SUCESSO" "  XMLs: a busca por período ficou bem mais rápida em banco grande (só os logs das notas do período são lidos) e a janela não fica mais em Não está respondendo enquanto o banco entrega as notas; CANCELAR funciona durante a consulta (mesmo apertado cedo), a lista de notas é montada em blocos sem congelar e a tela mostra o andamento"
 Log-Message "SUCESSO" "  XMLs: ao terminar o download, o Windows abre a pasta de cima com a pasta do lote marcada, e o .zip aparece ao lado (um compactado e outro não), em vez de abrir por dentro da pasta"
 Log-Message "SUCESSO" "  Trocar Banco com a RAM cheia: mostra no log e no aviso quanta RAM está livre e quem mais gasta, espera com paciência (conexão, arquivos do SQL, programas fechando), tenta de novo os comandos que falham por memória ou tempo, não trava a janela e, se falhar, aponta a RAM como provável causa"
