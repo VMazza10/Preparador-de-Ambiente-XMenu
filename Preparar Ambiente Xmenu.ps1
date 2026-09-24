@@ -1,5 +1,5 @@
 ﻿# =============================================================================
-# PREPARADOR XMENU v5.41
+# PREPARADOR XMENU v5.42
 # Visual: Dashboard Moderno
 # Correcoes:
 #   - CRITICO: Removido DoEvents do loop de evento de download (causava crash).
@@ -132,9 +132,8 @@ function Log-Message {
         try {
             $linhaLog = "[$((Get-Date).ToString('HH:mm:ss'))] [$Tag] $Msg"
             $nomeLog = "log_preparar_ambiente_$((Get-Date).ToString('yyyy-MM-dd')).txt"
-            # Grava nos dois lugares: em C:\Arquivos Xmenu\Logs, como sempre, e junto dos
-            # downloads na Area de Trabalho, que e onde o tecnico acha o arquivo rapido
-            $destinos = @("C:\Arquivos Xmenu\Logs")
+            # So na Area de Trabalho (Arquivos Xmenu\Logs), junto dos downloads: nada fica no disco C:
+            $destinos = @()
             if ("$($Script:DownloadFolder)" -ne "") { $destinos += (Join-Path $Script:DownloadFolder "Logs") }
             foreach ($pasta in $destinos) {
                 try {
@@ -151,6 +150,56 @@ function Log-Message {
     }
 }
 
+# Versoes antigas guardavam o registro (log) e o MAC das portas LPR em C:\Arquivos Xmenu. Agora tudo fica so na Area de
+# Trabalho (Arquivos Xmenu), para nao sobrar rastro no disco C:. Leva o que existir para la e tira a pasta antiga se
+# ela ficar vazia (se tiver outros arquivos, deixa como esta).
+function Move-DadosAntigosDoDiscoC {
+    param([string]$PastaAntiga = "C:\Arquivos Xmenu")
+    if (-not (Test-Path -LiteralPath $PastaAntiga)) { return }
+    if ("$($Script:DownloadFolder)" -eq "") { return }
+    $movidos = 0
+    try {
+        $logsAntigos = Join-Path $PastaAntiga "Logs"
+        if (Test-Path -LiteralPath $logsAntigos) {
+            $logsNovos = Join-Path $Script:DownloadFolder "Logs"
+            if (-not (Test-Path -LiteralPath $logsNovos)) { New-Item -ItemType Directory -Path $logsNovos -Force | Out-Null }
+            foreach ($arq in @(Get-ChildItem -LiteralPath $logsAntigos -File -ErrorAction SilentlyContinue)) {
+                $destino = Join-Path $logsNovos $arq.Name
+                try {
+                    # Mesmo nome nos dois lugares (o log era gravado nos dois): fica o maior
+                    if (-not (Test-Path -LiteralPath $destino)) { Move-Item -LiteralPath $arq.FullName -Destination $destino -ErrorAction Stop }
+                    elseif ($arq.Length -gt (Get-Item -LiteralPath $destino).Length) { Move-Item -LiteralPath $arq.FullName -Destination $destino -Force -ErrorAction Stop }
+                    else { Remove-Item -LiteralPath $arq.FullName -Force -ErrorAction Stop }
+                    $movidos++
+                }
+                catch {}
+            }
+        }
+        $macAntigo = Join-Path $PastaAntiga "lpr_mac_portas.json"
+        if (Test-Path -LiteralPath $macAntigo) {
+            $macNovo = Get-CaminhoLprMacs
+            try {
+                # Soma o que o arquivo novo ainda nao tem (o que ja estiver la vale mais) e tira o antigo
+                $macsAntigos = Get-LprMacs -Arquivo $macAntigo
+                $macsNovos = Get-LprMacs -Arquivo $macNovo
+                foreach ($portaMac in @($macsAntigos.Keys)) {
+                    if (-not $macsNovos.ContainsKey($portaMac)) { Save-LprMac -Porta $portaMac -Mac $macsAntigos[$portaMac] -Arquivo $macNovo }
+                }
+                Remove-Item -LiteralPath $macAntigo -Force -ErrorAction Stop
+                $movidos++
+            }
+            catch {}
+        }
+        foreach ($pastaVazia in @($logsAntigos, $PastaAntiga)) {
+            if ((Test-Path -LiteralPath $pastaVazia) -and @(Get-ChildItem -LiteralPath $pastaVazia -Force -ErrorAction SilentlyContinue).Count -eq 0) {
+                Remove-Item -LiteralPath $pastaVazia -Force -ErrorAction SilentlyContinue
+            }
+        }
+        if ($movidos -gt 0) { Log-Message "INFO" "Dados antigos de $PastaAntiga (registro e MAC das portas LPR) foram levados para a Área de Trabalho > Arquivos Xmenu" }
+        if (Test-Path -LiteralPath $PastaAntiga) { Log-Message "INFO" "A pasta $PastaAntiga ainda tem outros arquivos e foi deixada como está" }
+    }
+    catch { Log-Message "ERRO" "Não consegui levar os dados antigos de $PastaAntiga para a Área de Trabalho: $($_.Exception.Message)" }
+}
 # Checagem leve de integridade: tamanho minimo + assinatura binaria (MZ/PK).
 # Pega download vazio, truncado ou pagina de erro (html) salva com extensao errada.
 function Test-DownloadIntegrity {
@@ -2740,7 +2789,7 @@ function Show-XmlDownloader {
         }
 
         # Credenciais padrao de todo cliente: senha num ponto so
-        $senhaPadrao = "netcontroll"
+        $senhaPadrao = Get-SqlSenhaSalva
         $bancoPadrao = "netwebpdv"
 
         $Script:XmlCancelar = $false
@@ -3509,7 +3558,7 @@ function Show-XmlDownloader {
                 }
                 else { $lblConn.Text = "OK - $versao | banco: $banco | parceiros: $($cmbParceiro.Items.Count) | séries: $($cmbSerie.Items.Count)" }
                 Log-Message "SUCESSO" "XMLs: conectado em $($txtServidor.Text) / $banco como $("$($cmbUsuario.Text)".Trim())"
-                Save-SqlUsuario "$($cmbUsuario.Text)"
+                Save-SqlUsuario "$($cmbUsuario.Text)" -Senha "$($txtSenha.Text)"
 
                 # Lembra o servidor para a proxima abertura. Grava direto em UTF-8, sem
                 # passar pelo Out-File: com a codificacao errada o arquivo voltava como
@@ -3810,6 +3859,8 @@ function Show-XmlDownloader {
             # mas o que importa ver na lista e que ela foi cancelada.
             $sit = $Item.Status
             if ([bool]$Item.Cancelada) { $sit = "CANCELADA" }
+            # No sistema, nota sem protocolo de autorizacao e nota com problema (precisa ser inutilizada)
+            elseif ($sit -eq "SEM PROTOCOLO") { $sit = "COM PROBLEMAS" }
             [void]$lvi.SubItems.Add($sit)
 
             [void]$lvi.SubItems.Add($Item.Chave)
@@ -3826,11 +3877,12 @@ function Show-XmlDownloader {
             # verde = valida | amarelo = atencao | vermelho = nao vale | cinza = nao existe
             if ($sit -eq "CANCELADA") { $lvi.ForeColor = $Script:UiVermelho }
             elseif ($sit -eq "AUTORIZADA") { $lvi.ForeColor = $Script:UiVerde }
-            elseif ($sit -eq "INUTILIZADA" -or $sit -eq "SEM PROTOCOLO") { $lvi.ForeColor = $Script:UiAmarelo }
-            elseif ($sit -eq "CORROMPIDO" -or $sit -eq "ERRO") { $lvi.ForeColor = $Script:UiVermelho }
+            elseif ($sit -eq "INUTILIZADA") { $lvi.ForeColor = $Script:UiAmarelo }
+            elseif ($sit -eq "COM PROBLEMAS" -or $sit -eq "CORROMPIDO" -or $sit -eq "ERRO") { $lvi.ForeColor = $Script:UiVermelho }
             else { $lvi.ForeColor = $Script:UiSuave }
 
             $dica = $Item.Status
+            if ($sit -eq "COM PROBLEMAS") { $dica = "COM PROBLEMAS (sem protocolo de autorização) - no sistema isso quer dizer que a nota está com problema e precisa ser inutilizada" }
             if ("$($Item.Origem)" -ne "") { $dica = $dica + " - origem: $($Item.Origem)" }
             if ("$($Item.Aviso)" -ne "" -and $Item.Aviso -ne $Item.Status) { $dica = $dica + " - $($Item.Aviso)" }
             if ([bool]$Item.Cancelada) {
@@ -3966,6 +4018,22 @@ function Show-XmlDownloader {
             $txtP = "$($txtPedidos.Text)".Trim()
             if ($chkDiaPedido.Checked) { $txtP = $txtP + "|" + $dtPedido.Value.ToString("yyyy-MM-dd") }
             return $txtP
+        }
+
+        # Aviso GRANDE quando a busca pediu varias notas/pedidos/chaves e nem todas vieram: mostra exatamente quais.
+        # Antes so aparecia numa linha do status, e o tecnico nem percebia que faltava nota.
+        $avisaNaoEncontradas = {
+            param([string]$Manchete, [string]$Resumo, [int]$Pedidas, [int]$Faltam, $Itens)
+            Log-Message "ERRO" "XMLs: $Manchete - $Resumo"
+            try {
+                [void](Show-AvisoDestaque -Dono $f -Titulo "Baixar XMLs NFC-e" -Manchete $Manchete -Resumo $Resumo -Tipo 'perigo' `
+                        -Destaque @{ Rotulo = 'FALTAM'; Valor = "$Faltam"; Detalhe = "de $Pedidas pedida(s)" } `
+                        -Itens $Itens -TextoSim "ENTENDI")
+            }
+            catch {
+                $textoNe = (@($Itens | ForEach-Object { "$($_.Titulo)`r`n$($_.Texto)" }) -join "`r`n`r`n")
+                [System.Windows.Forms.MessageBox]::Show("$Manchete`r`n`r`n$Resumo`r`n`r`n$textoNe", "Baixar XMLs NFC-e", "OK", "Warning") | Out-Null
+            }
         }
 
         $buscar = {
@@ -4534,6 +4602,65 @@ function Show-XmlDownloader {
                 else {
                     & $setStatus "$($achados.Count) linha(s), todas com XML. Marque as que quer e clique em BAIXAR SELECIONADOS, ou BAIXAR TUDO." $Script:UiVerde
                 }
+                # Avisa em grande o que foi pedido e nao veio (nunca pode derrubar a busca)
+                try {
+                    $avisoJaDado = ($nOk -eq 0 -and "$($Script:XmlDicaBusca)" -ne "")
+                    if ($rbSerie.Checked -and $Script:XmlPedidas.Count -gt 0 -and -not $avisoJaDado) {
+                        $semReg = @($achados | Where-Object { "$($_.Status)" -eq "NÃO ENCONTRADA" })
+                        $semXmlReg = @($achados | Where-Object { "$($_.Status)" -ne "NÃO ENCONTRADA" -and "$($_.Conteudo)" -eq "" })
+                        if ($semReg.Count -gt 0 -or $semXmlReg.Count -gt 0) {
+                            $faixaEmpresa = {
+                                param($Linhas)
+                                if ($multiEmp) {
+                                    $partesFe = @()
+                                    foreach ($gFe in @($Linhas | Group-Object { "$($_.Servidor)" } | Sort-Object Name)) {
+                                        $partesFe += "$(& $nomeEmpresa $gFe.Group[0].Servidor): $(ConvertTo-FaixaTexto @($gFe.Group | ForEach-Object { [int]$_.Nota }))"
+                                    }
+                                    return ($partesFe -join "`r`n")
+                                }
+                                return (ConvertTo-FaixaTexto @($Linhas | ForEach-Object { [int]$_.Nota }))
+                            }
+                            $itensNe = @()
+                            if ($semReg.Count -gt 0) {
+                                $itensNe += @{ Tipo = 'perigo'; Titulo = 'NÃO ENCONTRADA(S): NÃO EXISTEM NO BANCO'; Texto = ((& $faixaEmpresa $semReg) + "`r`nSem registro nenhum neste parceiro e série: confira o número, a série e o parceiro.") }
+                            }
+                            if ($semXmlReg.Count -gt 0) {
+                                $itensNe += @{ Tipo = 'alerta'; Titulo = 'ENCONTRADA(S), MAS SEM XML NO BANCO'; Texto = ((& $faixaEmpresa $semXmlReg) + "`r`nA nota existe, mas o banco não guardou o XML dela.") }
+                            }
+                            $itensNe += @{ Tipo = 'info'; Titulo = ''; Texto = 'O botão COPIAR FALTANTES leva esses números para a área de transferência.' }
+                            $numsFaltam = @(@($semReg) + @($semXmlReg) | ForEach-Object { [long]$_.Nota } | Sort-Object -Unique)
+                            $pedidasNe = $Script:XmlPedidas.Count
+                            $vieramNe = [Math]::Max(0, $pedidasNe - $numsFaltam.Count)
+                            & $avisaNaoEncontradas "FALTAM $($numsFaltam.Count) DE $pedidasNe NOTA(S) PEDIDA(S)" "Você pediu $pedidasNe nota(s) da série $($Script:XmlFiltro.Serie) e só $vieramNe vieram com XML. Veja abaixo quais não vieram." $pedidasNe $numsFaltam.Count $itensNe
+                        }
+                    }
+                    elseif ($rbPedido.Checked -and $pedidosSemNfce.Count -gt 0 -and $achados.Count -gt 0) {
+                        $noDiaNe = ""
+                        if ($null -ne $Script:XmlPedidoDia) { $noDiaNe = " no dia " + $Script:XmlPedidoDia.ToString("dd/MM/yyyy") }
+                        $itensNe = @(
+                            @{ Tipo = 'perigo'; Titulo = 'PEDIDO(S) SEM NFC-E'; Texto = ((ConvertTo-FaixaTexto $pedidosSemNfce) + "`r`nPode ser venda não fiscal, pedido de outra loja (confira o Parceiro), outro dia ou número digitado errado.") }
+                        )
+                        $pedidosTotalNe = @($Script:XmlPedidosBuscados).Count
+                        & $avisaNaoEncontradas "FALTAM $($pedidosSemNfce.Count) DE $pedidosTotalNe PEDIDO(S)" "Você pediu $pedidosTotalNe pedido(s) e $($pedidosSemNfce.Count) não têm NFC-e$noDiaNe. Veja abaixo quais." $pedidosTotalNe $pedidosSemNfce.Count $itensNe
+                    }
+                    elseif ($rbChave.Checked -and $achados.Count -gt 0) {
+                        $achadasChave = @{}
+                        foreach ($aCh in $achados) {
+                            $ckAch = "$($aCh.Chave)".ToUpper()
+                            if ($ckAch.Length -ge 44) { $achadasChave[$ckAch.Substring($ckAch.Length - 44)] = $true }
+                        }
+                        $chavesFaltam = @($chaves | Where-Object { -not $achadasChave.ContainsKey("$_".ToUpper()) })
+                        if ($chavesFaltam.Count -gt 0) {
+                            $txtChaves = (@($chavesFaltam | Select-Object -First 15) -join "`r`n")
+                            if ($chavesFaltam.Count -gt 15) { $txtChaves += "`r`n... e mais $($chavesFaltam.Count - 15)" }
+                            $itensNe = @(
+                                @{ Tipo = 'perigo'; Titulo = 'CHAVE(S) NÃO ENCONTRADA(S)'; Texto = ($txtChaves + "`r`nNão existem no banco: confira se a chave está completa e se é desta loja.") }
+                            )
+                            & $avisaNaoEncontradas "FALTAM $($chavesFaltam.Count) DE $($chaves.Count) CHAVE(S) PEDIDA(S)" "Você pediu $($chaves.Count) chave(s) e $($chavesFaltam.Count) não foram encontradas. Veja abaixo quais." $chaves.Count $chavesFaltam.Count $itensNe
+                        }
+                    }
+                }
+                catch { Log-Message "ERRO" "XMLs: não consegui montar o aviso do que não foi encontrado: $($_.Exception.Message)" }
                 Log-Message "INFO" "XMLs: busca retornou $($achados.Count) linha(s), $nOk com XML"
                 & $atualizaModo
                 return $true
@@ -4611,6 +4738,36 @@ function Show-XmlDownloader {
                 Log-Message "ERRO" "XMLs: nenhuma das $($lista.Count) notas tem XML no banco"
                 [System.Windows.Forms.MessageBox]::Show($aviso, "Baixar XMLs NFC-e", "OK", "Warning") | Out-Null
                 return
+            }
+
+            # Nota SEM PROTOCOLO esta com problema no sistema e precisa ser inutilizada: antes de gravar, pergunta
+            $puladasProblema = @()
+            $comProblema = @($comXml | Where-Object { "$($_.Status)" -eq "SEM PROTOCOLO" -and -not [bool]$_.Inutilizada })
+            if ($comProblema.Count -gt 0) {
+                $numsProb = ConvertTo-FaixaTexto @($comProblema | ForEach-Object { [int]$_.Nota })
+                $boasProb = $comXml.Count - $comProblema.Count
+                $perguntaProb = "$($comProblema.Count) das notas a baixar estão COM PROBLEMAS (sem protocolo de autorização): $numsProb`r`n`r`n" +
+                "No sistema, nota sem protocolo significa que ela está com problema e precisa ser INUTILIZADA. Ela não vale como NFC-e autorizada.`r`n`r`n" +
+                "SIM = baixar todas, inclusive as $($comProblema.Count) com problemas (elas ficam na subpasta ""Sem protocolo"")`r`n" +
+                "NÃO = baixar só as $boasProb sem problema`r`n" +
+                "CANCELAR = não baixar nada"
+                $respProb = [System.Windows.Forms.MessageBox]::Show($perguntaProb, "Notas com problemas", "YesNoCancel", "Warning")
+                if ($respProb -eq [System.Windows.Forms.DialogResult]::Cancel) {
+                    Log-Message "CANCEL" "XMLs: o usuário desistiu de baixar por causa de $($comProblema.Count) nota(s) com problemas ($numsProb)"
+                    & $setStatus "Download cancelado: $($comProblema.Count) nota(s) com problemas (sem protocolo). Nada foi baixado." $Script:UiAmarelo
+                    return
+                }
+                if ($respProb -eq [System.Windows.Forms.DialogResult]::No) {
+                    $puladasProblema = @($comProblema | ForEach-Object { [int]$_.Nota })
+                    $comXml = @($comXml | Where-Object { $comProblema -notcontains $_ })
+                    $lista = @($lista | Where-Object { $comProblema -notcontains $_ })
+                    Log-Message "INFO" "XMLs: $($puladasProblema.Count) nota(s) com problemas ficaram de fora do download ($numsProb)"
+                    if ($comXml.Count -eq 0) {
+                        & $setStatus "Só havia notas com problemas: nada foi baixado." $Script:UiAmarelo
+                        return
+                    }
+                }
+                else { Log-Message "INFO" "XMLs: o usuário mandou baixar mesmo as $($comProblema.Count) nota(s) com problemas ($numsProb)" }
             }
 
             $Script:XmlCancelar = $false
@@ -4763,6 +4920,8 @@ function Show-XmlDownloader {
                 $Script:XmlFaltantesTexto = & $faltantesPorEmpresa $semXml
             }
 
+            # As que o usuario mandou pular por estarem com problemas nao sao "sem XML no banco"
+            if ($puladasProblema.Count -gt 0) { $Script:XmlFaltantes = @($Script:XmlFaltantes | Where-Object { $puladasProblema -notcontains [int]$_ }) }
             $btnCancelar.Enabled = $false
             $lblProg.Text = ""
             $pb.Value = 0
@@ -4771,10 +4930,11 @@ function Show-XmlDownloader {
             $pedidas = $lista.Count
             if ($rbSerie.Checked -and $Script:XmlPedidas.Count -gt 0) { $pedidas = $Script:XmlPedidas.Count }
             $resumo = "$pedidas pedidas | $nNormal autorizadas | $nInut inutilizadas | $nFalta não encontradas"
-            if ($nSemProt -gt 0) { $resumo = $resumo + " | $nSemProt sem protocolo" }
+            if ($nSemProt -gt 0) { $resumo = $resumo + " | $nSemProt com problemas (sem protocolo)" }
+            if ($puladasProblema.Count -gt 0) { $resumo = $resumo + " | $($puladasProblema.Count) com problemas não baixadas" }
             if ($nCanc -gt 0) { $resumo = $resumo + " | $nCanc com cancelamento" }
             if ($nCorr -gt 0) { $resumo = $resumo + " | $nCorr corrompidas" }
-            if ($nSemProt -gt 0 -or $nCorr -gt 0) { & $setStatus $resumo $Script:UiAmarelo }
+            if ($nSemProt -gt 0 -or $nCorr -gt 0 -or $puladasProblema.Count -gt 0) { & $setStatus $resumo $Script:UiAmarelo }
             else { & $setStatus $resumo $Script:UiVerde }
             Log-Message "SUCESSO" "XMLs: $resumo"
 
@@ -4793,8 +4953,11 @@ function Show-XmlDownloader {
                 $msg = $msg + "`r`n`r`nSem XML no banco (não baixadas): " + $txtFaltam
             }
             if ($nSemProt -gt 0) {
-                $msg = $msg + "`r`n`r`nATENÇÃO: $nSemProt nota(s) sem protocolo de autorização, na subpasta ""Sem protocolo"". " +
-                "Não valem como NFC-e autorizada: confira no PDV antes de enviar ao contador."
+                $msg = $msg + "`r`n`r`nATENÇÃO: $nSemProt nota(s) COM PROBLEMAS (sem protocolo de autorização), na subpasta ""Sem protocolo"". " +
+                "Não valem como NFC-e autorizada e precisam ser inutilizadas: confira no PDV antes de enviar ao contador."
+            }
+            if ($puladasProblema.Count -gt 0) {
+                $msg = $msg + "`r`n`r`nNão baixadas por estarem COM PROBLEMAS (precisam ser inutilizadas): " + (ConvertTo-FaixaTexto $puladasProblema)
             }
             if ($interrompido) { $msg = "LOTE INTERROMPIDO`r`n`r`n" + $msg }
             [System.Windows.Forms.MessageBox]::Show($msg, "Baixar XMLs NFC-e", "OK", "Information") | Out-Null
@@ -5426,9 +5589,10 @@ function Show-XmlDownloader {
             "       AUTORIZADA ......  verde, nota valida",
             "       CANCELADA .......  vermelho, foi cancelada depois de autorizada",
             "       INUTILIZADA .....  amarelo, o numero foi inutilizado",
-            "       SEM PROTOCOLO ...  amarelo, tem a nota mas nao o protocolo de",
-            "                          autorizacao (rejeitada, denegada ou nunca",
-            "                          transmitida). O motivo aparece no balao.",
+            "       COM PROBLEMAS ...  vermelho, e a nota sem protocolo de autorizacao",
+            "                          (rejeitada, denegada ou nunca transmitida).",
+            "                          No sistema, ela precisa ser INUTILIZADA. O",
+            "                          motivo aparece no balao.",
             "       NAO ENCONTRADA ..  cinza, nao existe XML no banco",
             "   Passe o mouse na linha para ver o detalhe.",
             "",
@@ -5450,6 +5614,10 @@ function Show-XmlDownloader {
             "   BAIXAR TUDO grava tudo que esta aparecendo na lista, marcado ou",
             "   nao; com o filtro ligado baixa so o que o filtro deixou a mostra.",
             "   Nota sem XML e pulada e aparece num aviso no fim.",
+            "   Se a lista tiver nota COM PROBLEMAS, o programa pergunta antes:",
+            "   baixar todas, so as sem problema, ou nao baixar nada.",
+            "   Depois da busca, se voce pediu N notas (ou pedidos/chaves) e nem",
+            "   todas vieram, um aviso grande mostra exatamente quais faltaram.",
             "   CANCELAR interrompe tanto a busca quanto o download.",
             "",
             "6) ESPELHO FISCAL (PDF)",
@@ -5808,7 +5976,8 @@ function Get-SqlUsuarioSalvo {
 }
 
 function Save-SqlUsuario {
-    param([string]$Usuario)
+    # -Senha: a senha que conectou tambem fica guardada (criptografada), para todas as telas que usam o banco
+    param([string]$Usuario, [string]$Senha = $null)
     try {
         $u = "$Usuario".Trim()
         if ($u -match '^[A-Za-z0-9_.\-]{1,30}$') {
@@ -5816,6 +5985,43 @@ function Save-SqlUsuario {
         }
     }
     catch {}
+    if ($PSBoundParameters.ContainsKey('Senha')) { Save-SqlSenha $Senha }
+}
+
+# Ultima senha que conectou, guardada CRIPTOGRAFADA (protecao do Windows: so este usuario, neste PC, consegue abrir) em
+# Arquivos Xmenu\sql_senha.dat. Nunca vai para o registro (log). Sem senha guardada, ou se o arquivo nao abrir (foi copiado
+# de outro PC ou usuario), volta a senha padrao.
+function Get-SqlSenhaSalva {
+    $padraoSenha = "netcontroll"
+    try {
+        $arqSenha = Join-Path $Script:DownloadFolder "sql_senha.dat"
+        if (Test-Path -LiteralPath $arqSenha) {
+            $cifrada = "$([System.IO.File]::ReadAllText($arqSenha, [System.Text.Encoding]::UTF8))".Trim()
+            if ($cifrada -ne "") {
+                $segura = ConvertTo-SecureString $cifrada -ErrorAction Stop
+                $ptrSenha = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($segura)
+                try { $textoSenha = [System.Runtime.InteropServices.Marshal]::PtrToStringBSTR($ptrSenha) }
+                finally { [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($ptrSenha) }
+                if ("$textoSenha" -ne "") { return "$textoSenha" }
+            }
+        }
+    }
+    catch {}
+    return $padraoSenha
+}
+
+function Save-SqlSenha {
+    param([string]$Senha)
+    try {
+        if ("$Senha" -eq "") { return }
+        # Igual ao que ja esta guardado (ou ao padrao, sem arquivo): nao grava nem registra de novo
+        if ("$Senha" -ceq (Get-SqlSenhaSalva)) { return }
+        $segura = ConvertTo-SecureString "$Senha" -AsPlainText -Force
+        $cifrada = ConvertFrom-SecureString $segura
+        [System.IO.File]::WriteAllText((Join-Path $Script:DownloadFolder "sql_senha.dat"), $cifrada, (New-Object System.Text.UTF8Encoding($false)))
+        Log-Message "INFO" "SQL: a senha desta conexão ficou guardada, criptografada, em Arquivos Xmenu (as telas do banco já abrem com ela)"
+    }
+    catch { Log-Message "ERRO" "SQL: não consegui guardar a senha: $($_.Exception.Message)" }
 }
 
 function Format-SqlLogTexto {
@@ -7967,7 +8173,7 @@ function Show-DbSwapNetWebPdv {
         $cmbUsr.Text = (Get-SqlUsuarioSalvo)
         [void]$cardConn.Controls.Add($cmbUsr)
         New-ToolLabel $cardConn "Senha:" 372 41 9 -Cor $Script:UiSuave | Out-Null
-        $txtSenha = & $novoCampo $cardConn 420 38 118 "netcontroll"
+        $txtSenha = & $novoCampo $cardConn 420 38 118 (Get-SqlSenhaSalva)
         New-ToolLabel $cardConn "Banco:" 552 41 9 -Cor $Script:UiSuave | Out-Null
         $txtBanco = & $novoCampo $cardConn 600 38 130 "NetWebPDV"
         $btnLocalizar = New-ToolButton $cardConn "LOCALIZAR BANCOS" 746 69 158 28 $Script:UiAzul $null "Conecta no SQL, identifica o banco atual e procura a nova versão"
@@ -8320,7 +8526,7 @@ function Show-DbSwapNetWebPdv {
                 if ($lv.Items.Count -eq 0) { throw "Nenhum NetWebPDV.mdf com log foi encontrado em $($txtNovaRaiz.Text)." }
                 $lv.Items[0].Selected = $true
                 $lv.Focus()
-                Save-SqlUsuario "$($cmbUsr.Text)"
+                Save-SqlUsuario "$($cmbUsr.Text)" -Senha "$($txtSenha.Text)"
                 $lblConn.ForeColor = $Script:UiVerde
                 $lblConn.Text = "OK - banco atual localizado e $($lv.Items.Count) candidato(s) encontrados."
                 $lblResumoCandidatos.ForeColor = $Script:UiVerde
@@ -8951,7 +9157,7 @@ function Show-BackupBanco {
         $cmbBkpUsuario.Text = (Get-SqlUsuarioSalvo)
         [void]$cardConn.Controls.Add($cmbBkpUsuario)
         New-ToolLabel $cardConn "Senha:" 340 38 9 -Cor $Script:UiSuave | Out-Null
-        $txtBkpSenha = & $novoCampo $cardConn 384 35 110 "netcontroll"
+        $txtBkpSenha = & $novoCampo $cardConn 384 35 110 (Get-SqlSenhaSalva)
         $btnBkpTestar = New-ToolButton $cardConn "TESTAR CONEXÃO" 508 34 150 27 $Script:UiAzul $null "Conecta no SQL Server desta máquina e lista os bancos"
         $lblBkpConn = New-ToolLabel $cardConn "Conectando..." 14 64 9 -Cor $Script:UiSuave -W 700
 
@@ -9138,8 +9344,8 @@ function Show-BackupBanco {
                 }
                 $lblBkpConn.ForeColor = $Script:UiVerde
                 $lblBkpConn.Text = "OK - $versaoSql | máquina: $maquinaSql | bancos: $($cmbBkpBanco.Items.Count)"
-                # Lembra o usuario que conectou (so o nome, nunca a senha)
-                Save-SqlUsuario "$($cmbBkpUsuario.Text)"
+                # Lembra o usuario e a senha que conectaram (a senha vai criptografada e nunca para o log)
+                Save-SqlUsuario "$($cmbBkpUsuario.Text)" -Senha "$($txtBkpSenha.Text)"
                 $Script:BkpConectado = $true
             }
             catch {
@@ -9620,7 +9826,7 @@ function Show-SqlIndexAdvisor {
         $cmbIdxUsuario.Text = (Get-SqlUsuarioSalvo)
         [void]$cardConn.Controls.Add($cmbIdxUsuario)
         New-ToolLabel $cardConn "Senha:" 366 41 9 -Cor $Script:UiSuave | Out-Null
-        $txtIdxSenha = & $novoCampo $cardConn 414 38 120 "netcontroll"
+        $txtIdxSenha = & $novoCampo $cardConn 414 38 120 (Get-SqlSenhaSalva)
         New-ToolLabel $cardConn "Banco:" 550 41 9 -Cor $Script:UiSuave | Out-Null
         $cmbIdxBanco = New-Object System.Windows.Forms.ComboBox
         $cmbIdxBanco.Location = New-Object System.Drawing.Point(598, 38)
@@ -9810,7 +10016,7 @@ function Show-SqlIndexAdvisor {
                 for ($i = 0; $i -lt $cmbIdxBanco.Items.Count; $i++) {
                     if ("$($cmbIdxBanco.Items[$i])" -ieq "netwebpdv") { $cmbIdxBanco.SelectedIndex = $i; break }
                 }
-                Save-SqlUsuario "$($cmbIdxUsuario.Text)"
+                Save-SqlUsuario "$($cmbIdxUsuario.Text)" -Senha "$($txtIdxSenha.Text)"
                 $lblIdxConn.ForeColor = $Script:UiVerde
                 $lblIdxConn.Text = "OK - $versaoSql | bancos: $($cmbIdxBanco.Items.Count)"
                 $lblIdxResumo.ForeColor = $Script:UiVerde
@@ -10289,7 +10495,7 @@ function Show-SqlDbDiagnostic {
         $cmbDiagUsuario.Text = (Get-SqlUsuarioSalvo)
         [void]$cardConn.Controls.Add($cmbDiagUsuario)
         New-ToolLabel $cardConn "Senha:" 340 38 9 -Cor $Script:UiSuave | Out-Null
-        $txtDiagSenha = & $novoCampo $cardConn 384 35 110 "netcontroll"
+        $txtDiagSenha = & $novoCampo $cardConn 384 35 110 (Get-SqlSenhaSalva)
         $btnDiagTestar = New-ToolButton $cardConn "TESTAR" 508 34 96 27 $Script:UiAzul $null "Conecta e lista os bancos de usuário"
         New-ToolLabel $cardConn "Banco:" 620 38 9 -Cor $Script:UiSuave | Out-Null
         $cmbDiagBanco = New-Object System.Windows.Forms.ComboBox
@@ -10420,7 +10626,7 @@ function Show-SqlDbDiagnostic {
                 for ($i = 0; $i -lt $cmbDiagBanco.Items.Count; $i++) {
                     if ("$($cmbDiagBanco.Items[$i])" -ieq "netwebpdv") { $cmbDiagBanco.SelectedIndex = $i; break }
                 }
-                Save-SqlUsuario "$($cmbDiagUsuario.Text)"
+                Save-SqlUsuario "$($cmbDiagUsuario.Text)" -Senha "$($txtDiagSenha.Text)"
                 $lblDiagConn.ForeColor = $Script:UiVerde
                 $lblDiagConn.Text = "OK - $versaoSql | bancos: $($cmbDiagBanco.Items.Count)"
             }
@@ -14277,9 +14483,15 @@ function Update-PortaLprCompleto {
     return $res
 }
 
-function Get-LprMacs {
-    # MAC do PC da impressora de cada porta, guardado entre uma abertura e outra
-    param([string]$Arquivo = "C:\Arquivos Xmenu\lpr_mac_portas.json")
+function Get-CaminhoLprMacs {
+    # MAC das portas LPR: fica em Arquivos Xmenu, na Area de Trabalho (nada no disco C:)
+    $baseMac = "$($Script:DownloadFolder)"
+    if ($baseMac -eq "") { $baseMac = Join-Path ([Environment]::GetFolderPath('Desktop')) "Arquivos Xmenu" }
+    return (Join-Path $baseMac "lpr_mac_portas.json")
+}
+
+function Get-LprMacs {    # MAC do PC da impressora de cada porta, guardado entre uma abertura e outra
+    param([string]$Arquivo = (Get-CaminhoLprMacs))
     $macs = @{}
     try {
         if (Test-Path -LiteralPath $Arquivo) {
@@ -14293,7 +14505,7 @@ function Get-LprMacs {
 
 function Save-LprMac {
     # -PortaAntiga: a porta foi renomeada para o IP novo e o MAC vai junto
-    param([string]$Porta, [string]$Mac, [string]$PortaAntiga = "", [string]$Arquivo = "C:\Arquivos Xmenu\lpr_mac_portas.json")
+    param([string]$Porta, [string]$Mac, [string]$PortaAntiga = "", [string]$Arquivo = (Get-CaminhoLprMacs))
     $macs = Get-LprMacs -Arquivo $Arquivo
     if ($PortaAntiga -ne "" -and $PortaAntiga -ne $Porta) { $macs.Remove($PortaAntiga) }
     $macs[$Porta] = $Mac
@@ -14304,7 +14516,7 @@ function Save-LprMac {
 
 function Remove-LprMac {
     # Esquece o MAC das portas apagadas
-    param([string[]]$Portas, [string]$Arquivo = "C:\Arquivos Xmenu\lpr_mac_portas.json")
+    param([string[]]$Portas, [string]$Arquivo = (Get-CaminhoLprMacs))
     if (-not (Test-Path -LiteralPath $Arquivo)) { return }
     $macs = Get-LprMacs -Arquivo $Arquivo
     $mudou = $false
@@ -18197,39 +18409,9 @@ function Install-SqlManual {
     }
 }
 
-function Open-Selector {
-    param($Type, $Button)
-    $height = if ($Type -eq "PDV") { 415 } elseif ($Type -eq "LinkXMenu") { 380 } else { 220 }
-
-    $fSel = New-Object System.Windows.Forms.Form
-    $fSel.Text = "Versoes - $Type"; $fSel.Size = "400,$height"; $fSel.StartPosition = 'CenterParent'
-    $fSel.BackColor = [System.Drawing.Color]::FromArgb(30, 30, 30); $fSel.ForeColor = 'White'
-    $fSel.FormBorderStyle = 'FixedDialog'; $fSel.MaximizeBox = $false
-    
-    $lbl = New-Object System.Windows.Forms.Label; $lbl.Text = "Selecione da Lista:"; $lbl.Location = '20,20'; $lbl.AutoSize = $true
-    [void]$fSel.Controls.Add($lbl)
-
-    # Copiar o link do ZIP: as vezes a revenda baixa direto, sem o preparador. So no
-    # NetPDV e no Link XMenu, que ficam no site oficial. Concentrador, Tablet e Totem
-    # moram no repositorio interno: nao ha link para repassar, entao nem aparece botao.
-    $temLink = ($Type -eq "PDV" -or $Type -eq "LinkXMenu")
-
-    $cb = New-Object System.Windows.Forms.ComboBox
-    $cb.Location = '20,45'; $cb.Width = $(if ($temLink) { 265 } else { 340 }); $cb.DropDownStyle = 'DropDownList'; $cb.FlatStyle = 'Flat'
-    $cb.BackColor = [System.Drawing.Color]::FromArgb(50, 50, 60); $cb.ForeColor = 'White'
-
-    $btnLink = $null
-    if ($temLink) {
-        $btnLink = New-Object System.Windows.Forms.Button
-        $btnLink.Text = "copiar link"; $btnLink.Location = '291,44'; $btnLink.Size = '69,24'
-        $btnLink.FlatStyle = 'Flat'; $btnLink.FlatAppearance.BorderSize = 1
-        $btnLink.FlatAppearance.BorderColor = [System.Drawing.Color]::FromArgb(70, 70, 80)
-        $btnLink.BackColor = [System.Drawing.Color]::FromArgb(45, 45, 52); $btnLink.ForeColor = [System.Drawing.Color]::FromArgb(190, 190, 195)
-        $btnLink.Font = New-Object System.Drawing.Font("Segoe UI", 7.5)
-        $btnLink.Cursor = 'Hand'
-        [void]$fSel.Controls.Add($btnLink)
-    }
-
+# Versoes que o seletor (NetPDV, Link XMenu, Concentrador, Tablet, Totem) oferece; tambem alimenta o menu do botao direito
+function Get-VersoesSelector {
+    param([string]$Type)
     $versions = @()
     if ($Type -eq "PDV") {
         $versions += @{Name = "NetPDV v1.3.68.0"; Url = "https://netcontroll.com.br/util/instaladores/netpdv/1.3/68/0/NetPDV.zip"; File = "NetPDV_1.3.68.0.zip" }
@@ -18271,6 +18453,43 @@ function Open-Selector {
         $versions += @{Name = "Concentrador v1.3.44.0"; Url = "https://github.com/VMazza10/Preparador-de-Ambiente-XMenu/releases/download/Concentrador_files/Concentrador.1.3.44.0.zip"; File = "Concentrador.1.3.44.0.zip" }
         $versions += @{Name = "Concentrador v1.3.40.0"; Url = "https://github.com/VMazza10/Preparador-de-Ambiente-XMenu/releases/download/Concentrador_files/Concentrador.1.3.40.0.zip"; File = "Concentrador.1.3.40.0.zip" }
     }
+    return $versions
+}
+
+function Open-Selector {
+    param($Type, $Button)
+    $height = if ($Type -eq "PDV") { 415 } elseif ($Type -eq "LinkXMenu") { 380 } else { 220 }
+
+    $fSel = New-Object System.Windows.Forms.Form
+    $fSel.Text = "Versoes - $Type"; $fSel.Size = "400,$height"; $fSel.StartPosition = 'CenterParent'
+    $fSel.BackColor = [System.Drawing.Color]::FromArgb(30, 30, 30); $fSel.ForeColor = 'White'
+    $fSel.FormBorderStyle = 'FixedDialog'; $fSel.MaximizeBox = $false
+    
+    $lbl = New-Object System.Windows.Forms.Label; $lbl.Text = "Selecione da Lista:"; $lbl.Location = '20,20'; $lbl.AutoSize = $true
+    [void]$fSel.Controls.Add($lbl)
+
+    # Copiar o link do ZIP: as vezes a revenda baixa direto, sem o preparador. So no
+    # NetPDV e no Link XMenu, que ficam no site oficial. Concentrador, Tablet e Totem
+    # moram no repositorio interno: nao ha link para repassar, entao nem aparece botao.
+    $temLink = ($Type -eq "PDV" -or $Type -eq "LinkXMenu")
+
+    $cb = New-Object System.Windows.Forms.ComboBox
+    $cb.Location = '20,45'; $cb.Width = $(if ($temLink) { 265 } else { 340 }); $cb.DropDownStyle = 'DropDownList'; $cb.FlatStyle = 'Flat'
+    $cb.BackColor = [System.Drawing.Color]::FromArgb(50, 50, 60); $cb.ForeColor = 'White'
+
+    $btnLink = $null
+    if ($temLink) {
+        $btnLink = New-Object System.Windows.Forms.Button
+        $btnLink.Text = "copiar link"; $btnLink.Location = '291,44'; $btnLink.Size = '69,24'
+        $btnLink.FlatStyle = 'Flat'; $btnLink.FlatAppearance.BorderSize = 1
+        $btnLink.FlatAppearance.BorderColor = [System.Drawing.Color]::FromArgb(70, 70, 80)
+        $btnLink.BackColor = [System.Drawing.Color]::FromArgb(45, 45, 52); $btnLink.ForeColor = [System.Drawing.Color]::FromArgb(190, 190, 195)
+        $btnLink.Font = New-Object System.Drawing.Font("Segoe UI", 7.5)
+        $btnLink.Cursor = 'Hand'
+        [void]$fSel.Controls.Add($btnLink)
+    }
+
+    $versions = @(Get-VersoesSelector $Type)
 
     foreach ($v in $versions) { [void]$cb.Items.Add($v.Name) }
     $cb.SelectedIndex = 0
@@ -18957,7 +19176,7 @@ $formWidth = if ($screen.Width -lt 1200) { $screen.Width - 50 } else { 1200 }
 $formHeight = if ($screen.Height -lt 900) { $screen.Height - 50 } else { 900 }
 
 $form = New-Object System.Windows.Forms.Form
-$form.Text = "Preparador XMenu – Suporte Técnico v5.41"
+$form.Text = "Preparador XMenu – Suporte Técnico v5.42"
 $form.Size = New-Object System.Drawing.Size($formWidth, $formHeight)
 $form.StartPosition = "CenterScreen"
 $form.BackColor = [System.Drawing.Color]::FromArgb(25, 25, 30); $form.ForeColor = 'White'
@@ -19369,6 +19588,111 @@ function Add-Title {
     $null = $l
 }
 
+# -----------------------------------------------------------------------------
+# COPIAR O LINK COM O BOTAO DIREITO
+# Muitas vezes o tecnico precisa mandar o link (SQL, TeamViewer, TEF HUB, versoes...) em vez do arquivo.
+# Botao direito num botao de download copia o link; nos botoes de versoes abre a lista para escolher.
+# -----------------------------------------------------------------------------
+function Test-LinkInterno {
+    # Arquivo que mora no repositorio interno do preparador: o link nao pode ser repassado
+    param([string]$Url)
+    return ("$Url" -match '(?i)VMazza10')
+}
+
+function Show-DicaLinkBotao {
+    param($Controle, [string]$Texto, [int]$Ms = 2200)
+    try { $Script:ToolTip.Show($Texto, $Controle, 12, [int]($Controle.Height - 6), $Ms) } catch {}
+}
+
+function Copy-LinkDoBotao {
+    param([string]$Url, [string]$Nome, $Controle)
+    $Url = "$Url".Trim()
+    if ($Url -eq "") {
+        Show-DicaLinkBotao $Controle "Este botão não tem link para copiar." 2500
+        return $false
+    }
+    if (Test-LinkInterno $Url) {
+        Log-Message "INFO" "Link não copiado ($Nome): o arquivo fica no repositório interno do preparador"
+        Show-DicaLinkBotao $Controle "Este arquivo fica no repositório interno do preparador: o link não pode ser repassado. Baixe aqui e mande o arquivo." 4500
+        return $false
+    }
+    try { Set-Clipboard -Value $Url -ErrorAction Stop }
+    catch {
+        try { [System.Windows.Forms.Clipboard]::SetText($Url) }
+        catch {
+            Log-Message "ERRO" "Não consegui copiar o link de $Nome para a área de transferência: $($_.Exception.Message)"
+            Show-DicaLinkBotao $Controle "Não consegui copiar o link." 3000
+            return $false
+        }
+    }
+    Log-Message "SUCESSO" "Link copiado: $Nome - $Url"
+    Show-DicaLinkBotao $Controle "Link copiado!" 1600
+    return $true
+}
+
+function Add-CopiarLinkAoBotao {
+    # Liga o botao direito do botao a um link fixo (e avisa isso no balao do botao)
+    param($Botao, [string]$Url, [string]$Nome, [string]$Dica = "Botão direito: copia o link de download.")
+    $acaoLink = {
+        param($origem, $ev)
+        if ($ev.Button -eq [System.Windows.Forms.MouseButtons]::Right) { [void](Copy-LinkDoBotao $Url $Nome $origem) }
+    }.GetNewClosure()
+    $Botao.Add_MouseUp($acaoLink)
+    $atual = ""
+    try { $atual = "$($Script:ToolTip.GetToolTip($Botao))" } catch {}
+    $Script:ToolTip.SetToolTip($Botao, $(if ($atual -ne "") { "$atual`r`n$Dica" } else { $Dica }))
+}
+
+function Show-MenuLinksVersoes {
+    # Botao de versoes: menu com uma linha por versao; clicar copia o link daquela versao
+    param([string]$Type, $Botao)
+    $menuV = New-Object System.Windows.Forms.ContextMenuStrip
+    $menuV.ShowImageMargin = $false
+    $menuV.Font = New-Object System.Drawing.Font("Segoe UI", 10)
+    # Concentrador, Tablet e Totem ficam no repositorio interno (ou precisam de arquivo extra): nao ha link para repassar
+    if ($Type -ne "PDV" -and $Type -ne "LinkXMenu") {
+        $semLink = $menuV.Items.Add("Sem link para repassar: esses arquivos ficam no repositório interno do preparador")
+        $semLink.Enabled = $false
+    }
+    else {
+        $cabecalho = $menuV.Items.Add("Copiar o link da versão:")
+        $cabecalho.Enabled = $false
+        foreach ($v in @(Get-VersoesSelector $Type)) {
+            $mi = $menuV.Items.Add("$($v.Name)")
+            $mi.Tag = @{ Url = "$($v.Url)"; Nome = "$($v.Name)"; Botao = $Botao }
+            $mi.Add_Click({ [void](Copy-LinkDoBotao $this.Tag.Url $this.Tag.Nome $this.Tag.Botao) })
+        }
+        if ($Type -eq "PDV") {
+            [void]$menuV.Items.Add("-")
+            foreach ($arq in @("NetPDV-setup.exe", "NetPDV.exe", "NetPDV.apk")) {
+                $mi5 = $menuV.Items.Add("NetPDV 5.0: $arq (v5.0.0.11)")
+                $mi5.Tag = @{ Url = "http://netcontroll.com.br/util/instaladores/Apps/5.0.0.11/xmenu-pdv/$arq"; Nome = "NetPDV 5.0 $arq"; Botao = $Botao }
+                $mi5.Add_Click({ [void](Copy-LinkDoBotao $this.Tag.Url $this.Tag.Nome $this.Tag.Botao) })
+            }
+        }
+    }
+    $menuV.Show([System.Windows.Forms.Cursor]::Position)
+}
+
+function Copy-LinkTefHub {
+    # O link do TEF HUB muda com a versao: procura a atual no GitHub da Elgin na hora e copia
+    param($Botao)
+    $url = ""
+    $nomeTef = "TEF HUB x86"
+    try {
+        Show-DicaLinkBotao $Botao "Procurando a versão atual no GitHub da Elgin..." 6000
+        [System.Windows.Forms.Application]::DoEvents()
+        $info = Get-TefHubUltimaVersao
+        if ($null -ne $info -and "$($info.Url)" -ne "") { $url = "$($info.Url)"; $nomeTef = "TEF HUB x86 v$($info.Versao)" }
+    }
+    catch {}
+    if ($url -eq "") {
+        $url = "$($Script:TefHubReserva)"
+        $nomeTef = "TEF HUB x86 (link reserva)"
+        Log-Message "INFO" "Link do TEF HUB: não consegui consultar a versão atual; usando o link reserva"
+    }
+    [void](Copy-LinkDoBotao $url $nomeTef $Botao)
+}
 function Add-Btn {
     param($T, $D, $U, $F, $Sel = $false, $Type = "", $Color = $null, $Help = "") 
     $b = New-Object System.Windows.Forms.Button; $b.Height = 50; $b.Dock = 'Top'
@@ -19400,16 +19724,31 @@ function Add-Btn {
 
     if ($Sel) {
         $b.Tag = $Type; $b.Add_Click({ Open-Selector $this.Tag $this })
+        $b.Add_MouseUp({
+                param($origem, $ev)
+                if ($ev.Button -eq [System.Windows.Forms.MouseButtons]::Right) { Show-MenuLinksVersoes "$($origem.Tag)" $origem }
+            })
+        $atualSel = ""
+        try { $atualSel = "$($Script:ToolTip.GetToolTip($b))" } catch {}
+        $Script:ToolTip.SetToolTip($b, $(if ($atualSel -ne "") { "$atualSel`r`nBotão direito: escolher a versão e copiar o link." } else { "Botão direito: escolher a versão e copiar o link." }))
     }
     elseif ($U -eq "TEFHUB-X86") {
         # Link resolvido na hora do clique (a Elgin troca a versao sem aviso)
         $b.Add_Click({ Install-TefHub $this })
+        $b.Add_MouseUp({
+                param($origem, $ev)
+                if ($ev.Button -eq [System.Windows.Forms.MouseButtons]::Right) { Copy-LinkTefHub $origem }
+            })
+        $atualTef = ""
+        try { $atualTef = "$($Script:ToolTip.GetToolTip($b))" } catch {}
+        $Script:ToolTip.SetToolTip($b, $(if ($atualTef -ne "") { "$atualTef`r`nBotão direito: copia o link da versão atual." } else { "Botão direito: copia o link da versão atual." }))
     }
     elseif ($U -eq "PDV-EDGE-SHORTCUT") {
         $b.Add_Click({ Install-PdvEdgeShortcut $this })
     }
     else {
         $b.Tag = "$U|$F"; $b.Add_Click({ $d = $this.Tag.Split('|'); Start-Download $d[0] $d[1] $this })
+        Add-CopiarLinkAoBotao $b $U $T
     }
     [void]$tbl.Controls.Add($b)
     $null = $b
@@ -19430,6 +19769,7 @@ $bSqlMan.Text = "SQL 2019 + SSMS (Manual / Avançado)"; $bSqlMan.Font = New-Obje
 $bSqlMan.Cursor = 'Hand'
 $Script:ToolTip.SetToolTip($bSqlMan, "ATENÇÃO: Instalação MANUAL e AVANÇADA. Baixa o SQL 2019 e o SSMS SEPARADAMENTE, para instalar passo a passo. Para a instalação normal/automática, use o botão azul 'SQL Server 2019 (Instalador)'.")
 $bSqlMan.Add_Click({ Install-SqlManual $this })
+Add-CopiarLinkAoBotao $bSqlMan "https://download.microsoft.com/download/7/f/8/7f8a9c43-8c8a-4f7c-9f92-83c18d96b681/SQL2019-SSEI-Expr.exe" "SQL 2019 (Microsoft)" "Botão direito: copia o link do instalador do SQL 2019 (Microsoft)."
 [void]$tbl.Controls.Add($bSqlMan)
 
 Add-Title "PROGRAMAS NETCONTROLL"
@@ -19458,6 +19798,7 @@ $bTecno.Add_Click({
         Close-NetControllSystem
         Start-Download "https://netcontroll.com.br/util/instaladores/NFCE/11.1.7.27/InstaladorNFCe.exe" "InstaladorNFCe.exe" $this
     })
+Add-CopiarLinkAoBotao $bTecno "https://netcontroll.com.br/util/instaladores/NFCE/11.1.7.27/InstaladorNFCe.exe" "TecnoSpeed NFCe (11.1.7.27)"
 [void]$tbl.Controls.Add($bTecno)
 
 $bVspe = New-Object System.Windows.Forms.Button; $bVspe.Height = 50; $bVspe.Dock = 'Top'
@@ -19469,6 +19810,7 @@ $bVspe.Text = "VSPE + Epson Virtual Port"; $bVspe.Font = New-Object System.Drawi
 $bVspe.Cursor = 'Hand'
 $Script:ToolTip.SetToolTip($bVspe, "Instala o emulador de porta serial VSPE e os drivers de porta virtual da Epson.")
 $bVspe.Add_Click({ Install-VSPE-Combined $this })
+Add-CopiarLinkAoBotao $bVspe "https://www.netcontroll.com.br/util/instaladores/VSPE/VSPE.zip" "VSPE" "Botão direito: copia o link do VSPE (o driver Epson fica no repositório interno e não tem link para repassar)."
 [void]$tbl.Controls.Add($bVspe)
 
 Add-Btn "TeamViewer Full" "" "https://download.teamviewer.com/download/TeamViewer_Setup_x64.exe" "Teamviewer.exe" -Help "Cliente completo para acesso remoto TeamViewer."
@@ -19698,7 +20040,7 @@ $bClock.Add_Click({ Invoke-ClockSync })
 [void]$tbl.Controls.Add($bClock)
 
 # Mensagem de abertura: explica o programa para quem abre pela primeira vez
-Log-Message "INFO" "Preparador XMenu v5.41 - preparo e suporte de computadores com XMenu e NetPDV"
+Log-Message "INFO" "Preparador XMenu v5.42 - preparo e suporte de computadores com XMenu e NetPDV"
 Log-Message "LOG" "==============================================================="
 Log-Message "LOG" "COMO USAR"
 Log-Message "LOG" "  PREPARAR AMBIENTE WINDOWS .. ajusta energia, UAC e desempenho do PC num clique"
@@ -19708,9 +20050,12 @@ Log-Message "LOG" "  EXTERNOS ................... acesso remoto, Chrome, TEF HUB
 Log-Message "LOG" "  SUPORTE E DIAGNÓSTICO ...... impressoras, rede, SQL, backup, XMLs e reparos do Windows"
 Log-Message "LOG" "  Passe o mouse sobre um botão para ver o que ele faz antes de clicar."
 Log-Message "LOG" "---------------------------------------------------------------"
-Log-Message "LOG" "NOVO NA v5.41"
-Log-Message "SUCESSO" "  Trocar Banco: a atualização (AjustesInstalacao) já começa por baixo dos panos assim que a troca termina, antes mesmo do aviso de sucesso na tela - fechar o aviso não deixa mais a atualização pendente"
-Log-Message "SUCESSO" "  Restaurar Backup: nova caixa 'Atualizar banco e abrir o Concentrador' (marcada por padrão) faz o mesmo depois de restaurar um backup"
+Log-Message "LOG" "NOVO NA v5.42"
+Log-Message "SUCESSO" "  Baixar XMLs: nota sem protocolo agora aparece como COM PROBLEMAS (vermelho) e, ao baixar, o programa pergunta se quer baixar mesmo essas notas (elas precisam ser inutilizadas)"
+Log-Message "SUCESSO" "  Baixar XMLs: se você pediu N notas, pedidos ou chaves e nem todas vieram, aparece um aviso grande mostrando exatamente quais não foram encontradas"
+Log-Message "SUCESSO" "  Botões de download: clique com o botão direito para copiar o link (SQL, TeamViewer, TEF HUB, TecnoSpeed...); nos botões de versões abre a lista para escolher qual link copiar"
+Log-Message "SUCESSO" "  SQL: o usuário e a senha que conectaram ficam guardados (senha criptografada pelo Windows, nunca no registro) e já vêm preenchidos em XMLs, Trocar Banco, Backup, Índices e Diagnóstico"
+Log-Message "SUCESSO" "  Registro (log) e MAC das portas LPR agora ficam só em Área de Trabalho > Arquivos Xmenu (o que existia em C:\Arquivos Xmenu é levado para lá): nada de rastro no disco C:"
 Log-Message "SUCESSO" "  XMLs: a busca por período ficou bem mais rápida em banco grande (só os logs das notas do período são lidos) e a janela não fica mais em Não está respondendo enquanto o banco entrega as notas; CANCELAR funciona durante a consulta (mesmo apertado cedo), a lista de notas é montada em blocos sem congelar e a tela mostra o andamento"
 Log-Message "SUCESSO" "  XMLs: ao terminar o download, o Windows abre a pasta de cima com a pasta do lote marcada, e o .zip aparece ao lado (um compactado e outro não), em vez de abrir por dentro da pasta"
 Log-Message "SUCESSO" "  Trocar Banco com a RAM cheia: mostra no log e no aviso quanta RAM está livre e quem mais gasta, espera com paciência (conexão, arquivos do SQL, programas fechando), tenta de novo os comandos que falham por memória ou tempo, não trava a janela e, se falhar, aponta a RAM como provável causa"
@@ -19755,7 +20100,8 @@ Log-Message "SUCESSO" "  Lista de notas aceita colar separado por espaço, TAB o
 Log-Message "SUCESSO" "  Em tela pequena o programa inteiro encolhe junto e cabe mais botão sem rolar"
 Log-Message "LOG" "---------------------------------------------------------------"
 Log-Message "LOG" "Downloads, XMLs, espelhos em PDF e backups ficam em: Área de Trabalho > Arquivos Xmenu"
-Log-Message "LOG" "O registro de cada sessão fica em: C:\Arquivos Xmenu\Logs"
+Log-Message "LOG" "O registro de cada sessão fica em: Área de Trabalho > Arquivos Xmenu > Logs"
+Move-DadosAntigosDoDiscoC
 $ehAdmin = $false
 try { $ehAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator) } catch {}
 if ($ehAdmin) { Log-Message "SUCESSO" "Pronto para usar (aberto como administrador)." }
