@@ -1,5 +1,5 @@
 ﻿# =============================================================================
-# PREPARADOR XMENU v5.43
+# PREPARADOR XMENU v5.44
 # Visual: Dashboard Moderno
 # Correcoes:
 #   - CRITICO: Removido DoEvents do loop de evento de download (causava crash).
@@ -14309,8 +14309,77 @@ function Update-FiltroDrivers {
 # enquanto a porta funciona, ele acha o PC de novo quando o IP mudar.
 # -----------------------------------------------------------------------------
 
-function Get-DiagnosticoPortasLpr {
-    # Lista vazia na janela de portas LPR: mostra o que o Windows realmente tem, para o tecnico ver por que a impressora
+function Get-PortasLprTcp {
+    # Impressora LPR criada pela porta "TCP/IP padrao" do Windows (o Windows novo cria assim mesmo com o Add-PrinterPort
+    # -LprHostAddress): nao mora no monitor "LPR Port", e sim no "Standard TCP/IP Port" com Protocol = 2 (1 = RAW).
+    # Mesmo formato do Get-PortasLpr (Porta / Servidor / Fila), mais Origem = 'TCP'.
+    param([string]$Hive = 'LocalMachine', [string]$Caminho = 'SYSTEM\CurrentControlSet\Control\Print\Monitors\Standard TCP/IP Port\Ports')
+    $lista = @()
+    try {
+        $baseT = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::$Hive, [Microsoft.Win32.RegistryView]::Registry64)
+        try {
+            $chaveT = $baseT.OpenSubKey($Caminho)
+            if ($null -ne $chaveT) {
+                try {
+                    foreach ($nomeT in $chaveT.GetSubKeyNames()) {
+                        $subT = $chaveT.OpenSubKey($nomeT)
+                        if ($null -eq $subT) { continue }
+                        try {
+                            $proto = $subT.GetValue('Protocol')
+                            if ($null -ne $proto -and [int]$proto -eq 2) {
+                                $srvT = "$($subT.GetValue('IPAddress'))"
+                                if ($srvT -eq "") { $srvT = "$($subT.GetValue('HostName'))" }
+                                $lista += [PSCustomObject]@{ Porta = $nomeT; Servidor = $srvT; Fila = "$($subT.GetValue('Queue'))"; Origem = 'TCP' }
+                            }
+                        }
+                        finally { $subT.Close() }
+                    }
+                }
+                finally { $chaveT.Close() }
+            }
+        }
+        finally { $baseT.Close() }
+    }
+    catch {}
+    return $lista
+}
+
+function Set-PortaLprTcpServidor {
+    # Troca o IP de uma porta LPR "TCP/IP padrao": a porta continua com o mesmo nome (o Windows tambem nao renomeia ao mudar o
+    # IP em Configurar Porta) e as impressoras nao saem dela. Nao mexe no spooler. Devolve o nome da porta.
+    param([string]$Porta, [string]$Servidor, [string]$Hive = 'LocalMachine',
+        [string]$Caminho = 'SYSTEM\CurrentControlSet\Control\Print\Monitors\Standard TCP/IP Port\Ports')
+    $baseS = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::$Hive, [Microsoft.Win32.RegistryView]::Registry64)
+    try {
+        $chaveS = $baseS.OpenSubKey($Caminho, $true)
+        if ($null -eq $chaveS) { throw "O monitor de porta TCP/IP padrão não está instalado neste PC." }
+        try {
+            $subS = $chaveS.OpenSubKey($Porta, $true)
+            if ($null -eq $subS) { throw "A porta $Porta não existe mais neste PC." }
+            try {
+                $subS.SetValue('HostName', $Servidor, [Microsoft.Win32.RegistryValueKind]::String)
+                $subS.SetValue('IPAddress', $Servidor, [Microsoft.Win32.RegistryValueKind]::String)
+                return $Porta
+            }
+            finally { $subS.Close() }
+        }
+        finally { $chaveS.Close() }
+    }
+    finally { $baseS.Close() }
+}
+
+function Get-IpDaPortaLpr {
+    # IP que a porta LPR usa hoje. Porta TCP/IP padrao: o IP guardado nela (o nome "IP:fila" fica desatualizado depois de
+    # trocar o IP); as demais: o IP do comeco do nome da porta. Vazio se nao der para saber.
+    param([string]$Porta, $PortasTcpLpr = @())
+    foreach ($ptl in @($PortasTcpLpr)) {
+        if ($ptl.Porta -eq $Porta -and "$($ptl.Servidor)" -match '^\d{1,3}(\.\d{1,3}){3}$') { return "$($ptl.Servidor)" }
+    }
+    if ("$Porta" -match '^(\d{1,3}(?:\.\d{1,3}){3}):') { return $matches[1] }
+    return ""
+}
+
+function Get-DiagnosticoPortasLpr {    # Lista vazia na janela de portas LPR: mostra o que o Windows realmente tem, para o tecnico ver por que a impressora
     # nao aparece. A janela le so o monitor "LPR Port"; impressora LPR criada pela porta TCP/IP padrao fica de fora.
     param([string]$Hive = 'LocalMachine')
     $r = [pscustomobject]@{ MonitorInstalado = $false; PortasTcpLpr = @(); Impressoras = @() }
@@ -14336,7 +14405,8 @@ function Get-DiagnosticoPortasLpr {
     return $r
 }
 
-function Get-PortasLpr {    # Portas do monitor LPR do Windows, lidas do registro (e de la que o spooler le)
+function Get-PortasLpr {
+    # Portas do monitor LPR do Windows, lidas do registro (e de la que o spooler le)
     param([string]$Hive = 'LocalMachine', [string]$Caminho = 'SYSTEM\CurrentControlSet\Control\Print\Monitors\LPR Port\Ports')
     $lista = @()
     $base = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::$Hive, [Microsoft.Win32.RegistryView]::Registry64)
@@ -14425,10 +14495,11 @@ function Get-NomesPortasMonitor {
 
 function Get-TipoPortaImpressora {
     # Tipo da porta para a lista de impressoras locais
-    param([string]$Porta, [string[]]$PortasLpr = @(), [string[]]$PortasTcp = @())
+    param([string]$Porta, [string[]]$PortasLpr = @(), [string[]]$PortasTcp = @(), [string[]]$PortasTcpLpr = @())
     $p = "$Porta".Trim()
     if ($p -eq "") { return "" }
     if ($PortasLpr -contains $p) { return "LPR" }
+    if ($PortasTcpLpr -contains $p) { return "LPR" }
     if ($PortasTcp -contains $p) { return "Rede (IP)" }
     if ($p.StartsWith('\\')) { return "Compartilhada" }
     if ($p -match '^USB\d+$') { return "USB" }
@@ -14480,9 +14551,16 @@ function Update-PortaLprCompleto {
     # deixar mover alguma impressora, desfaz e so troca o IP da porta antiga, que
     # imprime do mesmo jeito com o nome velho.
     # Devolve hashtable: Porta / Impressoras / Aviso
-    param([string]$Porta, [string]$Servidor)
+    param([string]$Porta, [string]$Servidor, [string]$HiveTcp = 'LocalMachine',
+        [string]$CaminhoTcp = 'SYSTEM\CurrentControlSet\Control\Print\Monitors\Standard TCP/IP Port\Ports')
     $impressoras = @()
     try { $impressoras = @(Get-Printer -ErrorAction Stop | Where-Object { $_.PortName -eq $Porta } | ForEach-Object { $_.Name }) } catch {}
+    # Porta LPR criada pela TCP/IP padrao: troca o IP na propria porta, que mantem o nome e as impressoras
+    if (@(Get-PortasLprTcp -Hive $HiveTcp -Caminho $CaminhoTcp | Where-Object { $_.Porta -eq $Porta }).Count -gt 0) {
+        [void](Set-PortaLprTcpServidor -Porta $Porta -Servidor $Servidor -Hive $HiveTcp -Caminho $CaminhoTcp)
+        Restart-Service -Name Spooler -Force -ErrorAction Stop
+        return @{ Porta = $Porta; Impressoras = $impressoras; Aviso = "A porta manteve o nome $Porta, mas já aponta para $Servidor." }
+    }
     $nova = Set-PortaLprServidor -Porta $Porta -Servidor $Servidor
     Restart-Service -Name Spooler -Force -ErrorAction Stop
     $res = @{ Porta = $nova; Impressoras = $impressoras; Aviso = "" }
@@ -14516,7 +14594,8 @@ function Get-CaminhoLprMacs {
     return (Join-Path $baseMac "lpr_mac_portas.json")
 }
 
-function Get-LprMacs {    # MAC do PC da impressora de cada porta, guardado entre uma abertura e outra
+function Get-LprMacs {
+    # MAC do PC da impressora de cada porta, guardado entre uma abertura e outra
     param([string]$Arquivo = (Get-CaminhoLprMacs))
     $macs = @{}
     try {
@@ -15196,10 +15275,11 @@ function Get-PortasInstalacaoImpressora {
     try {
         $portasLprPc = @(Get-NomesPortasMonitor -Monitor "LPR Port")
         $portasTcpPc = @(Get-NomesPortasMonitor -Monitor "Standard TCP/IP Port")
+        $portasTcpLprPc = @(Get-PortasLprTcp | ForEach-Object { $_.Porta })
         foreach ($p in @(Get-PrinterPort -ErrorAction Stop)) {
             $nome = "$($p.Name)"
             if ($nome -eq "" -or $portasLprPc -contains $nome) { continue }
-            $tipo = Get-TipoPortaImpressora -Porta $nome -PortasLpr $portasLprPc -PortasTcp $portasTcpPc
+            $tipo = Get-TipoPortaImpressora -Porta $nome -PortasLpr $portasLprPc -PortasTcp $portasTcpPc -PortasTcpLpr $portasTcpLprPc
             if ($tipo -eq "Virtual" -or $tipo -eq "Compartilhada") { continue }
             $emUso = ""
             if ($usadas.ContainsKey($nome)) { $emUso = $usadas[$nome] }
@@ -15372,6 +15452,12 @@ function Show-PortasLpr {
                 & $statusLpr "Lendo as portas LPR e testando se cada PC responde..." $Script:UiAmarelo
                 $portasLidas = @(Get-PortasLpr)
                 Log-Message "INFO" "LPR: o monitor LPR Port do Windows tem $($portasLidas.Count) porta(s)$(if ($portasLidas.Count -gt 0) { ': ' + (($portasLidas | ForEach-Object { $_.Porta }) -join ', ') })"
+                # O Windows novo cria a LPR pela porta TCP/IP padrao (protocolo LPR): entra na mesma lista
+                $portasTcpLidas = @(Get-PortasLprTcp)
+                if ($portasTcpLidas.Count -gt 0) {
+                    Log-Message "INFO" "LPR: portas LPR pela porta TCP/IP padrão do Windows: $(($portasTcpLidas | ForEach-Object { "$($_.Porta) (IP $($_.Servidor))" }) -join ', ')"
+                    $portasLidas = @($portasLidas) + @($portasTcpLidas)
+                }
                 $macsGuardados = Get-LprMacs
                 $servidores = @($portasLidas | ForEach-Object { $_.Servidor } | Where-Object { "$_" -ne "" } | Select-Object -Unique)
                 $noArLista = @()
@@ -16317,6 +16403,9 @@ function Show-PrinterManager {
                 $printers = Get-WmiObject Win32_Printer
                 $portasLprPc = @(Get-NomesPortasMonitor -Monitor "LPR Port")
                 $portasTcpPc = @(Get-NomesPortasMonitor -Monitor "Standard TCP/IP Port")
+                # LPR criada pela porta TCP/IP padrao (o Windows novo cria assim): tambem e LPR, e o IP certo e o guardado na porta
+                $portasTcpLprLista = @(Get-PortasLprTcp)
+                $portasTcpLprPc = @($portasTcpLprLista | ForEach-Object { $_.Porta })
                 # LPR aponta pro IP de outro PC direto na porta (ex.: "10.0.0.199:impressora"): se aquele PC
                 # trocar de IP (DHCP, reinicio do roteador...), a porta continua com o IP antigo e a impressora
                 # para de responder sem nenhum aviso aqui. O MAC de cada porta ja e guardado sozinho pela aba LPR
@@ -16336,7 +16425,8 @@ function Show-PrinterManager {
                         $ipsParaTocar = @()
                         foreach ($p0 in $printers) {
                             $pPort0 = if ($p0.PortName) { $p0.PortName } else { "" }
-                            if ($macsGuardadosLpr.ContainsKey($pPort0) -and $pPort0 -match '^(\d{1,3}(?:\.\d{1,3}){3}):') { $ipsParaTocar += $matches[1] }
+                            $ipPorta0 = Get-IpDaPortaLpr -Porta $pPort0 -PortasTcpLpr $portasTcpLprLista
+                            if ($macsGuardadosLpr.ContainsKey($pPort0) -and $ipPorta0 -ne "") { $ipsParaTocar += $ipPorta0 }
                         }
                         $ipsParaTocar = @($ipsParaTocar | Select-Object -Unique)
                         if ($ipsParaTocar.Count -gt 0) { [void](Test-PortaVarios -Ips $ipsParaTocar -Porta $portaLpdLocal -TimeoutMs 500) }
@@ -16349,12 +16439,12 @@ function Show-PrinterManager {
                     $pPort = if ($p.PortName) { $p.PortName } else { "" }
                     $pShareName = if ($p.ShareName) { $p.ShareName } else { "" }
                     $isShared = if ($p.Shared) { "Sim" } else { "Não" }
-                    $pTipo = Get-TipoPortaImpressora -Porta $pPort -PortasLpr $portasLprPc -PortasTcp $portasTcpPc
+                    $pTipo = Get-TipoPortaImpressora -Porta $pPort -PortasLpr $portasLprPc -PortasTcp $portasTcpPc -PortasTcpLpr $portasTcpLprPc
 
                     $ipMudou = $false
                     $dicaIpMudou = ""
-                    if ($pTipo -eq "LPR" -and $pPort -match '^(\d{1,3}(?:\.\d{1,3}){3}):' -and $macsGuardadosLpr.ContainsKey($pPort)) {
-                        $ipConfigurada = $matches[1]
+                    $ipConfigurada = Get-IpDaPortaLpr -Porta $pPort -PortasTcpLpr $portasTcpLprLista
+                    if ($pTipo -eq "LPR" -and $ipConfigurada -ne "" -and $macsGuardadosLpr.ContainsKey($pPort)) {
                         $macDaPorta = "$($macsGuardadosLpr[$pPort])"
                         $ipsAtuais = @(Find-IpPorMac -Mac $macDaPorta -Tabela $tabelaArpLpr)
                         if ($ipsAtuais.Count -gt 0 -and ($ipsAtuais -notcontains $ipConfigurada)) {
@@ -19214,7 +19304,7 @@ $formWidth = if ($screen.Width -lt 1200) { $screen.Width - 50 } else { 1200 }
 $formHeight = if ($screen.Height -lt 900) { $screen.Height - 50 } else { 900 }
 
 $form = New-Object System.Windows.Forms.Form
-$form.Text = "Preparador XMenu – Suporte Técnico v5.43"
+$form.Text = "Preparador XMenu – Suporte Técnico v5.44"
 $form.Size = New-Object System.Drawing.Size($formWidth, $formHeight)
 $form.StartPosition = "CenterScreen"
 $form.BackColor = [System.Drawing.Color]::FromArgb(25, 25, 30); $form.ForeColor = 'White'
@@ -20078,7 +20168,7 @@ $bClock.Add_Click({ Invoke-ClockSync })
 [void]$tbl.Controls.Add($bClock)
 
 # Mensagem de abertura: explica o programa para quem abre pela primeira vez
-Log-Message "INFO" "Preparador XMenu v5.43 - preparo e suporte de computadores com XMenu e NetPDV"
+Log-Message "INFO" "Preparador XMenu v5.44 - preparo e suporte de computadores com XMenu e NetPDV"
 Log-Message "LOG" "==============================================================="
 Log-Message "LOG" "COMO USAR"
 Log-Message "LOG" "  PREPARAR AMBIENTE WINDOWS .. ajusta energia, UAC e desempenho do PC num clique"
@@ -20088,8 +20178,8 @@ Log-Message "LOG" "  EXTERNOS ................... acesso remoto, Chrome, TEF HUB
 Log-Message "LOG" "  SUPORTE E DIAGNÓSTICO ...... impressoras, rede, SQL, backup, XMLs e reparos do Windows"
 Log-Message "LOG" "  Passe o mouse sobre um botão para ver o que ele faz antes de clicar."
 Log-Message "LOG" "---------------------------------------------------------------"
-Log-Message "LOG" "NOVO NA v5.43"
-Log-Message "SUCESSO" "  LPR Compartilhada: quando a lista vem vazia, a janela explica o que o Windows tem (impressora LPR por porta TCP/IP, monitor LPR não instalado) e registra no log o que foi lido"
+Log-Message "LOG" "NOVO NA v5.44"
+Log-Message "SUCESSO" "  LPR: a impressora que o Windows novo cria pela porta TCP/IP padrão (é como a NOVA LPR COMPARTILHADA sai nele) agora aparece na janela LPR Compartilhada, com TROCAR IP e ATUALIZAR IP PELO MAC, e em Impressoras Locais vem como LPR (com o aviso de IP mudado) em vez de Rede (IP)"
 Log-Message "SUCESSO" "  XMLs: a busca por período ficou bem mais rápida em banco grande (só os logs das notas do período são lidos) e a janela não fica mais em Não está respondendo enquanto o banco entrega as notas; CANCELAR funciona durante a consulta (mesmo apertado cedo), a lista de notas é montada em blocos sem congelar e a tela mostra o andamento"
 Log-Message "SUCESSO" "  XMLs: ao terminar o download, o Windows abre a pasta de cima com a pasta do lote marcada, e o .zip aparece ao lado (um compactado e outro não), em vez de abrir por dentro da pasta"
 Log-Message "SUCESSO" "  Trocar Banco com a RAM cheia: mostra no log e no aviso quanta RAM está livre e quem mais gasta, espera com paciência (conexão, arquivos do SQL, programas fechando), tenta de novo os comandos que falham por memória ou tempo, não trava a janela e, se falhar, aponta a RAM como provável causa"
