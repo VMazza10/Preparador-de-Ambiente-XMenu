@@ -1,5 +1,5 @@
 ﻿# =============================================================================
-# PREPARADOR XMENU v5.42
+# PREPARADOR XMENU v5.43
 # Visual: Dashboard Moderno
 # Correcoes:
 #   - CRITICO: Removido DoEvents do loop de evento de download (causava crash).
@@ -14309,8 +14309,34 @@ function Update-FiltroDrivers {
 # enquanto a porta funciona, ele acha o PC de novo quando o IP mudar.
 # -----------------------------------------------------------------------------
 
-function Get-PortasLpr {
-    # Portas do monitor LPR do Windows, lidas do registro (e de la que o spooler le)
+function Get-DiagnosticoPortasLpr {
+    # Lista vazia na janela de portas LPR: mostra o que o Windows realmente tem, para o tecnico ver por que a impressora
+    # nao aparece. A janela le so o monitor "LPR Port"; impressora LPR criada pela porta TCP/IP padrao fica de fora.
+    param([string]$Hive = 'LocalMachine')
+    $r = [pscustomobject]@{ MonitorInstalado = $false; PortasTcpLpr = @(); Impressoras = @() }
+    try {
+        $baseD = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::$Hive, [Microsoft.Win32.RegistryView]::Registry64)
+        try {
+            $mon = $baseD.OpenSubKey('SYSTEM\CurrentControlSet\Control\Print\Monitors\LPR Port')
+            if ($null -ne $mon) { $r.MonitorInstalado = $true; $mon.Close() }
+        }
+        finally { $baseD.Close() }
+    }
+    catch {}
+    try {
+        $imps = @(Get-Printer -ErrorAction Stop)
+        $tcp = @(Get-WmiObject Win32_TCPIPPrinterPort -ErrorAction Stop | Where-Object { [int]$_.Protocol -eq 2 })
+        foreach ($pt in $tcp) {
+            $usam = @($imps | Where-Object { $_.PortName -eq $pt.Name } | ForEach-Object { $_.Name })
+            $r.PortasTcpLpr += "$($pt.Name) (IP $($pt.HostAddress), fila $($pt.Queue))" + $(if ($usam.Count -gt 0) { " usada por: " + ($usam -join ', ') } else { "" })
+        }
+        $r.Impressoras = @($imps | ForEach-Object { "$($_.Name) [porta $($_.PortName)]" })
+    }
+    catch {}
+    return $r
+}
+
+function Get-PortasLpr {    # Portas do monitor LPR do Windows, lidas do registro (e de la que o spooler le)
     param([string]$Hive = 'LocalMachine', [string]$Caminho = 'SYSTEM\CurrentControlSet\Control\Print\Monitors\LPR Port\Ports')
     $lista = @()
     $base = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::$Hive, [Microsoft.Win32.RegistryView]::Registry64)
@@ -15345,6 +15371,7 @@ function Show-PortasLpr {
             try {
                 & $statusLpr "Lendo as portas LPR e testando se cada PC responde..." $Script:UiAmarelo
                 $portasLidas = @(Get-PortasLpr)
+                Log-Message "INFO" "LPR: o monitor LPR Port do Windows tem $($portasLidas.Count) porta(s)$(if ($portasLidas.Count -gt 0) { ': ' + (($portasLidas | ForEach-Object { $_.Porta }) -join ', ') })"
                 $macsGuardados = Get-LprMacs
                 $servidores = @($portasLidas | ForEach-Object { $_.Servidor } | Where-Object { "$_" -ne "" } | Select-Object -Unique)
                 $noArLista = @()
@@ -15389,7 +15416,18 @@ function Show-PortasLpr {
                 if ($semUso.Count -gt 0) { $avisoSemUso = " $($semUso.Count) porta(s) sem impressora: LIMPAR SEM USO apaga." }
                 $pedida = @($lvLpr.Items | Where-Object { $Selecionar -ne "" -and $_.Tag.Porta -eq $Selecionar })
                 if ($lvLpr.Items.Count -eq 0) {
-                    & $statusLpr "Nenhuma porta LPR compartilhada neste PC. Clique em NOVA LPR COMPARTILHADA para criar." $Script:UiAmarelo
+                    $diagLpr = Get-DiagnosticoPortasLpr
+                    Log-Message "INFO" "LPR: monitor LPR Port instalado: $(if ($diagLpr.MonitorInstalado) { 'sim' } else { 'NÃO' }); portas TCP/IP com protocolo LPR: $(@($diagLpr.PortasTcpLpr).Count); impressoras deste PC: $((@($diagLpr.Impressoras) -join ' | '))"
+                    if (@($diagLpr.PortasTcpLpr).Count -gt 0) {
+                        Log-Message "INFO" "LPR: $((@($diagLpr.PortasTcpLpr) -join ' | '))"
+                        & $statusLpr ("Nenhuma porta no monitor LPR Port, mas este PC tem impressora LPR pela porta TCP/IP padrão do Windows: " + (@($diagLpr.PortasTcpLpr) -join " | ") + ". Esta janela só lê o monitor LPR Port (o que a NOVA LPR COMPARTILHADA cria): para trocar o IP dessas, use as Propriedades da porta no Windows, ou refaça com NOVA LPR COMPARTILHADA.") $Script:UiAmarelo
+                    }
+                    elseif (-not $diagLpr.MonitorInstalado) {
+                        & $statusLpr "O monitor LPR Port não está instalado neste Windows (recurso 'Monitor de porta LPR'). Sem ele não existe porta LPR compartilhada: use NOVA LPR COMPARTILHADA, que tenta instalar, ou ative o recurso no Windows." $Script:UiAmarelo
+                    }
+                    else {
+                        & $statusLpr "Nenhuma porta LPR compartilhada neste PC (o monitor LPR Port está instalado, mas sem portas). Clique em NOVA LPR COMPARTILHADA para criar." $Script:UiAmarelo
+                    }
                 }
                 elseif ($semResposta.Count -gt 0) {
                     $semResposta[0].Selected = $true
@@ -19176,7 +19214,7 @@ $formWidth = if ($screen.Width -lt 1200) { $screen.Width - 50 } else { 1200 }
 $formHeight = if ($screen.Height -lt 900) { $screen.Height - 50 } else { 900 }
 
 $form = New-Object System.Windows.Forms.Form
-$form.Text = "Preparador XMenu – Suporte Técnico v5.42"
+$form.Text = "Preparador XMenu – Suporte Técnico v5.43"
 $form.Size = New-Object System.Drawing.Size($formWidth, $formHeight)
 $form.StartPosition = "CenterScreen"
 $form.BackColor = [System.Drawing.Color]::FromArgb(25, 25, 30); $form.ForeColor = 'White'
@@ -20040,7 +20078,7 @@ $bClock.Add_Click({ Invoke-ClockSync })
 [void]$tbl.Controls.Add($bClock)
 
 # Mensagem de abertura: explica o programa para quem abre pela primeira vez
-Log-Message "INFO" "Preparador XMenu v5.42 - preparo e suporte de computadores com XMenu e NetPDV"
+Log-Message "INFO" "Preparador XMenu v5.43 - preparo e suporte de computadores com XMenu e NetPDV"
 Log-Message "LOG" "==============================================================="
 Log-Message "LOG" "COMO USAR"
 Log-Message "LOG" "  PREPARAR AMBIENTE WINDOWS .. ajusta energia, UAC e desempenho do PC num clique"
@@ -20050,12 +20088,8 @@ Log-Message "LOG" "  EXTERNOS ................... acesso remoto, Chrome, TEF HUB
 Log-Message "LOG" "  SUPORTE E DIAGNÓSTICO ...... impressoras, rede, SQL, backup, XMLs e reparos do Windows"
 Log-Message "LOG" "  Passe o mouse sobre um botão para ver o que ele faz antes de clicar."
 Log-Message "LOG" "---------------------------------------------------------------"
-Log-Message "LOG" "NOVO NA v5.42"
-Log-Message "SUCESSO" "  Baixar XMLs: nota sem protocolo agora aparece como COM PROBLEMAS (vermelho) e, ao baixar, o programa pergunta se quer baixar mesmo essas notas (elas precisam ser inutilizadas)"
-Log-Message "SUCESSO" "  Baixar XMLs: se você pediu N notas, pedidos ou chaves e nem todas vieram, aparece um aviso grande mostrando exatamente quais não foram encontradas"
-Log-Message "SUCESSO" "  Botões de download: clique com o botão direito para copiar o link (SQL, TeamViewer, TEF HUB, TecnoSpeed...); nos botões de versões abre a lista para escolher qual link copiar"
-Log-Message "SUCESSO" "  SQL: o usuário e a senha que conectaram ficam guardados (senha criptografada pelo Windows, nunca no registro) e já vêm preenchidos em XMLs, Trocar Banco, Backup, Índices e Diagnóstico"
-Log-Message "SUCESSO" "  Registro (log) e MAC das portas LPR agora ficam só em Área de Trabalho > Arquivos Xmenu (o que existia em C:\Arquivos Xmenu é levado para lá): nada de rastro no disco C:"
+Log-Message "LOG" "NOVO NA v5.43"
+Log-Message "SUCESSO" "  LPR Compartilhada: quando a lista vem vazia, a janela explica o que o Windows tem (impressora LPR por porta TCP/IP, monitor LPR não instalado) e registra no log o que foi lido"
 Log-Message "SUCESSO" "  XMLs: a busca por período ficou bem mais rápida em banco grande (só os logs das notas do período são lidos) e a janela não fica mais em Não está respondendo enquanto o banco entrega as notas; CANCELAR funciona durante a consulta (mesmo apertado cedo), a lista de notas é montada em blocos sem congelar e a tela mostra o andamento"
 Log-Message "SUCESSO" "  XMLs: ao terminar o download, o Windows abre a pasta de cima com a pasta do lote marcada, e o .zip aparece ao lado (um compactado e outro não), em vez de abrir por dentro da pasta"
 Log-Message "SUCESSO" "  Trocar Banco com a RAM cheia: mostra no log e no aviso quanta RAM está livre e quem mais gasta, espera com paciência (conexão, arquivos do SQL, programas fechando), tenta de novo os comandos que falham por memória ou tempo, não trava a janela e, se falhar, aponta a RAM como provável causa"
