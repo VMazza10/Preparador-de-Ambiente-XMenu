@@ -1,6 +1,6 @@
 ﻿# =============================================================================
 # PREPARADOR XMENU - VERSAO REVENDA
-# Baseado na v5.45
+# Baseado na v5.46
 # Alteracoes Revenda:
 #   - Wallpaper: fundo_revenda.png
 #   - Removido: Atalhos de Suporte e Pasta Netcontroll
@@ -6877,38 +6877,10 @@ function Invoke-BackupArquivosBanco {
                     Add-LicencaNoZip -Pacote $pacote -Itens $licArq
                     & $arqLog "ZIP" "licença colocada no .zip: $((@($licArq | ForEach-Object { $_.Nome })) -join ', ')"
                 }
-                # LEIA-ME dentro do .zip: quem abrir depois entende o que e e como usar
-                & $arqLog "ZIP" "adicionando o LEIA-ME.txt ao .zip (explica o que é e como anexar o banco de volta)"
                 $ausentes = @($info.Arquivos | Where-Object { -not $_.Existe })
-                $linhasLeia = @(
-                    "Cópia dos arquivos do banco $Banco",
-                    "Feita pelo Preparador XMenu em $((Get-Date).ToString('dd/MM/yyyy HH:mm')) na máquina $env:COMPUTERNAME.",
-                    "Situação do banco na hora da cópia: $($info.Estado).",
-                    "",
-                    "Arquivos neste .zip:"
-                )
-                foreach ($aq in $existentes) { $linhasLeia += "  - $(Split-Path -Leaf $aq.Caminho) ($(Format-BytesTexto $aq.Bytes)), origem: $($aq.Caminho)" }
-                foreach ($itemLic in $licArq) { $linhasLeia += "  - $($itemLic.Nome) ($(Format-BytesTexto $itemLic.Bytes)), licença do NetControll, origem: $($itemLic.Origem)" }
-                if ($ComLicenca -and $licArq.Count -eq 0) {
-                    $linhasLeia += ""
-                    $linhasLeia += "A licença do NetControll (lic.seg) NÃO está aqui: não foi encontrada na pasta do Concentrador. Copie à mão."
-                }
                 if ($ausentes.Count -gt 0) {
-                    $linhasLeia += ""
-                    $linhasLeia += "Arquivos que já não existiam no disco e por isso NÃO estão aqui: $((@($ausentes | ForEach-Object { Split-Path -Leaf $_.Caminho })) -join ', ')"
                     & $arqLog "ERRO" "arquivo(s) que não existiam no disco e ficaram de fora do .zip: $((@($ausentes | ForEach-Object { Split-Path -Leaf $_.Caminho })) -join ', ')"
                 }
-                $linhasLeia += ""
-                $linhasLeia += "Como usar: com o SQL Server parado (ou o banco desanexado), extraia o MDF e o LDF para a pasta de dados e anexe o banco"
-                $linhasLeia += "(SSMS: Bancos de dados > Anexar). Sem o LDF, o SQL Server pode recriar o log ao anexar, se o banco foi desligado com segurança."
-                $linhasLeia += "Se o banco estava suspeito ou em recuperação pendente, use REPARAR BANCO (Diagnóstico do Banco) depois de anexar."
-                $entradaLeia = $pacote.CreateEntry("LEIA-ME.txt", [System.IO.Compression.CompressionLevel]::Optimal)
-                $saidaLeia = $entradaLeia.Open()
-                try {
-                    $bytesLeia = (New-Object System.Text.UTF8Encoding($true)).GetBytes(($linhasLeia -join "`r`n") + "`r`n")
-                    $saidaLeia.Write($bytesLeia, 0, $bytesLeia.Length)
-                }
-                finally { $saidaLeia.Dispose() }
             }
             finally { $pacote.Dispose() }
         }
@@ -7062,7 +7034,9 @@ function Get-BackupArquivoInfo {
             elseif ($entradasMdf.Count -gt 0) {
                 $info.Tipo = "zip-arquivos"
                 $info.Banco = [System.IO.Path]::GetFileNameWithoutExtension($entradasMdf[0].Nome)
-                # o LEIA-ME do BACKUP MANUAL diz de que banco sao os arquivos
+                # o nome do .zip do BACKUP MANUAL comeca pelo banco: "NetWebPDV - ZIP - Loja 1234 - data.zip"
+                if ((($item.BaseName -replace '^Antes de restaurar - ', '')) -match '^(.+?) - ZIP( - |$)') { $info.Banco = $Matches[1].Trim() }
+                # os .zip antigos do BACKUP MANUAL traziam um LEIA-ME que diz de que banco sao os arquivos
                 $entradaLeia = $pacoteZip.GetEntry("LEIA-ME.txt")
                 if ($null -ne $entradaLeia) {
                     $leitorLeia = New-Object System.IO.StreamReader($entradaLeia.Open(), [System.Text.Encoding]::UTF8)
@@ -9686,7 +9660,7 @@ function Show-BackupBanco {
         }
 
         # ---- BACKUP MANUAL (TRAVA O SISTEMA): quando o backup do SQL nao funciona (banco corrompido, suspeito, recuperacao pendente...).
-        # Copia o MDF e o LDF para um .zip (com LEIA-ME), com o banco offline so durante a copia.
+        # Copia o MDF e o LDF para um .zip (com a licenca lic.seg), com o banco offline so durante a copia.
         $copiarArquivos = {
             if ($Script:BkpOcupado -or "$($cmbBkpBanco.Text)" -eq "") { return }
             $bancoEscolhido = "$($cmbBkpBanco.Text)"
@@ -9755,7 +9729,7 @@ function Show-BackupBanco {
                 else { Log-Message "ERRO" "Backup manual: não achei a licença (lic.seg); o .zip vai sem ela. Procurei em: $(@($licPreviaArq.Procurou) -join '; ')" }
                 $itensArq = @(
                     @{ Tipo = 'alerta'; Titulo = 'O SISTEMA FICA TRAVADO ATÉ TERMINAR'; Texto = 'O banco fica offline durante a cópia: o PDV e o Concentrador perdem a conexão e ninguém consegue vender nem gravar. Pode levar alguns minutos (depende do tamanho do banco). No fim o Preparador tenta colocar o banco de volta ONLINE.' },
-                    @{ Tipo = 'ok'; Titulo = 'O .ZIP FICA EM'; Texto = "$($Script:BackupPasta)`r`nDentro: $listaArq + LEIA-ME.txt" },
+                    @{ Tipo = 'ok'; Titulo = 'O .ZIP FICA EM'; Texto = "$($Script:BackupPasta)`r`nDentro: $listaArq" },
                     @{ Tipo = 'info'; Titulo = 'QUANDO USAR'; Texto = 'Serve quando o backup normal falha (banco corrompido, suspeito ou em recuperação pendente). Com o banco saudável, prefira FAZER BACKUP: ele não tira o banco do ar.' }
                 )
                 if ($nomesLicArq.Count -eq 0) {
@@ -9837,7 +9811,7 @@ function Show-BackupBanco {
                     $dentroArq = @($resArq.Arquivos) + @(@($resArq.Licenca) | ForEach-Object { "$_ (licença)" })
                     $itensFim = @(
                         @{ Tipo = 'ok'; Titulo = 'ZIP PRONTO E CONFERIDO'; Texto = "$($resArq.Zip)`r`n$(Format-BytesTexto $resArq.ZipBytes) (arquivos originais: $(Format-BytesTexto $resArq.BytesOrigem))" },
-                        @{ Tipo = 'info'; Titulo = 'O QUE ESTÁ DENTRO'; Texto = "$($dentroArq -join ', ') e LEIA-ME.txt" }
+                        @{ Tipo = 'info'; Titulo = 'O QUE ESTÁ DENTRO'; Texto = ($dentroArq -join ', ') }
                     )
                     if ($resArq.LicencaAviso -ne "") { $itensFim += @{ Tipo = 'alerta'; Titulo = 'LICENÇA (lic.seg) FICOU DE FORA'; Texto = "$($resArq.LicencaAviso) Ela fica na pasta do Concentrador (normalmente C:\netcontroll\concentrador)." } }
                     if ($resArq.EstadoDepois -eq "ONLINE") { $itensFim += @{ Tipo = 'ok'; Titulo = 'O BANCO VOLTOU ONLINE'; Texto = 'O backup manual terminou e o banco já pode ser usado: o PDV e o Concentrador podem voltar a funcionar.' } }
@@ -19482,7 +19456,7 @@ $formWidth = if ($screen.Width -lt 1000) { 900 } else { 1000 }
 $formHeight = if ($screen.Height -lt 800) { 700 } else { 800 }
 
 $form = New-Object System.Windows.Forms.Form
-$form.Text = "Preparador XMenu – Suporte Técnico v5.45 - REVENDA"
+$form.Text = "Preparador XMenu – Suporte Técnico v5.46 - REVENDA"
 $form.Size = New-Object System.Drawing.Size($formWidth, $formHeight)
 $form.StartPosition = "CenterScreen"
 $form.BackColor = [System.Drawing.Color]::FromArgb(25, 25, 30); $form.ForeColor = 'White'
@@ -20343,7 +20317,7 @@ $bClock.Add_Click({ Invoke-ClockSync })
 [void]$tbl.Controls.Add($bClock)
 
 # Mensagem de abertura: explica o programa para quem abre pela primeira vez
-Log-Message "INFO" "Preparador XMenu v5.45 - REVENDA - preparo e suporte de computadores com XMenu e NetPDV"
+Log-Message "INFO" "Preparador XMenu v5.46 - REVENDA - preparo e suporte de computadores com XMenu e NetPDV"
 Log-Message "LOG" "==============================================================="
 Log-Message "LOG" "COMO USAR"
 Log-Message "LOG" "  PREPARAR AMBIENTE WINDOWS .. ajusta energia, UAC e desempenho do PC num clique"
@@ -20353,7 +20327,8 @@ Log-Message "LOG" "  EXTERNOS ................... acesso remoto, Chrome, TEF HUB
 Log-Message "LOG" "  SUPORTE E DIAGNÓSTICO ...... impressoras, rede, SQL, backup, XMLs e reparos do Windows"
 Log-Message "LOG" "  Passe o mouse sobre um botão para ver o que ele faz antes de clicar."
 Log-Message "LOG" "---------------------------------------------------------------"
-Log-Message "LOG" "NOVO NA v5.45"
+Log-Message "LOG" "NOVO NA v5.46"
+Log-Message "SUCESSO" "  Backup: o .zip do BACKUP MANUAL não leva mais o LEIA-ME.txt (só o MDF, o LDF e a licença lic.seg); o Restaurar Backup tira o nome do banco do nome do .zip e continua lendo os .zip antigos"
 Log-Message "SUCESSO" "  Backup: a licença do NetControll (lic.seg), da pasta do Concentrador, vai junto no FAZER BACKUP e no BACKUP MANUAL: dentro do .zip (sem .zip, ao lado do .bak), conferida byte a byte; o original só é copiado, nunca movido nem alterado"
 Log-Message "SUCESSO" "  LPR: a impressora que o Windows novo cria pela porta TCP/IP padrão (é como a NOVA LPR COMPARTILHADA sai nele) agora aparece na janela LPR Compartilhada, com TROCAR IP e ATUALIZAR IP PELO MAC, e em Impressoras Locais vem como LPR (com o aviso de IP mudado) em vez de Rede (IP)"
 Log-Message "SUCESSO" "  XMLs: a busca por período ficou bem mais rápida em banco grande (só os logs das notas do período são lidos) e a janela não fica mais em Não está respondendo enquanto o banco entrega as notas; CANCELAR funciona durante a consulta (mesmo apertado cedo), a lista de notas é montada em blocos sem congelar e a tela mostra o andamento"
