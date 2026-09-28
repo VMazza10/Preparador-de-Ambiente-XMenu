@@ -1,6 +1,6 @@
 ﻿# =============================================================================
 # PREPARADOR XMENU - VERSAO REVENDA
-# Baseado na v5.44
+# Baseado na v5.45
 # Alteracoes Revenda:
 #   - Wallpaper: fundo_revenda.png
 #   - Removido: Atalhos de Suporte e Pasta Netcontroll
@@ -6255,7 +6255,8 @@ function Compress-ArquivoZip {
     # Compacta um arquivo sozinho num .zip, com progresso e cancelamento. O
     # ZipFile.CreateFromDirectory nao avisa progresso, e um .bak de alguns GB
     # deixaria a janela parada. Devolve $true se terminou; cancelado apaga o .zip.
-    param([string]$Origem, [string]$Destino, [scriptblock]$AoProgredir, [scriptblock]$Cancelado)
+    # -Licenca: itens do Read-LicencaNetControll, gravados no .zip junto do arquivo
+    param([string]$Origem, [string]$Destino, [scriptblock]$AoProgredir, [scriptblock]$Cancelado, [object[]]$Licenca)
     Add-Type -AssemblyName System.IO.Compression
     $zipTotal = (Get-Item -LiteralPath $Origem).Length
     $zipCancelou = $false
@@ -6286,6 +6287,7 @@ function Compress-ArquivoZip {
                 $zipLeitura.Dispose()
                 $zipSaida.Dispose()
             }
+            if (-not $zipCancelou) { Add-LicencaNoZip -Pacote $zipPacote -Itens $Licenca }
         }
         finally { $zipPacote.Dispose() }
     }
@@ -6298,20 +6300,154 @@ function Compress-ArquivoZip {
     return $true
 }
 
+# -----------------------------------------------------------------------------
+# LICENCA DO NETCONTROLL (lic.seg) JUNTO DO BACKUP
+# O lic.seg fica na pasta do Concentrador (C:\netcontroll\concentrador) e sempre e preciso junto do banco. E a
+# licenca: o original so e LIDO (aberto so para leitura, sem bloquear o Concentrador), nunca movido, alterado ou
+# apagado. A copia vai dentro do .zip do backup, com o nome original; sem .zip, fica ao lado do .bak.
+# -----------------------------------------------------------------------------
+function Get-PastasLicencaNetControll {
+    # Onde procurar, nesta ordem: a pasta do Concentrador que estiver rodando, C:\netcontroll\concentrador e
+    # C:\netcontroll (instalacao antiga ou de teste)
+    $pastas = @()
+    foreach ($procConc in @(Get-Process -Name "Concentrador" -ErrorAction SilentlyContinue)) {
+        $exeConc = ""
+        try { $exeConc = "$($procConc.Path)" } catch {}
+        if ($exeConc -ne "") { $pastas += (Split-Path -Parent $exeConc) }
+    }
+    $pastas += "C:\netcontroll\concentrador"
+    $pastas += "C:\netcontroll"
+    $unicas = @()
+    foreach ($pastaLic in $pastas) { if ($unicas -notcontains $pastaLic) { $unicas += $pastaLic } }
+    return $unicas
+}
+
+function Find-LicencaNetControll {
+    # Arquivos .seg da primeira pasta que tiver algum (o normal e so o lic.seg). Nao abre nada.
+    # -Pastas troca onde procurar. Devolve hashtable: Arquivos (FileInfo) / Pasta / Procurou (pastas olhadas)
+    param([string[]]$Pastas)
+    if ($null -eq $Pastas -or $Pastas.Count -eq 0) { $Pastas = @(Get-PastasLicencaNetControll) }
+    $achou = @{ Arquivos = @(); Pasta = ""; Procurou = @($Pastas) }
+    foreach ($pastaLic in $Pastas) {
+        if ("$pastaLic".Trim() -eq "") { continue }
+        # o filtro do Windows tambem pega ".segxyz": a extensao e conferida de novo
+        $segs = @(Get-ChildItem -LiteralPath $pastaLic -Filter "*.seg" -File -ErrorAction SilentlyContinue | Where-Object { $_.Extension -ieq ".seg" } | Sort-Object Name)
+        if ($segs.Count -gt 0) { $achou.Arquivos = $segs; $achou.Pasta = $pastaLic; break }
+    }
+    return $achou
+}
+
+function Get-HashSha256 {
+    param([byte[]]$Bytes)
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try { return ([System.BitConverter]::ToString($sha.ComputeHash($Bytes))).Replace("-", "") }
+    finally { $sha.Dispose() }
+}
+
+function Read-LicencaNetControll {
+    # Le a licenca para o backup, abrindo o original SO PARA LEITURA e sem bloquear quem estiver usando.
+    # Devolve hashtable: Itens (Nome, Origem, Bytes, Conteudo, Hash SHA-256, Data) / Pasta / Procurou / Aviso
+    param([string[]]$Pastas)
+    $achou = Find-LicencaNetControll -Pastas $Pastas
+    $lic = @{ Itens = @(); Pasta = $achou.Pasta; Procurou = $achou.Procurou; Aviso = "" }
+    if ($achou.Arquivos.Count -eq 0) {
+        $lic.Aviso = "Não achei a licença (lic.seg) na pasta do Concentrador: o backup ficou sem ela. Copie à mão."
+        return $lic
+    }
+    foreach ($arqLic in $achou.Arquivos) {
+        try {
+            $fsLic = [System.IO.File]::Open($arqLic.FullName, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]'ReadWrite, Delete')
+            $msLic = New-Object System.IO.MemoryStream
+            try { $fsLic.CopyTo($msLic) }
+            finally { $fsLic.Dispose() }
+            $conteudoLic = $msLic.ToArray()
+            $lic.Itens += [pscustomobject]@{
+                Nome = $arqLic.Name; Origem = $arqLic.FullName; Bytes = [long]$conteudoLic.Length
+                Conteudo = $conteudoLic; Hash = (Get-HashSha256 $conteudoLic); Data = $arqLic.LastWriteTime
+            }
+        }
+        catch { $lic.Aviso = "Não consegui ler a licença $($arqLic.Name) ($($_.Exception.Message)): o backup ficou sem ela. Copie à mão." }
+    }
+    return $lic
+}
+
+function Add-LicencaNoZip {
+    # Grava a licenca lida num .zip que esta sendo criado, com o nome original (lic.seg)
+    param($Pacote, [object[]]$Itens)
+    foreach ($itemLic in $Itens) {
+        $entradaLic = $Pacote.CreateEntry($itemLic.Nome, [System.IO.Compression.CompressionLevel]::Optimal)
+        $entradaLic.LastWriteTime = [DateTimeOffset]$itemLic.Data
+        $saidaLic = $entradaLic.Open()
+        try { $saidaLic.Write($itemLic.Conteudo, 0, $itemLic.Conteudo.Length) }
+        finally { $saidaLic.Dispose() }
+    }
+}
+
+function Test-LicencaNoZip {
+    # Confere a licenca dentro do .zip pronto: existe e e identica a original (SHA-256). Devolve "" ou o problema.
+    param([string]$Zip, [object[]]$Itens)
+    Add-Type -AssemblyName System.IO.Compression
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    $leitorLic = [System.IO.Compression.ZipFile]::OpenRead($Zip)
+    try {
+        foreach ($itemLic in $Itens) {
+            $entradaLic = $leitorLic.GetEntry($itemLic.Nome)
+            if ($null -eq $entradaLic) { return "o .zip ficou sem o $($itemLic.Nome)" }
+            $msLic = New-Object System.IO.MemoryStream
+            $fluxoLic = $entradaLic.Open()
+            try { $fluxoLic.CopyTo($msLic) }
+            finally { $fluxoLic.Dispose() }
+            if ((Get-HashSha256 $msLic.ToArray()) -ne $itemLic.Hash) { return "o $($itemLic.Nome) dentro do .zip não ficou igual ao original" }
+        }
+    }
+    finally { $leitorLic.Dispose() }
+    return ""
+}
+
+function Save-LicencaAoLado {
+    # Sem .zip: copia a licenca para junto do .bak, com o nome dele na frente
+    # ("NetWebPDV - Loja 1234 - 28-09-2026 15h30 - lic.seg"), sem sobrescrever nada, e confere a copia (SHA-256).
+    # Devolve os caminhos gravados; lanca excecao se falhar.
+    param([object[]]$Itens, [string]$Backup)
+    $baseLic = Join-Path (Split-Path -Parent $Backup) ([System.IO.Path]::GetFileNameWithoutExtension($Backup))
+    $gravados = @()
+    foreach ($itemLic in $Itens) {
+        $destLic = "$baseLic - $($itemLic.Nome)"
+        $nLic = 1
+        while (Test-Path -LiteralPath $destLic) { $nLic++; $destLic = "$baseLic - ($nLic) $($itemLic.Nome)" }
+        # CreateNew: nunca escreve por cima de um arquivo que ja exista
+        $fsDest = [System.IO.File]::Open($destLic, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
+        try { $fsDest.Write($itemLic.Conteudo, 0, $itemLic.Conteudo.Length) }
+        finally { $fsDest.Dispose() }
+        [System.IO.File]::SetLastWriteTime($destLic, $itemLic.Data)
+        if ((Get-HashSha256 ([System.IO.File]::ReadAllBytes($destLic))) -ne $itemLic.Hash) {
+            Remove-Item -LiteralPath $destLic -Force -ErrorAction SilentlyContinue
+            throw "a cópia de $($itemLic.Nome) não ficou igual à original"
+        }
+        $gravados += $destLic
+    }
+    return $gravados
+}
+
 function Invoke-BackupBanco {
     # Faz o backup completo do banco e confere o arquivo. Nao lanca excecao: o
     # resultado diz o que aconteceu, e a janela so cuida da tela.
     #   -AoProgredir { param($Etapa, $Pct) }   Pct -1 = etapa sem porcentagem
     #   -Cancelado { $true para parar }
     #   -SoPelaPastaDoSql: pula a gravacao direta no destino (testa a 2a tentativa)
+    #   -ComLicenca: leva a licenca do NetControll (lic.seg) dentro do .zip; sem .zip, ao lado do .bak.
+    #     -PastasLicenca troca onde ela e procurada.
     # Devolve hashtable: Ok / Cancelado / Verificado / Arquivo / Bytes / Zip / ZipBytes /
-    #   Duracao / Erro / Aviso / PelaPastaDoSql / Loja
+    #   Duracao / Erro / Aviso / PelaPastaDoSql / Loja /
+    #   Licenca (nomes) / LicencaEm ("zip" ou o caminho da copia ao lado do .bak) / LicencaAviso
     param([string]$TextoConexao, [string]$Banco, [string]$Pasta, [switch]$Compactar,
-        [scriptblock]$AoProgredir, [scriptblock]$Cancelado, [switch]$SoPelaPastaDoSql)
+        [scriptblock]$AoProgredir, [scriptblock]$Cancelado, [switch]$SoPelaPastaDoSql,
+        [switch]$ComLicenca, [string[]]$PastasLicenca)
 
     $res = @{
         Ok = $false; Cancelado = $false; Verificado = $false; Arquivo = ""; Bytes = [long]0; Zip = ""; ZipBytes = [long]0
         Duracao = [timespan]::Zero; Erro = ""; Aviso = ""; PelaPastaDoSql = $false; Loja = ""
+        Licenca = @(); LicencaEm = ""; LicencaAviso = ""
     }
     # Nomes proprios de proposito: estes blocos rodam de dentro de outras funcoes
     # (Wait-SqlTarefa, Compress-ArquivoZip), e um nome comum como $AoProgredir
@@ -6444,11 +6580,30 @@ function Invoke-BackupBanco {
         $bkpApagar.Clear()
         $res.Ok = $true
 
+        # Licenca do NetControll (lic.seg): lida antes de compactar, para ir dentro do .zip
+        $licBkp = @()
+        if ($ComLicenca) {
+            & $bkpAvisa "Lendo a licença (lic.seg)" -1
+            try {
+                $lidaBkp = Read-LicencaNetControll -Pastas $PastasLicenca
+                $licBkp = @($lidaBkp.Itens)
+                foreach ($itemLic in $licBkp) { Log-Message "INFO" "Backup: licença do NetControll encontrada: $($itemLic.Origem) ($(Format-BytesTexto $itemLic.Bytes)). Só é copiada: o original não é movido nem alterado." }
+                if ($lidaBkp.Aviso -ne "") {
+                    $res.LicencaAviso = $lidaBkp.Aviso
+                    Log-Message "ERRO" "Backup: $($lidaBkp.Aviso) Procurei em: $(@($lidaBkp.Procurou) -join '; ')"
+                }
+            }
+            catch {
+                $res.LicencaAviso = "Não consegui ler a licença (lic.seg): o backup ficou sem ela. Copie à mão."
+                Log-Message "ERRO" "Backup: não consegui ler a licença (lic.seg) - $($_.Exception.Message)"
+            }
+        }
+
         if ($Compactar) {
             $zip = [System.IO.Path]::ChangeExtension($arquivo, ".zip")
             try {
                 & $bkpAvisa "Compactando" 0
-                $zipPronto = Compress-ArquivoZip -Origem $arquivo -Destino $zip -AoProgredir { param($pctZip) & $bkpAvisa "Compactando" $pctZip } -Cancelado $bkpCancelado
+                $zipPronto = Compress-ArquivoZip -Origem $arquivo -Destino $zip -AoProgredir { param($pctZip) & $bkpAvisa "Compactando" $pctZip } -Cancelado $bkpCancelado -Licenca $licBkp
                 if ($zipPronto) {
                     $res.Zip = $zip
                     $res.ZipBytes = (Get-Item -LiteralPath $zip).Length
@@ -6458,6 +6613,32 @@ function Invoke-BackupBanco {
             catch {
                 Remove-Item -LiteralPath $zip -Force -ErrorAction SilentlyContinue
                 $res.Aviso = "Não deu para compactar ($($_.Exception.Message)). O .bak ficou pronto."
+            }
+        }
+
+        # Licenca conferida dentro do .zip; sem .zip (ou se nao ficou certa nele), vai uma copia ao lado do .bak
+        if ($licBkp.Count -gt 0) {
+            $nomesLic = (@($licBkp | ForEach-Object { $_.Nome }) -join ", ")
+            try {
+                if ($res.Zip -ne "") {
+                    $problemaLic = Test-LicencaNoZip -Zip $res.Zip -Itens $licBkp
+                    if ($problemaLic -eq "") {
+                        $res.LicencaEm = "zip"
+                        Log-Message "SUCESSO" "Backup: licença $nomesLic colocada dentro do .zip e conferida (igual à original)"
+                    }
+                    else { Log-Message "ERRO" "Backup: $problemaLic; vou deixar a licença ao lado do .bak" }
+                }
+                if ($res.LicencaEm -eq "") {
+                    $copiasLic = @(Save-LicencaAoLado -Itens $licBkp -Backup $arquivo)
+                    $res.LicencaEm = ($copiasLic -join "; ")
+                    foreach ($copiaLic in $copiasLic) { Log-Message "SUCESSO" "Backup: licença copiada para junto do .bak e conferida (igual à original): $copiaLic" }
+                }
+                $res.Licenca = @($licBkp | ForEach-Object { $_.Nome })
+            }
+            catch {
+                $res.LicencaEm = ""
+                $res.LicencaAviso = "Não consegui copiar a licença (lic.seg): o backup ficou sem ela. Copie à mão."
+                Log-Message "ERRO" "Backup: não consegui copiar a licença $nomesLic - $($_.Exception.Message)"
             }
         }
     }
@@ -6540,13 +6721,15 @@ function Get-ArquivosDoBanco {
 function Invoke-BackupArquivosBanco {
     # Copia os arquivos do banco para um .zip e confere o .zip. Nao lanca excecao: o resultado diz o
     # que aconteceu. -AoProgredir { param($Etapa, $Pct) } (Pct -1 = sem porcentagem), -Cancelado { $true para parar }.
+    # -ComLicenca: leva a licenca do NetControll (lic.seg) dentro do .zip (-PastasLicenca troca onde ela e procurada).
     # Devolve hashtable: Ok / Cancelado / Zip / ZipBytes / BytesOrigem / Duracao / Erro / Aviso /
-    #   EstadoAntes / EstadoDepois / Arquivos (nomes copiados)
-    param([string]$TextoConexao, [string]$Banco, [string]$Pasta, [scriptblock]$AoProgredir, [scriptblock]$Cancelado)
+    #   EstadoAntes / EstadoDepois / Arquivos (nomes copiados) / Licenca (nomes no .zip) / LicencaAviso
+    param([string]$TextoConexao, [string]$Banco, [string]$Pasta, [scriptblock]$AoProgredir, [scriptblock]$Cancelado,
+        [switch]$ComLicenca, [string[]]$PastasLicenca)
 
     $res = @{
         Ok = $false; Cancelado = $false; Zip = ""; ZipBytes = [long]0; BytesOrigem = [long]0; Duracao = [timespan]::Zero
-        Erro = ""; Aviso = ""; EstadoAntes = ""; EstadoDepois = ""; Arquivos = @()
+        Erro = ""; Aviso = ""; EstadoAntes = ""; EstadoDepois = ""; Arquivos = @(); Licenca = @(); LicencaAviso = ""
     }
     # Nomes proprios de proposito: estes blocos rodam de dentro de outras funcoes (Wait-SqlTarefa)
     $arqAoProgredir = $AoProgredir
@@ -6611,6 +6794,24 @@ function Invoke-BackupArquivosBanco {
         while (Test-Path -LiteralPath $zipCaminho) { $repeticao++; $zipCaminho = Join-Path $Pasta ($base + " ($repeticao).zip") }
         & $arqLog "ZIP" "o .zip será criado em: $zipCaminho"
 
+        # Licenca do NetControll (lic.seg): lida antes de deixar o banco offline, para ir dentro do .zip
+        $licArq = @()
+        if ($ComLicenca) {
+            try {
+                $lidaArq = Read-LicencaNetControll -Pastas $PastasLicenca
+                $licArq = @($lidaArq.Itens)
+                foreach ($itemLic in $licArq) { & $arqLog "INFO" "licença do NetControll encontrada: $($itemLic.Origem) ($(Format-BytesTexto $itemLic.Bytes)); vai dentro do .zip. Só é copiada: o original não é movido nem alterado." }
+                if ($lidaArq.Aviso -ne "") {
+                    $res.LicencaAviso = $lidaArq.Aviso
+                    & $arqLog "ERRO" "$($lidaArq.Aviso) Procurei em: $(@($lidaArq.Procurou) -join '; ')"
+                }
+            }
+            catch {
+                $res.LicencaAviso = "Não consegui ler a licença (lic.seg): o backup ficou sem ela. Copie à mão."
+                & $arqLog "ERRO" "não consegui ler a licença (lic.seg) - $($_.Exception.Message)"
+            }
+        }
+
         # 1) libera os arquivos: o SQL segura o MDF e o LDF enquanto o banco esta anexado
         if (& $arqParar) { throw "Cópia cancelada." }
         if ($info.Estado -ne "OFFLINE") {
@@ -6672,6 +6873,10 @@ function Invoke-BackupArquivosBanco {
                     $res.Arquivos += $nomeArquivo
                     & $arqLog "ZIP" "$nomeArquivo copiado para o .zip em $(& $arqTempo $relogioArquivo.Elapsed)"
                 }
+                if ($licArq.Count -gt 0) {
+                    Add-LicencaNoZip -Pacote $pacote -Itens $licArq
+                    & $arqLog "ZIP" "licença colocada no .zip: $((@($licArq | ForEach-Object { $_.Nome })) -join ', ')"
+                }
                 # LEIA-ME dentro do .zip: quem abrir depois entende o que e e como usar
                 & $arqLog "ZIP" "adicionando o LEIA-ME.txt ao .zip (explica o que é e como anexar o banco de volta)"
                 $ausentes = @($info.Arquivos | Where-Object { -not $_.Existe })
@@ -6683,6 +6888,11 @@ function Invoke-BackupArquivosBanco {
                     "Arquivos neste .zip:"
                 )
                 foreach ($aq in $existentes) { $linhasLeia += "  - $(Split-Path -Leaf $aq.Caminho) ($(Format-BytesTexto $aq.Bytes)), origem: $($aq.Caminho)" }
+                foreach ($itemLic in $licArq) { $linhasLeia += "  - $($itemLic.Nome) ($(Format-BytesTexto $itemLic.Bytes)), licença do NetControll, origem: $($itemLic.Origem)" }
+                if ($ComLicenca -and $licArq.Count -eq 0) {
+                    $linhasLeia += ""
+                    $linhasLeia += "A licença do NetControll (lic.seg) NÃO está aqui: não foi encontrada na pasta do Concentrador. Copie à mão."
+                }
                 if ($ausentes.Count -gt 0) {
                     $linhasLeia += ""
                     $linhasLeia += "Arquivos que já não existiam no disco e por isso NÃO estão aqui: $((@($ausentes | ForEach-Object { Split-Path -Leaf $_.Caminho })) -join ', ')"
@@ -6731,6 +6941,20 @@ function Invoke-BackupArquivosBanco {
             }
         }
         finally { $leituraZip.Dispose() }
+        if ($licArq.Count -gt 0) {
+            # licenca com problema nao derruba o backup do banco: fica o aviso para copiar a mao
+            $problemaLic = ""
+            try { $problemaLic = Test-LicencaNoZip -Zip $zipCaminho -Itens $licArq }
+            catch { $problemaLic = "não consegui conferir a licença no .zip ($($_.Exception.Message))" }
+            if ($problemaLic -eq "") {
+                $res.Licenca = @($licArq | ForEach-Object { $_.Nome })
+                & $arqLog "INFO" "licença $($res.Licenca -join ', ') conferida no .zip: igual à original"
+            }
+            else {
+                $res.LicencaAviso = "A licença (lic.seg) não ficou certa no .zip. Copie à mão."
+                & $arqLog "ERRO" $problemaLic
+            }
+        }
 
         $res.Zip = $zipCaminho
         $res.ZipBytes = (Get-Item -LiteralPath $zipCaminho).Length
@@ -9222,6 +9446,7 @@ function Show-BackupBanco {
             $Script:ToolTip.SetToolTip($txtBkpSenha, "Senha do usuário escolhido. Com sa costuma ser netcontroll; com sa2 (ou outro usuário) normalmente é outra - digite aqui.")
             $Script:ToolTip.SetToolTip($cmbBkpBanco, "Bancos de usuário desse SQL Server. O netwebpdv já vem escolhido quando existe.")
             $Script:ToolTip.SetToolTip($lblBkpPasta, "Pasta fixa dos backups, dentro de Arquivos Xmenu na Área de Trabalho.")
+            $Script:ToolTip.SetToolTip($lblBkpArquivo, "A licença do NetControll (lic.seg), da pasta do Concentrador, vai junto: dentro do .zip, ou ao lado do .bak quando não compacta.`r`nO original só é copiado: nunca é movido nem alterado.")
             $Script:ToolTip.SetToolTip($chkBkpZip, "O .bak tem o tamanho dos dados. Compactado costuma ficar 80 a 90% menor, bom para WeTransfer ou pendrive.")
             $Script:ToolTip.SetToolTip($btnBkpArquivos, "Backup manual, do jeito antigo: copia os arquivos do banco (MDF e LDF) para um .zip, sem usar o backup do SQL. O SISTEMA TRAVA: o banco fica offline durante a cópia e o PDV e o Concentrador perdem a conexão. Serve quando o backup normal falha (banco corrompido, suspeito ou em recuperação pendente). No fim o Preparador tenta colocar o banco de volta ONLINE.")
         }
@@ -9268,6 +9493,17 @@ function Show-BackupBanco {
             if ($Script:BkpLojas.ContainsKey($nomeBanco)) { $lojaPrevia = $Script:BkpLojas[$nomeBanco] }
             $nomeArq = Split-Path (Get-BackupNomeArquivo -Banco $nomeBanco -Loja $lojaPrevia -Maquina $env:COMPUTERNAME -Data (Get-Date) -Pasta $Script:BackupPasta) -Leaf
             if ($chkBkpZip.Checked) { $nomeArq = $nomeArq + "   +   .zip" }
+            # a licenca (lic.seg) vai junto: dentro do .zip ou ao lado do .bak
+            $licPrevia = @(@((Find-LicencaNetControll).Arquivos) | ForEach-Object { $_.Name })
+            if ($licPrevia.Count -gt 0) {
+                if ($chkBkpZip.Checked) { $nomeArq = $nomeArq + " (com o $($licPrevia -join ', '))" }
+                else { $nomeArq = $nomeArq + "   +   $($licPrevia -join ', ')" }
+                $lblBkpArquivo.ForeColor = $Script:UiSuave
+            }
+            else {
+                $nomeArq = $nomeArq + "   (sem o lic.seg: não achei a licença)"
+                $lblBkpArquivo.ForeColor = $Script:UiAmarelo
+            }
             $lblBkpArquivo.Text = $nomeArq
         }
 
@@ -9378,6 +9614,7 @@ function Show-BackupBanco {
                     Banco        = $bancoEscolhido
                     Pasta        = $Script:BackupPasta
                     Compactar    = $chkBkpZip.Checked
+                    ComLicenca   = $true
                     AoProgredir  = {
                         param($Etapa, $Pct)
                         if ($Pct -lt 0) {
@@ -9400,13 +9637,21 @@ function Show-BackupBanco {
                     $duracao = "{0}min {1:00}s" -f [int][math]::Floor($resBkp.Duracao.TotalMinutes), $resBkp.Duracao.Seconds
                     $texto = "Backup pronto e conferido: " + (Split-Path $resBkp.Arquivo -Leaf) + " (" + (Format-BytesTexto $resBkp.Bytes) + ")"
                     if ($resBkp.Zip -ne "") { $texto = $texto + " | .zip com " + (Format-BytesTexto $resBkp.ZipBytes) }
+                    if (@($resBkp.Licenca).Count -gt 0) {
+                        if ($resBkp.LicencaEm -eq "zip") { $texto = $texto + " | licença " + (@($resBkp.Licenca) -join ", ") + " dentro do .zip" }
+                        else { $texto = $texto + " | licença " + (@($resBkp.Licenca) -join ", ") + " ao lado do .bak" }
+                    }
                     $texto = $texto + " | " + $duracao
                     $lblBkpEtapa.Text = "Concluído"
+                    $lblBkpStatus.ForeColor = $Script:UiVerde
                     if ($resBkp.Aviso -ne "") {
                         $lblBkpStatus.ForeColor = $Script:UiAmarelo
                         $texto = $texto + " | " + $resBkp.Aviso
                     }
-                    else { $lblBkpStatus.ForeColor = $Script:UiVerde }
+                    if ($resBkp.LicencaAviso -ne "") {
+                        $lblBkpStatus.ForeColor = $Script:UiAmarelo
+                        $texto = $texto + " | " + $resBkp.LicencaAviso
+                    }
                     $lblBkpStatus.Text = $texto
                     Log-Message "SUCESSO" "Backup: $texto - $($resBkp.Arquivo)"
 
@@ -9500,11 +9745,22 @@ function Show-BackupBanco {
                 Log-Message "INFO" "Backup manual: verificações ok (SQL nesta máquina, arquivos no disco, espaço livre). Aguardando a confirmação do técnico: o banco ficará offline durante a cópia."
                 # aviso em destaque com confirmacao
                 $listaArq = (@($existentesArq | ForEach-Object { "$(Split-Path -Leaf $_.Caminho) ($(Format-BytesTexto $_.Bytes))" }) -join "; ")
+                # a licenca (lic.seg) da pasta do Concentrador vai junto no .zip
+                $licPreviaArq = Find-LicencaNetControll
+                $nomesLicArq = @(@($licPreviaArq.Arquivos) | ForEach-Object { $_.Name })
+                if ($nomesLicArq.Count -gt 0) {
+                    $listaArq = $listaArq + " + " + ($nomesLicArq -join ", ") + " (licença)"
+                    Log-Message "INFO" "Backup manual: licença do NetControll que vai no .zip: $((@($licPreviaArq.Arquivos) | ForEach-Object { $_.FullName }) -join ', ')"
+                }
+                else { Log-Message "ERRO" "Backup manual: não achei a licença (lic.seg); o .zip vai sem ela. Procurei em: $(@($licPreviaArq.Procurou) -join '; ')" }
                 $itensArq = @(
                     @{ Tipo = 'alerta'; Titulo = 'O SISTEMA FICA TRAVADO ATÉ TERMINAR'; Texto = 'O banco fica offline durante a cópia: o PDV e o Concentrador perdem a conexão e ninguém consegue vender nem gravar. Pode levar alguns minutos (depende do tamanho do banco). No fim o Preparador tenta colocar o banco de volta ONLINE.' },
                     @{ Tipo = 'ok'; Titulo = 'O .ZIP FICA EM'; Texto = "$($Script:BackupPasta)`r`nDentro: $listaArq + LEIA-ME.txt" },
                     @{ Tipo = 'info'; Titulo = 'QUANDO USAR'; Texto = 'Serve quando o backup normal falha (banco corrompido, suspeito ou em recuperação pendente). Com o banco saudável, prefira FAZER BACKUP: ele não tira o banco do ar.' }
                 )
+                if ($nomesLicArq.Count -eq 0) {
+                    $itensArq += @{ Tipo = 'alerta'; Titulo = 'LICENÇA (lic.seg) NÃO ENCONTRADA'; Texto = "Não achei o lic.seg em $(@($licPreviaArq.Procurou) -join ' nem em '). O .zip vai sem ele: copie à mão da pasta do Concentrador." }
+                }
                 $abertosArq = @()
                 foreach ($nomeProgArq in @("Concentrador", "NetStart", "NetServidor", "NetTerminal", "NetPrint", "NetPDV", "LinkXMenu", "XMenu")) { if (Get-Process -Name $nomeProgArq -ErrorAction SilentlyContinue) { $abertosArq += $nomeProgArq } }
                 if ($abertosArq.Count -gt 0) {
@@ -9550,6 +9806,7 @@ function Show-BackupBanco {
                     TextoConexao = $textoConArq
                     Banco        = $bancoEscolhido
                     Pasta        = $Script:BackupPasta
+                    ComLicenca   = $true
                     AoProgredir  = {
                         param($Etapa, $Pct)
                         if ($Pct -lt 0) {
@@ -9574,12 +9831,15 @@ function Show-BackupBanco {
                     $textoFinal = "Backup manual pronto: $(Split-Path -Leaf $resArq.Zip) ($(Format-BytesTexto $resArq.ZipBytes)) | banco agora: $($resArq.EstadoDepois) | $duracaoArq"
                     $corFinal = $Script:UiVerde
                     if ($resArq.Aviso -ne "") { $textoFinal += " | $($resArq.Aviso)"; $corFinal = $Script:UiAmarelo }
+                    if ($resArq.LicencaAviso -ne "") { $textoFinal += " | $($resArq.LicencaAviso)"; $corFinal = $Script:UiAmarelo }
                     Log-Message "SUCESSO" "$textoFinal - $($resArq.Zip)"
                     try { Start-Process "explorer.exe" ("/select,`"" + $resArq.Zip + "`"") } catch {}
+                    $dentroArq = @($resArq.Arquivos) + @(@($resArq.Licenca) | ForEach-Object { "$_ (licença)" })
                     $itensFim = @(
                         @{ Tipo = 'ok'; Titulo = 'ZIP PRONTO E CONFERIDO'; Texto = "$($resArq.Zip)`r`n$(Format-BytesTexto $resArq.ZipBytes) (arquivos originais: $(Format-BytesTexto $resArq.BytesOrigem))" },
-                        @{ Tipo = 'info'; Titulo = 'O QUE ESTÁ DENTRO'; Texto = "$((@($resArq.Arquivos)) -join ', ') e LEIA-ME.txt" }
+                        @{ Tipo = 'info'; Titulo = 'O QUE ESTÁ DENTRO'; Texto = "$($dentroArq -join ', ') e LEIA-ME.txt" }
                     )
+                    if ($resArq.LicencaAviso -ne "") { $itensFim += @{ Tipo = 'alerta'; Titulo = 'LICENÇA (lic.seg) FICOU DE FORA'; Texto = "$($resArq.LicencaAviso) Ela fica na pasta do Concentrador (normalmente C:\netcontroll\concentrador)." } }
                     if ($resArq.EstadoDepois -eq "ONLINE") { $itensFim += @{ Tipo = 'ok'; Titulo = 'O BANCO VOLTOU ONLINE'; Texto = 'O backup manual terminou e o banco já pode ser usado: o PDV e o Concentrador podem voltar a funcionar.' } }
                     else { $itensFim += @{ Tipo = 'alerta'; Titulo = "O BANCO ESTÁ $($resArq.EstadoDepois)"; Texto = 'Ele não está ONLINE. Se já estava fora do ar antes, é esperado: use REPARAR BANCO (Diagnóstico do Banco).' } }
                     & $mostraAvisoArq "BACKUP MANUAL PRONTO: ARQUIVOS DO BANCO NO .ZIP" "A cópia foi conferida: os tamanhos batem e o .zip descompacta sem erro." 'ok' $itensFim
@@ -19222,7 +19482,7 @@ $formWidth = if ($screen.Width -lt 1000) { 900 } else { 1000 }
 $formHeight = if ($screen.Height -lt 800) { 700 } else { 800 }
 
 $form = New-Object System.Windows.Forms.Form
-$form.Text = "Preparador XMenu – Suporte Técnico v5.44 - REVENDA"
+$form.Text = "Preparador XMenu – Suporte Técnico v5.45 - REVENDA"
 $form.Size = New-Object System.Drawing.Size($formWidth, $formHeight)
 $form.StartPosition = "CenterScreen"
 $form.BackColor = [System.Drawing.Color]::FromArgb(25, 25, 30); $form.ForeColor = 'White'
@@ -20083,7 +20343,7 @@ $bClock.Add_Click({ Invoke-ClockSync })
 [void]$tbl.Controls.Add($bClock)
 
 # Mensagem de abertura: explica o programa para quem abre pela primeira vez
-Log-Message "INFO" "Preparador XMenu v5.44 - REVENDA - preparo e suporte de computadores com XMenu e NetPDV"
+Log-Message "INFO" "Preparador XMenu v5.45 - REVENDA - preparo e suporte de computadores com XMenu e NetPDV"
 Log-Message "LOG" "==============================================================="
 Log-Message "LOG" "COMO USAR"
 Log-Message "LOG" "  PREPARAR AMBIENTE WINDOWS .. ajusta energia, UAC e desempenho do PC num clique"
@@ -20093,7 +20353,8 @@ Log-Message "LOG" "  EXTERNOS ................... acesso remoto, Chrome, TEF HUB
 Log-Message "LOG" "  SUPORTE E DIAGNÓSTICO ...... impressoras, rede, SQL, backup, XMLs e reparos do Windows"
 Log-Message "LOG" "  Passe o mouse sobre um botão para ver o que ele faz antes de clicar."
 Log-Message "LOG" "---------------------------------------------------------------"
-Log-Message "LOG" "NOVO NA v5.44"
+Log-Message "LOG" "NOVO NA v5.45"
+Log-Message "SUCESSO" "  Backup: a licença do NetControll (lic.seg), da pasta do Concentrador, vai junto no FAZER BACKUP e no BACKUP MANUAL: dentro do .zip (sem .zip, ao lado do .bak), conferida byte a byte; o original só é copiado, nunca movido nem alterado"
 Log-Message "SUCESSO" "  LPR: a impressora que o Windows novo cria pela porta TCP/IP padrão (é como a NOVA LPR COMPARTILHADA sai nele) agora aparece na janela LPR Compartilhada, com TROCAR IP e ATUALIZAR IP PELO MAC, e em Impressoras Locais vem como LPR (com o aviso de IP mudado) em vez de Rede (IP)"
 Log-Message "SUCESSO" "  XMLs: a busca por período ficou bem mais rápida em banco grande (só os logs das notas do período são lidos) e a janela não fica mais em Não está respondendo enquanto o banco entrega as notas; CANCELAR funciona durante a consulta (mesmo apertado cedo), a lista de notas é montada em blocos sem congelar e a tela mostra o andamento"
 Log-Message "SUCESSO" "  XMLs: ao terminar o download, o Windows abre a pasta de cima com a pasta do lote marcada, e o .zip aparece ao lado (um compactado e outro não), em vez de abrir por dentro da pasta"

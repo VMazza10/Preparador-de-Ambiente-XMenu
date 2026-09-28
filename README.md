@@ -35,7 +35,7 @@ Antes isso era um passo a passo manual ([tutorial antigo](Recursos/Tutorial%20de
 ### Suporte e diagnóstico
 - **Impressoras:** compartilhamento, drivers por marca/modelo e impressoras LPR — cria a impressora, imprime teste e corrige a porta sozinha quando o IP do PC da impressora muda (acha o PC pelo MAC e pelo nome na rede)
 - **Baixar XMLs NFC-e:** por série, período, chave ou pedido, com espelho fiscal da nota em PDF
-- **Backup do banco NetWebPDV:** backup completo com o banco no ar, sem parar o serviço
+- **Backup do banco NetWebPDV:** backup completo com o banco no ar, sem parar o serviço, levando junto a licença (lic.seg) da pasta do Concentrador
 - **Diagnóstico:** avaliação de hardware, scanner de impressoras na rede, ping contínuo com log, monitor de CPU e RAM, serviços do SQL Server e diagnóstico de rede
 - **Reparos:** SFC, DISM, limpeza de disco profunda, Windows Update, spooler de impressão, impressora USB (MP-4200 e outras), reset de rede e DNS, sincronização do relógio
 
