@@ -1,6 +1,6 @@
 ﻿# =============================================================================
 # PREPARADOR XMENU - VERSAO REVENDA
-# Baseado na v5.48
+# Baseado na v5.49
 # Alteracoes Revenda:
 #   - Wallpaper: fundo_revenda.png
 #   - Removido: Atalhos de Suporte e Pasta Netcontroll
@@ -14586,9 +14586,10 @@ function Get-PortasLprTcp {
 }
 
 function Set-PortaLprTcpServidor {
-    # Troca o IP de uma porta LPR "TCP/IP padrao": a porta continua com o mesmo nome (o Windows tambem nao renomeia ao mudar o
-    # IP em Configurar Porta) e as impressoras nao saem dela. Nao mexe no spooler. Devolve o nome da porta.
-    param([string]$Porta, [string]$Servidor, [string]$Hive = 'LocalMachine',
+    # Porta LPR "TCP/IP padrao": cria a porta "IP:FILA" com o IP novo, copiando a configuracao da atual (protocolo LPR,
+    # fila, contagem de bytes, SNMP), igual ao Set-PortaLprServidor. -ManterNome so troca o IP da propria porta (o nome
+    # fica com o IP velho). Devolve o nome da porta que ficou com o IP novo. Nao mexe no spooler.
+    param([string]$Porta, [string]$Servidor, [switch]$ManterNome, [string]$Hive = 'LocalMachine',
         [string]$Caminho = 'SYSTEM\CurrentControlSet\Control\Print\Monitors\Standard TCP/IP Port\Ports')
     $baseS = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::$Hive, [Microsoft.Win32.RegistryView]::Registry64)
     try {
@@ -14598,15 +14599,35 @@ function Set-PortaLprTcpServidor {
             $subS = $chaveS.OpenSubKey($Porta, $true)
             if ($null -eq $subS) { throw "A porta $Porta não existe mais neste PC." }
             try {
-                $subS.SetValue('HostName', $Servidor, [Microsoft.Win32.RegistryValueKind]::String)
-                $subS.SetValue('IPAddress', $Servidor, [Microsoft.Win32.RegistryValueKind]::String)
-                return $Porta
+                $novoNome = $Servidor + ":" + "$($subS.GetValue('Queue'))"
+                if ($ManterNome -or $novoNome -eq $Porta) {
+                    $subS.SetValue('HostName', $Servidor, [Microsoft.Win32.RegistryValueKind]::String)
+                    $subS.SetValue('IPAddress', $Servidor, [Microsoft.Win32.RegistryValueKind]::String)
+                    return $Porta
+                }
+                $novaS = $chaveS.CreateSubKey($novoNome)
+                try {
+                    foreach ($v in $subS.GetValueNames()) {
+                        $valor = $subS.GetValue($v, $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+                        $novaS.SetValue($v, $valor, $subS.GetValueKind($v))
+                    }
+                    $novaS.SetValue('HostName', $Servidor, [Microsoft.Win32.RegistryValueKind]::String)
+                    $novaS.SetValue('IPAddress', $Servidor, [Microsoft.Win32.RegistryValueKind]::String)
+                }
+                finally { $novaS.Close() }
+                return $novoNome
             }
             finally { $subS.Close() }
         }
         finally { $chaveS.Close() }
     }
     finally { $baseS.Close() }
+}
+
+function Test-NomePortaLprDesatualizado {
+    # A porta tem nome "IP:fila" com um IP diferente do que ela usa (sobrou de uma troca que so mudou o IP por dentro)
+    param([string]$Porta, [string]$Servidor)
+    return ("$Porta" -match '^(\d{1,3}(?:\.\d{1,3}){3}):' -and $matches[1] -ne "$Servidor".Trim())
 }
 
 function Get-IpDaPortaLpr {
@@ -14719,13 +14740,14 @@ function Remove-PortaLprRegistro {
 }
 
 function Get-NomesPortasMonitor {
-    # Nomes das portas de um monitor do spooler ("LPR Port", "Standard TCP/IP Port"), pelo registro
-    param([string]$Monitor, [string]$Hive = 'LocalMachine')
+    # Nomes das portas de um monitor do spooler ("LPR Port", "Standard TCP/IP Port"), pelo registro. -Caminho troca a chave.
+    param([string]$Monitor, [string]$Hive = 'LocalMachine', [string]$Caminho = "")
     $nomes = @()
+    if ($Caminho -eq "") { $Caminho = "SYSTEM\CurrentControlSet\Control\Print\Monitors\$Monitor\Ports" }
     try {
         $base = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::$Hive, [Microsoft.Win32.RegistryView]::Registry64)
         try {
-            $chave = $base.OpenSubKey("SYSTEM\CurrentControlSet\Control\Print\Monitors\$Monitor\Ports")
+            $chave = $base.OpenSubKey($Caminho)
             if ($null -ne $chave) { $nomes = @($chave.GetSubKeyNames()); $chave.Close() }
         }
         finally { $base.Close() }
@@ -14787,22 +14809,53 @@ function Remove-PortasLprRegistro {
 }
 
 function Update-PortaLprCompleto {
-    # Troca o servidor de uma porta LPR de verdade: porta nova "IP:FILA", spooler
-    # reiniciado, impressoras movidas e a porta antiga removida. Se o Windows nao
-    # deixar mover alguma impressora, desfaz e so troca o IP da porta antiga, que
-    # imprime do mesmo jeito com o nome velho.
-    # Devolve hashtable: Porta / Impressoras / Aviso
-    param([string]$Porta, [string]$Servidor, [string]$HiveTcp = 'LocalMachine',
-        [string]$CaminhoTcp = 'SYSTEM\CurrentControlSet\Control\Print\Monitors\Standard TCP/IP Port\Ports')
+    # Troca o servidor de uma porta LPR de verdade: porta nova "IP:FILA" no mesmo tipo da antiga (monitor "LPR Port" ou a
+    # TCP/IP padrao com protocolo LPR, que e como o Windows novo cria), spooler reiniciado, impressoras movidas e a porta
+    # antiga removida. Tambem corrige o nome da porta que ja aponta para o IP certo mas ficou com o IP velho no nome.
+    # Se ja existir uma porta com o nome novo no OUTRO tipo, ou se o Windows nao deixar mover alguma impressora, so troca
+    # o IP da porta antiga, que imprime do mesmo jeito com o nome velho.
+    # Devolve hashtable: Porta / Impressoras / Aviso. Os -Hive/-Caminho trocam as chaves do registro (testes).
+    param([string]$Porta, [string]$Servidor,
+        [string]$HiveTcp = 'LocalMachine', [string]$CaminhoTcp = 'SYSTEM\CurrentControlSet\Control\Print\Monitors\Standard TCP/IP Port\Ports',
+        [string]$HiveLpr = 'LocalMachine', [string]$CaminhoLpr = 'SYSTEM\CurrentControlSet\Control\Print\Monitors\LPR Port\Ports')
     $impressoras = @()
     try { $impressoras = @(Get-Printer -ErrorAction Stop | Where-Object { $_.PortName -eq $Porta } | ForEach-Object { $_.Name }) } catch {}
-    # Porta LPR criada pela TCP/IP padrao: troca o IP na propria porta, que mantem o nome e as impressoras
-    if (@(Get-PortasLprTcp -Hive $HiveTcp -Caminho $CaminhoTcp | Where-Object { $_.Porta -eq $Porta }).Count -gt 0) {
-        [void](Set-PortaLprTcpServidor -Porta $Porta -Servidor $Servidor -Hive $HiveTcp -Caminho $CaminhoTcp)
-        Restart-Service -Name Spooler -Force -ErrorAction Stop
-        return @{ Porta = $Porta; Impressoras = $impressoras; Aviso = "A porta manteve o nome $Porta, mas já aponta para $Servidor." }
+    $portaTcp = @(Get-PortasLprTcp -Hive $HiveTcp -Caminho $CaminhoTcp | Where-Object { $_.Porta -eq $Porta })
+    $ehTcp = ($portaTcp.Count -gt 0)
+    if ($ehTcp) {
+        $filaAtual = "$($portaTcp[0].Fila)"
+        $nomesMesmoTipo = @(Get-NomesPortasMonitor -Hive $HiveTcp -Caminho $CaminhoTcp)
+        $nomesOutroTipo = @(Get-NomesPortasMonitor -Hive $HiveLpr -Caminho $CaminhoLpr)
     }
-    $nova = Set-PortaLprServidor -Porta $Porta -Servidor $Servidor
+    else {
+        $portaLpr = @(Get-PortasLpr -Hive $HiveLpr -Caminho $CaminhoLpr | Where-Object { $_.Porta -eq $Porta })
+        if ($portaLpr.Count -eq 0) { throw "A porta $Porta não existe mais neste PC." }
+        $filaAtual = "$($portaLpr[0].Fila)"
+        $nomesMesmoTipo = @(Get-NomesPortasMonitor -Hive $HiveLpr -Caminho $CaminhoLpr)
+        $nomesOutroTipo = @(Get-NomesPortasMonitor -Hive $HiveTcp -Caminho $CaminhoTcp)
+    }
+    # Troca no registro do tipo certo (-ManterNome: so o IP da propria porta) e apaga uma porta desse tipo
+    $trocaLpr = {
+        param([switch]$SoOIp)
+        if ($ehTcp) { return (Set-PortaLprTcpServidor -Porta $Porta -Servidor $Servidor -ManterNome:$SoOIp -Hive $HiveTcp -Caminho $CaminhoTcp) }
+        return (Set-PortaLprServidor -Porta $Porta -Servidor $Servidor -ManterNome:$SoOIp -Hive $HiveLpr -Caminho $CaminhoLpr)
+    }
+    $apagaLpr = {
+        param([string]$NomeApagar)
+        if ($ehTcp) { Remove-PortaLprRegistro -Porta $NomeApagar -Hive $HiveTcp -Caminho $CaminhoTcp }
+        else { Remove-PortaLprRegistro -Porta $NomeApagar -Hive $HiveLpr -Caminho $CaminhoLpr }
+    }
+
+    $novoNome = $Servidor + ":" + $filaAtual
+    if ($novoNome -ne $Porta -and $nomesOutroTipo -contains $novoNome) {
+        # o spooler nao aceita duas portas com o mesmo nome
+        [void](& $trocaLpr -SoOIp)
+        Restart-Service -Name Spooler -Force -ErrorAction Stop
+        return @{ Porta = $Porta; Impressoras = $impressoras; Aviso = "Já existe outra porta chamada ${novoNome}: esta manteve o nome $Porta, mas já aponta para $Servidor." }
+    }
+    # a porta com o nome novo pode ter sobrado de uma troca antiga: e reaproveitada e nunca apagada no desfazer
+    $jaExistia = ($novoNome -ne $Porta -and $nomesMesmoTipo -contains $novoNome)
+    $nova = & $trocaLpr
     Restart-Service -Name Spooler -Force -ErrorAction Stop
     $res = @{ Porta = $nova; Impressoras = $impressoras; Aviso = "" }
     if ($nova -eq $Porta) { return $res }
@@ -14820,8 +14873,8 @@ function Update-PortaLprCompleto {
     }
 
     foreach ($imp in $movidas) { try { Set-Printer -Name $imp -PortName $Porta -ErrorAction Stop } catch {} }
-    [void](Set-PortaLprServidor -Porta $Porta -Servidor $Servidor -ManterNome)
-    Remove-PortaLprRegistro -Porta $nova
+    [void](& $trocaLpr -SoOIp)
+    if (-not $jaExistia) { & $apagaLpr $nova }
     Restart-Service -Name Spooler -Force -ErrorAction Stop
     $res.Porta = $Porta
     $res.Aviso = "O Windows não deixou renomear a porta: ela manteve o nome $Porta, mas já aponta para $Servidor."
@@ -15741,6 +15794,9 @@ function Show-PortasLpr {
                 $semUso = @($lvLpr.Items | Where-Object { @($_.Tag.Impressoras).Count -eq 0 })
                 $avisoSemUso = ""
                 if ($semUso.Count -gt 0) { $avisoSemUso = " $($semUso.Count) porta(s) sem impressora: LIMPAR SEM USO apaga." }
+                # porta que ficou com o IP velho no nome (troca antiga so mudou o IP por dentro)
+                $nomeVelho = @($lvLpr.Items | Where-Object { @($_.Tag.Impressoras).Count -gt 0 -and (Test-NomePortaLprDesatualizado -Porta $_.Tag.Porta -Servidor $_.Tag.Servidor) })
+                foreach ($itNome in $nomeVelho) { Log-Message "INFO" "LPR: a porta $($itNome.Tag.Porta) aponta para $($itNome.Tag.Servidor), mas ficou com o IP antigo no nome" }
                 $pedida = @($lvLpr.Items | Where-Object { $Selecionar -ne "" -and $_.Tag.Porta -eq $Selecionar })
                 if ($lvLpr.Items.Count -eq 0) {
                     $diagLpr = Get-DiagnosticoPortasLpr
@@ -15759,6 +15815,10 @@ function Show-PortasLpr {
                 elseif ($semResposta.Count -gt 0) {
                     $semResposta[0].Selected = $true
                     & $statusLpr ("$($semResposta.Count) porta(s) com impressora sem resposta. Selecione e clique em ATUALIZAR IP PELO MAC." + $avisoSemUso) $Script:UiVermelho
+                }
+                elseif ($nomeVelho.Count -gt 0) {
+                    $nomeVelho[0].Selected = $true
+                    & $statusLpr ("A porta $($nomeVelho[0].Tag.Porta) já aponta para $($nomeVelho[0].Tag.Servidor), mas ficou com o nome antigo: clique em TROCAR IP para corrigir." + $avisoSemUso) $Script:UiAmarelo
                 }
                 else {
                     $lvLpr.Items[0].Selected = $true
@@ -15944,6 +16004,13 @@ function Show-PortasLpr {
                     return
                 }
                 if ($ipAchado -eq $selLpr.Servidor) {
+                    if (Test-NomePortaLprDesatualizado -Porta $selLpr.Porta -Servidor $selLpr.Servidor) {
+                        $r = [System.Windows.Forms.MessageBox]::Show($f,
+                            "O PC da impressora continua no IP $ipAchado e a porta já aponta para ele, mas ainda se chama $($selLpr.Porta).`r`n`r`nCorrigir o nome da porta para $($ipAchado):$($selLpr.Fila)? O spooler de impressão deste PC será reiniciado.",
+                            "Portas LPR", "YesNo", "Question")
+                        if ($r -eq [System.Windows.Forms.DialogResult]::Yes) { & $aplicarLpr $selLpr $ipAchado $selLpr.Mac }
+                        return
+                    }
                     & $statusLpr "O PC da impressora continua no IP $ipAchado. Se não imprime, confira nele se o LPD está ativo (Etapa 1) e se a impressora está compartilhada como $($selLpr.Fila)." $Script:UiAmarelo
                     return
                 }
@@ -15962,7 +16029,8 @@ function Show-PortasLpr {
                     [System.Windows.Forms.MessageBox]::Show($f, "Digite um IP válido, por exemplo 192.168.0.25.", "Portas LPR", "OK", "Warning") | Out-Null
                     return
                 }
-                if ($ipNovo -eq $selLpr.Servidor) { & $statusLpr "A porta já aponta para $ipNovo." $Script:UiAmarelo; return }
+                # mesmo IP: so segue para corrigir o nome da porta que ficou com o IP velho
+                if ($ipNovo -eq $selLpr.Servidor -and -not (Test-NomePortaLprDesatualizado -Porta $selLpr.Porta -Servidor $selLpr.Servidor)) { & $statusLpr "A porta já aponta para $ipNovo." $Script:UiAmarelo; return }
                 $responde = $false
                 & $travarLpr $true
                 try {
@@ -16030,7 +16098,7 @@ function Show-PortasLpr {
                 # Sem porta para corrigir (PC ainda sem impressora LPR): cria a impressora com o PC escolhido
                 if ($lvLpr.SelectedItems.Count -eq 0) { & $criarNovaLpr $pc.IP; return }
                 $selLpr = $lvLpr.SelectedItems[0].Tag
-                if ($pc.IP -eq $selLpr.Servidor) { & $statusLpr "A porta $($selLpr.Porta) já aponta para $($pc.IP)." $Script:UiAmarelo; return }
+                if ($pc.IP -eq $selLpr.Servidor -and -not (Test-NomePortaLprDesatualizado -Porta $selLpr.Porta -Servidor $selLpr.Servidor)) { & $statusLpr "A porta $($selLpr.Porta) já aponta para $($pc.IP)." $Script:UiAmarelo; return }
                 $r = [System.Windows.Forms.MessageBox]::Show($f,
                     "Trocar a porta $($selLpr.Porta) para o PC $($pc.IP)$(if ($pc.Nome) { " ($($pc.Nome))" })?`r`n`r`nO spooler de impressão deste PC será reiniciado.",
                     "Portas LPR", "YesNo", "Question")
@@ -19490,7 +19558,7 @@ $formWidth = if ($screen.Width -lt 1000) { 900 } else { 1000 }
 $formHeight = if ($screen.Height -lt 800) { 700 } else { 800 }
 
 $form = New-Object System.Windows.Forms.Form
-$form.Text = "Preparador XMenu – Suporte Técnico v5.48 - REVENDA"
+$form.Text = "Preparador XMenu – Suporte Técnico v5.49 - REVENDA"
 $form.Size = New-Object System.Drawing.Size($formWidth, $formHeight)
 $form.StartPosition = "CenterScreen"
 $form.BackColor = [System.Drawing.Color]::FromArgb(25, 25, 30); $form.ForeColor = 'White'
@@ -20351,7 +20419,7 @@ $bClock.Add_Click({ Invoke-ClockSync })
 [void]$tbl.Controls.Add($bClock)
 
 # Mensagem de abertura: explica o programa para quem abre pela primeira vez
-Log-Message "INFO" "Preparador XMenu v5.48 - REVENDA - preparo e suporte de computadores com XMenu e NetPDV"
+Log-Message "INFO" "Preparador XMenu v5.49 - REVENDA - preparo e suporte de computadores com XMenu e NetPDV"
 Log-Message "LOG" "==============================================================="
 Log-Message "LOG" "COMO USAR"
 Log-Message "LOG" "  PREPARAR AMBIENTE WINDOWS .. ajusta energia, UAC e desempenho do PC num clique"
@@ -20361,7 +20429,8 @@ Log-Message "LOG" "  EXTERNOS ................... acesso remoto, Chrome, TEF HUB
 Log-Message "LOG" "  SUPORTE E DIAGNÓSTICO ...... impressoras, rede, SQL, backup, XMLs e reparos do Windows"
 Log-Message "LOG" "  Passe o mouse sobre um botão para ver o que ele faz antes de clicar."
 Log-Message "LOG" "---------------------------------------------------------------"
-Log-Message "LOG" "NOVO NA v5.48"
+Log-Message "LOG" "NOVO NA v5.49"
+Log-Message "SUCESSO" "  LPR: trocar o IP da porta TCP/IP padrão (a LPR do Windows novo) cria a porta nova IP:compartilhamento, passa a impressora para ela e apaga a antiga, em vez de só mudar o IP por dentro; a porta que ficou com o IP velho no nome aparece em amarelo e o TROCAR IP (já com o IP certo) corrige"
 Log-Message "SUCESSO" "  Backup: nome novo e igual para o .bak, o .zip e o .zip do BACKUP MANUAL: Backup NetWebPDV - Loja 110 - 28-09-2026 16h36 (sem ID da loja, entra sem ID; sai o ZIP e o nome da máquina); o Restaurar Backup continua lendo os nomes antigos"
 Log-Message "SUCESSO" "  Backup: além de ir dentro do .zip, a licença (lic.seg) fica também solta na pasta do backup, ao lado do .zip, com o nome dele na frente (NetWebPDV - Loja 1234 - data - lic.seg), no FAZER BACKUP e no BACKUP MANUAL"
 Log-Message "SUCESSO" "  Backup: o .zip do BACKUP MANUAL não leva mais o LEIA-ME.txt (só o MDF, o LDF e a licença lic.seg); o Restaurar Backup tira o nome do banco do nome do .zip e continua lendo os .zip antigos"
