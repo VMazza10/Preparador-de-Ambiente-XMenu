@@ -1,6 +1,6 @@
 ﻿# =============================================================================
 # PREPARADOR XMENU - VERSAO REVENDA
-# Baseado na v5.47
+# Baseado na v5.48
 # Alteracoes Revenda:
 #   - Wallpaper: fundo_revenda.png
 #   - Removido: Atalhos de Suporte e Pasta Netcontroll
@@ -6132,23 +6132,23 @@ function Get-SqlIdLoja {
 }
 
 function Get-BackupNomeArquivo {
-    # "NetWebPDV - Loja 1234 - 12-09-2026 15h30.bak": banco, ID da loja e data. A
-    # hora vai junto para dois backups do mesmo dia nao se confundirem. Sem ID da
-    # loja, entra o nome da maquina. Nunca repete um .bak ou .zip que ja esteja na
-    # pasta: vira "(2)", "(3)".
-    param([string]$Banco, [string]$Loja, [string]$Maquina, [datetime]$Data, [string]$Pasta)
+    # "Backup NetWebPDV - Loja 1234 - 12-09-2026 15h30.bak": banco, ID da loja, dia e hora. O mesmo nome serve
+    # para o .bak, o .zip e o .zip do BACKUP MANUAL (troque a extensao). Sem ID da loja, entra "sem ID". Nunca
+    # repete um .bak, .zip ou copia da licenca (" - lic.seg") que ja esteja na pasta: vira "(2)", "(3)".
+    param([string]$Banco, [string]$Loja, [datetime]$Data, [string]$Pasta)
     $nomeBanco = $Banco
     if ($Banco -ieq 'netwebpdv') { $nomeBanco = 'NetWebPDV' }
-    $origem = $Maquina
+    $origem = "sem ID"
     if ("$Loja".Trim() -ne "") { $origem = "Loja " + "$Loja".Trim() }
-    $base = ($nomeBanco + " - " + $origem + " - " + $Data.ToString("dd-MM-yyyy HH'h'mm")) -replace '[\\/:*?"<>|]', '-'
-    $caminho = Join-Path $Pasta ($base + ".bak")
+    $base = ("Backup " + $nomeBanco + " - " + $origem + " - " + $Data.ToString("dd-MM-yyyy HH'h'mm")) -replace '[\\/:*?"<>|]', '-'
+    $nomeLivre = $base
     $n = 1
-    while ((Test-Path -LiteralPath $caminho) -or (Test-Path -LiteralPath ([System.IO.Path]::ChangeExtension($caminho, ".zip")))) {
+    while ((Test-Path -LiteralPath (Join-Path $Pasta ($nomeLivre + ".bak"))) -or (Test-Path -LiteralPath (Join-Path $Pasta ($nomeLivre + ".zip"))) -or
+        (@(Get-ChildItem -LiteralPath $Pasta -Filter ($nomeLivre + " - *.seg") -File -ErrorAction SilentlyContinue).Count -gt 0)) {
         $n++
-        $caminho = Join-Path $Pasta ($base + " ($n).bak")
+        $nomeLivre = $base + " ($n)"
     }
-    return $caminho
+    return (Join-Path $Pasta ($nomeLivre + ".bak"))
 }
 
 function Get-TextoErroSql {
@@ -6406,7 +6406,7 @@ function Test-LicencaNoZip {
 
 function Save-LicencaAoLado {
     # Copia a licenca solta na pasta do backup, ao lado do .bak/.zip, com o nome dele na frente
-    # ("NetWebPDV - Loja 1234 - 28-09-2026 15h30 - lic.seg"), sem sobrescrever nada, e confere a copia (SHA-256).
+    # ("Backup NetWebPDV - Loja 1234 - 28-09-2026 15h30 - lic.seg"), sem sobrescrever nada, e confere a copia (SHA-256).
     # Devolve os caminhos gravados; lanca excecao se falhar.
     param([object[]]$Itens, [string]$Backup)
     $baseLic = Join-Path (Split-Path -Parent $Backup) ([System.IO.Path]::GetFileNameWithoutExtension($Backup))
@@ -6507,7 +6507,7 @@ function Invoke-BackupBanco {
         # Maquina pelo nome do Windows (o do SQL pode vir com outra caixa), igual a
         # previa da janela; so entra no nome quando o banco nao tem ID de loja
         $res.Loja = Get-SqlIdLoja -Conexao $cnBanco -Banco $Banco
-        $arquivo = Get-BackupNomeArquivo -Banco $Banco -Loja $res.Loja -Maquina $env:COMPUTERNAME -Data (Get-Date) -Pasta $Pasta
+        $arquivo = Get-BackupNomeArquivo -Banco $Banco -Loja $res.Loja -Data (Get-Date) -Pasta $Pasta
         $spid = [int](& $bkpValor "SELECT @@SPID")
 
         # Comando longo (BACKUP, RESTORE VERIFYONLY) sem travar a janela: a
@@ -6788,20 +6788,12 @@ function Invoke-BackupArquivosBanco {
             & $arqLog "INFO" "lendo o ID da loja (IDParceiro da tabela NFCeTokenID do banco $Banco) para colocar no nome do .zip"
             $lojaZip = "$(Get-SqlIdLoja -Conexao $cnArq -Banco $Banco)".Trim()
             if ($lojaZip -ne "") { & $arqLog "INFO" "ID da loja: $lojaZip" }
-            else { & $arqLog "INFO" "não achei o ID da loja nesse banco; o nome do .zip vai sem ele" }
+            else { & $arqLog "INFO" "não achei o ID da loja nesse banco; o nome do .zip vai com ""sem ID""" }
         }
-        else { & $arqLog "INFO" "o banco está $($info.Estado): não dá para ler o ID da loja, então o nome do .zip vai sem ele" }
+        else { & $arqLog "INFO" "o banco está $($info.Estado): não dá para ler o ID da loja, então o nome do .zip vai com ""sem ID""" }
 
-        # Nome, igual ao do backup normal: "NetWebPDV - ZIP - Loja 1234 - 19-09-2026 18h30.zip" (nunca repete um que ja exista)
-        $nomeBanco = $Banco
-        if ($Banco -ieq 'netwebpdv') { $nomeBanco = 'NetWebPDV' }
-        $partesNome = @($nomeBanco, "ZIP")
-        if ($lojaZip -ne "") { $partesNome += ("Loja " + $lojaZip) }
-        $partesNome += (Get-Date).ToString("dd-MM-yyyy HH'h'mm")
-        $base = ($partesNome -join " - ") -replace '[\\/:*?"<>|]', '-'
-        $zipCaminho = Join-Path $Pasta ($base + ".zip")
-        $repeticao = 1
-        while (Test-Path -LiteralPath $zipCaminho) { $repeticao++; $zipCaminho = Join-Path $Pasta ($base + " ($repeticao).zip") }
+        # Mesmo nome do backup normal: "Backup NetWebPDV - Loja 1234 - 19-09-2026 18h30.zip" (nunca repete um que ja exista)
+        $zipCaminho = [System.IO.Path]::ChangeExtension((Get-BackupNomeArquivo -Banco $Banco -Loja $lojaZip -Data (Get-Date) -Pasta $Pasta), ".zip")
         & $arqLog "ZIP" "o .zip será criado em: $zipCaminho"
 
         # Licenca do NetControll (lic.seg): lida antes de deixar o banco offline, para ir dentro do .zip
@@ -7021,6 +7013,15 @@ function Invoke-BackupArquivosBanco {
 # ser o banco atual (substitui, depois de uma copia de seguranca) ou um banco novo.
 # Tudo que a rotina faz vai para o Log (tela e arquivo), com o prefixo "Restaurar backup:".
 # -----------------------------------------------------------------------------
+function Get-BancoDoNomeBackup {
+    # Banco pelo nome do backup: o formato de agora ("Backup NetWebPDV - Loja 1234 - data") e os antigos
+    # ("NetWebPDV - Loja 1234 - data", "NetWebPDV - ZIP - ..."), com ou sem "Antes de restaurar - " na frente
+    param([string]$Nome)
+    $semPrefixo = ("$Nome" -replace '^Antes de restaurar - ', '')
+    if ($semPrefixo -match '^Backup (.+?) - ') { return $Matches[1].Trim() }
+    return ($semPrefixo -split ' - ')[0].Trim()
+}
+
 function Get-BackupArquivoInfo {
     # Olha o arquivo escolhido sem falar com o SQL. Tipo: bak | zip-bak | zip-arquivos | desconhecido
     # Devolve hashtable: Tipo / Nome / Bytes / Data / Entradas (Nome, NomeCompleto, Bytes) / Banco / Erro
@@ -7035,7 +7036,7 @@ function Get-BackupArquivoInfo {
         $extensao = $item.Extension.ToLowerInvariant()
         if ($extensao -eq ".bak") {
             $info.Tipo = "bak"
-            $info.Banco = (($item.BaseName -replace '^Antes de restaurar - ', '') -split ' - ')[0].Trim()
+            $info.Banco = Get-BancoDoNomeBackup $item.BaseName
             return $info
         }
         if ($extensao -ne ".zip") { $info.Erro = "Escolha um arquivo .bak ou .zip."; return $info }
@@ -7049,13 +7050,15 @@ function Get-BackupArquivoInfo {
             $entradasMdf = @($entradas | Where-Object { $_.Nome -like "*.mdf" })
             if ($entradasBak.Count -gt 0) {
                 $info.Tipo = "zip-bak"
-                $info.Banco = (([System.IO.Path]::GetFileNameWithoutExtension($entradasBak[0].Nome) -replace '^Antes de restaurar - ', '') -split ' - ')[0].Trim()
+                $info.Banco = Get-BancoDoNomeBackup ([System.IO.Path]::GetFileNameWithoutExtension($entradasBak[0].Nome))
             }
             elseif ($entradasMdf.Count -gt 0) {
                 $info.Tipo = "zip-arquivos"
                 $info.Banco = [System.IO.Path]::GetFileNameWithoutExtension($entradasMdf[0].Nome)
-                # o nome do .zip do BACKUP MANUAL comeca pelo banco: "NetWebPDV - ZIP - Loja 1234 - data.zip"
-                if ((($item.BaseName -replace '^Antes de restaurar - ', '')) -match '^(.+?) - ZIP( - |$)') { $info.Banco = $Matches[1].Trim() }
+                # o nome do .zip do BACKUP MANUAL diz o banco: "Backup NetWebPDV - Loja 1234 - data.zip"
+                # (os antigos: "NetWebPDV - ZIP - Loja 1234 - data.zip"); um .zip com outro nome fica com o nome do MDF
+                $nomeZip = ($item.BaseName -replace '^Antes de restaurar - ', '')
+                if ($nomeZip -match '^Backup (.+?) - ' -or $nomeZip -match '^(.+?) - ZIP( - |$)') { $info.Banco = $Matches[1].Trim() }
                 # os .zip antigos do BACKUP MANUAL traziam um LEIA-ME que diz de que banco sao os arquivos
                 $entradaLeia = $pacoteZip.GetEntry("LEIA-ME.txt")
                 if ($null -ne $entradaLeia) {
@@ -9485,7 +9488,7 @@ function Show-BackupBanco {
             }
             $lojaPrevia = ""
             if ($Script:BkpLojas.ContainsKey($nomeBanco)) { $lojaPrevia = $Script:BkpLojas[$nomeBanco] }
-            $nomeArq = Split-Path (Get-BackupNomeArquivo -Banco $nomeBanco -Loja $lojaPrevia -Maquina $env:COMPUTERNAME -Data (Get-Date) -Pasta $Script:BackupPasta) -Leaf
+            $nomeArq = Split-Path (Get-BackupNomeArquivo -Banco $nomeBanco -Loja $lojaPrevia -Data (Get-Date) -Pasta $Script:BackupPasta) -Leaf
             if ($chkBkpZip.Checked) { $nomeArq = $nomeArq + "   +   .zip" }
             # a licenca (lic.seg) vai junto: dentro do .zip e tambem solta na pasta
             $licPrevia = @(@((Find-LicencaNetControll).Arquivos) | ForEach-Object { $_.Name })
@@ -19487,7 +19490,7 @@ $formWidth = if ($screen.Width -lt 1000) { 900 } else { 1000 }
 $formHeight = if ($screen.Height -lt 800) { 700 } else { 800 }
 
 $form = New-Object System.Windows.Forms.Form
-$form.Text = "Preparador XMenu – Suporte Técnico v5.47 - REVENDA"
+$form.Text = "Preparador XMenu – Suporte Técnico v5.48 - REVENDA"
 $form.Size = New-Object System.Drawing.Size($formWidth, $formHeight)
 $form.StartPosition = "CenterScreen"
 $form.BackColor = [System.Drawing.Color]::FromArgb(25, 25, 30); $form.ForeColor = 'White'
@@ -20348,7 +20351,7 @@ $bClock.Add_Click({ Invoke-ClockSync })
 [void]$tbl.Controls.Add($bClock)
 
 # Mensagem de abertura: explica o programa para quem abre pela primeira vez
-Log-Message "INFO" "Preparador XMenu v5.47 - REVENDA - preparo e suporte de computadores com XMenu e NetPDV"
+Log-Message "INFO" "Preparador XMenu v5.48 - REVENDA - preparo e suporte de computadores com XMenu e NetPDV"
 Log-Message "LOG" "==============================================================="
 Log-Message "LOG" "COMO USAR"
 Log-Message "LOG" "  PREPARAR AMBIENTE WINDOWS .. ajusta energia, UAC e desempenho do PC num clique"
@@ -20358,7 +20361,8 @@ Log-Message "LOG" "  EXTERNOS ................... acesso remoto, Chrome, TEF HUB
 Log-Message "LOG" "  SUPORTE E DIAGNÓSTICO ...... impressoras, rede, SQL, backup, XMLs e reparos do Windows"
 Log-Message "LOG" "  Passe o mouse sobre um botão para ver o que ele faz antes de clicar."
 Log-Message "LOG" "---------------------------------------------------------------"
-Log-Message "LOG" "NOVO NA v5.47"
+Log-Message "LOG" "NOVO NA v5.48"
+Log-Message "SUCESSO" "  Backup: nome novo e igual para o .bak, o .zip e o .zip do BACKUP MANUAL: Backup NetWebPDV - Loja 110 - 28-09-2026 16h36 (sem ID da loja, entra sem ID; sai o ZIP e o nome da máquina); o Restaurar Backup continua lendo os nomes antigos"
 Log-Message "SUCESSO" "  Backup: além de ir dentro do .zip, a licença (lic.seg) fica também solta na pasta do backup, ao lado do .zip, com o nome dele na frente (NetWebPDV - Loja 1234 - data - lic.seg), no FAZER BACKUP e no BACKUP MANUAL"
 Log-Message "SUCESSO" "  Backup: o .zip do BACKUP MANUAL não leva mais o LEIA-ME.txt (só o MDF, o LDF e a licença lic.seg); o Restaurar Backup tira o nome do banco do nome do .zip e continua lendo os .zip antigos"
 Log-Message "SUCESSO" "  Backup: a licença do NetControll (lic.seg), da pasta do Concentrador, vai junto no FAZER BACKUP e no BACKUP MANUAL: dentro do .zip (sem .zip, ao lado do .bak), conferida byte a byte; o original só é copiado, nunca movido nem alterado"
