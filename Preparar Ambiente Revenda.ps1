@@ -1,6 +1,6 @@
 ﻿# =============================================================================
 # PREPARADOR XMENU - VERSAO REVENDA
-# Baseado na v5.53
+# Baseado na v5.54
 # Alteracoes Revenda:
 #   - Wallpaper: fundo_revenda.png
 #   - Removido: Atalhos de Suporte e Pasta Netcontroll
@@ -15814,7 +15814,7 @@ function Show-PortasLpr {
 
         $btnLprMac = New-ToolButton $f "ATUALIZAR IP PELO MAC" 20 350 220 34 $Script:UiVerde $null "Procura na rede o PC da impressora pelo MAC guardado e corrige a porta para o IP atual dele"
         $btnLprTrocar = New-ToolButton $f "TROCAR IP..." 250 350 140 34 $Script:UiAzul $null "Digitar o IP novo do PC da impressora"
-        $btnLprProcurar = New-ToolButton $f "PROCURAR NA REDE" 400 350 180 34 $Script:UiCinza $null "Lista os PCs da rede com o LPD ativo (porta 515). Depois de escolher o PC: corrigir a porta selecionada, usar numa impressora já cadastrada ou criar uma nova"
+        $btnLprProcurar = New-ToolButton $f "PROCURAR NA REDE" 400 350 180 34 $Script:UiCinza $null "Lista os PCs da rede com o LPD ativo (porta 515). Depois de escolher o PC: corrigir a porta selecionada, usar em uma impressora já cadastrada ou criar uma nova"
         $btnLprRecarregar = New-ToolButton $f "RECARREGAR" 590 350 130 34 $Script:UiCinza $null "Lê as portas de novo e testa se cada PC responde"
         $btnLprFechar = New-ToolButton $f "FECHAR" 744 350 100 34 $Script:UiCinza $null "Fecha esta janela"
         $btnLprNova = New-ToolButton $f "NOVA LPR COMPARTILHADA" 20 392 220 34 $Script:UiAzul $null "Cria a porta LPR compartilhada e a impressora neste PC de uma vez, sem o assistente do Windows"
@@ -15827,7 +15827,7 @@ function Show-PortasLpr {
         $lblLprStatus = New-ToolLabel $f "" 20 436 9.5 -Negrito -W 824
         $lblLprStatus.Height = 40
         $lblLprStatus.Anchor = 'Bottom,Left,Right'
-        $lblLprAjuda = New-ToolLabel $f "Como usar: ao abrir, a janela já procura pelo MAC o PC da impressora que parou e oferece CORRIGIR AGORA. Sem MAC guardado, use PROCURAR NA REDE: escolha o PC e depois corrija a porta, use numa impressora já cadastrada ou crie uma nova. A troca reinicia o spooler deste PC. Portas sem impressora e impressora repetida no Windows saem com LIMPAR SEM USO." 20 478 8.5 -Cor $Script:UiSuave -W 824
+        $lblLprAjuda = New-ToolLabel $f "Como usar: ao abrir, a janela já procura pelo MAC o PC da impressora que parou e oferece CORRIGIR AGORA. Sem MAC guardado, use PROCURAR NA REDE: escolha o PC e depois corrija a porta, use em uma impressora já cadastrada ou crie uma nova. A troca reinicia o spooler deste PC. Portas sem impressora e impressora repetida no Windows saem com LIMPAR SEM USO." 20 478 8.5 -Cor $Script:UiSuave -W 824
         $lblLprAjuda.Height = 44
         $lblLprAjuda.Anchor = 'Bottom,Left,Right'
 
@@ -16192,7 +16192,7 @@ function Show-PortasLpr {
             }
         }
 
-        # Depois de escolher o PC na varredura: corrigir a porta selecionada, usar numa impressora ja cadastrada ou criar
+        # Depois de escolher o PC na varredura: corrigir a porta selecionada, usar em uma impressora ja cadastrada ou criar
         # uma nova. Devolve 'corrigir' / 'usar' / 'nova' ou $null.
         $escolherAcaoLpr = {
             param($PcAcao, $SelAcao)
@@ -16207,14 +16207,15 @@ function Show-PortasLpr {
             if ($null -ne $SelAcao) { $descCorrigir = "A porta $($SelAcao.Porta) passa a imprimir em $($PcAcao.IP). A impressora continua a mesma." }
             $opcoesA = @(
                 @{ Acao = 'corrigir'; Texto = 'CORRIGIR A PORTA SELECIONADA'; Cor = $Script:UiVerde; Desc = $descCorrigir; Liga = ($null -ne $SelAcao) },
-                @{ Acao = 'usar'; Texto = 'USAR NUMA IMPRESSORA JÁ CADASTRADA'; Cor = $Script:UiAzul; Desc = "Escolha uma impressora deste PC: ela passa a imprimir em $($PcAcao.IP), sem refazer a impressora."; Liga = $true },
+                @{ Acao = 'usar'; Texto = 'USAR EM UMA IMPRESSORA JÁ CADASTRADA'; Cor = $Script:UiAzul; Desc = "Escolha uma impressora deste PC: ela passa a imprimir em $($PcAcao.IP), sem refazer a impressora."; Liga = $true },
                 @{ Acao = 'nova'; Texto = 'CRIAR IMPRESSORA NOVA'; Cor = $Script:UiCinza; Desc = "Cria neste PC uma impressora LPR compartilhada que imprime em $($PcAcao.IP)."; Liga = $true })
             $yA = 52
             foreach ($opA in $opcoesA) {
                 $btnA = New-ToolButton $dlgA $opA.Texto 20 $yA 500 40 $opA.Cor $null ""
-                $btnA.Tag = $opA.Acao
+                # a opcao vai no Name: o Tag do botao e do desenho (normal / hover / down) e muda com o mouse
+                $btnA.Name = "acao_$($opA.Acao)"
                 $btnA.Enabled = $opA.Liga
-                $btnA.Add_Click({ $dlgA.Tag = "$($this.Tag)"; $dlgA.DialogResult = 'OK'; $dlgA.Close() })
+                $btnA.Add_Click({ $dlgA.Tag = ("$($this.Name)" -replace '^acao_', ''); $dlgA.DialogResult = 'OK'; $dlgA.Close() })
                 $lblA = New-ToolLabel $dlgA $opA.Desc 22 ($yA + 44) 8.5 -Cor $Script:UiSuave -W 500
                 $lblA.Height = 32
                 $yA += 84
@@ -16231,7 +16232,7 @@ function Show-PortasLpr {
         # Impressora ja cadastrada neste PC que vai imprimir no PC encontrado. Devolve Impressora / Fila ou $null.
         $pedirUsarLpr = {
             param($PcUsar, [string]$FilaInicial, [string]$ImpressoraInicial = "")
-            $dlgU = New-ToolForm "Usar numa impressora já cadastrada" 600 480
+            $dlgU = New-ToolForm "Usar em uma impressora já cadastrada" 600 480
             $dlgU.FormBorderStyle = 'FixedDialog'
             $dlgU.MaximizeBox = $false
             $dlgU.MinimizeBox = $false
@@ -16277,7 +16278,7 @@ function Show-PortasLpr {
                 if ($lvU.SelectedItems.Count -eq 0) { return }
                 $filaU = $txtFilaU.Text.Trim()
                 if ($filaU -eq "" -or $filaU -match '[\s:\\/]') {
-                    [System.Windows.Forms.MessageBox]::Show($dlgU, "Digite o nome do compartilhamento da impressora no PC $($PcUsar.IP), sem espaço, dois-pontos ou barra (ex.: caixa2).", "Usar numa impressora já cadastrada", "OK", "Warning") | Out-Null
+                    [System.Windows.Forms.MessageBox]::Show($dlgU, "Digite o nome do compartilhamento da impressora no PC $($PcUsar.IP), sem espaço, dois-pontos ou barra (ex.: caixa2).", "Usar em uma impressora já cadastrada", "OK", "Warning") | Out-Null
                     return
                 }
                 $dlgU.Tag = @{ Impressora = "$($lvU.SelectedItems[0].Tag)"; Fila = $filaU }
@@ -16294,7 +16295,7 @@ function Show-PortasLpr {
             return $escolhaU
         }
 
-        # USAR NUMA IMPRESSORA JA CADASTRADA: a impressora escolhida passa para a porta do PC encontrado
+        # USAR EM UMA IMPRESSORA JA CADASTRADA: a impressora escolhida passa para a porta do PC encontrado
         $usarImpressoraLpr = {
             param($PcUsar, $SelUsar)
             $filaIni = "IMPRESSORA"
@@ -16457,7 +16458,7 @@ function Show-PortasLpr {
                 if ($null -eq $pc) { return }
                 $selLpr = $null
                 if ($lvLpr.SelectedItems.Count -gt 0) { $selLpr = $lvLpr.SelectedItems[0].Tag }
-                # O que fazer com o PC escolhido: corrigir a porta selecionada, usar numa impressora ja cadastrada ou criar nova
+                # O que fazer com o PC escolhido: corrigir a porta selecionada, usar em uma impressora ja cadastrada ou criar nova
                 $acaoPc = & $escolherAcaoLpr $pc $selLpr
                 Log-Message "INFO" "LPR: PC $($pc.IP) escolhido na varredura; ação: $(if ($acaoPc) { $acaoPc } else { 'cancelou' })"
                 switch ("$acaoPc") {
@@ -17584,7 +17585,7 @@ function Show-PrinterManager {
         $lv.Add_DoubleClick({
             if ($lv.SelectedItems.Count -gt 0 -and "$($lv.SelectedItems[0].Tag.Tipo)" -eq "LPR") { & $abrirPortasLprLocal }
         })
-        if ($Script:ToolTip) { $Script:ToolTip.SetToolTip($btnLprLocal, "Abre as portas LPR já com a impressora LPR selecionada: troca o IP, acha o PC pelo MAC, imprime teste e remove portas sem uso. Dois cliques numa impressora LPR fazem o mesmo.") }
+        if ($Script:ToolTip) { $Script:ToolTip.SetToolTip($btnLprLocal, "Abre as portas LPR já com a impressora LPR selecionada: troca o IP, acha o PC pelo MAC, imprime teste e remove portas sem uso. Dois cliques em uma impressora LPR fazem o mesmo.") }
         [void]$pnlLocal.Controls.Add($btnLprLocal)
 
         $btnSpool = New-Object System.Windows.Forms.Button
@@ -19953,7 +19954,7 @@ $formWidth = if ($screen.Width -lt 1000) { 900 } else { 1000 }
 $formHeight = if ($screen.Height -lt 800) { 700 } else { 800 }
 
 $form = New-Object System.Windows.Forms.Form
-$form.Text = "Preparador XMenu – Suporte Técnico v5.53 - REVENDA"
+$form.Text = "Preparador XMenu – Suporte Técnico v5.54 - REVENDA"
 $form.Size = New-Object System.Drawing.Size($formWidth, $formHeight)
 $form.StartPosition = "CenterScreen"
 $form.BackColor = [System.Drawing.Color]::FromArgb(25, 25, 30); $form.ForeColor = 'White'
@@ -20821,7 +20822,7 @@ $bClock.Add_Click({ Invoke-ClockSync })
 [void]$tbl.Controls.Add($bClock)
 
 # Mensagem de abertura: explica o programa para quem abre pela primeira vez
-Log-Message "INFO" "Preparador XMenu v5.53 - REVENDA - preparo e suporte de computadores com XMenu e NetPDV"
+Log-Message "INFO" "Preparador XMenu v5.54 - REVENDA - preparo e suporte de computadores com XMenu e NetPDV"
 Log-Message "LOG" "==============================================================="
 Log-Message "LOG" "COMO USAR"
 Log-Message "LOG" "  PREPARAR AMBIENTE WINDOWS .. ajusta energia, UAC e desempenho do PC num clique"
@@ -20831,11 +20832,12 @@ Log-Message "LOG" "  EXTERNOS ................... acesso remoto, Chrome, TEF HUB
 Log-Message "LOG" "  SUPORTE E DIAGNÓSTICO ...... impressoras, rede, SQL, backup, XMLs e reparos do Windows"
 Log-Message "LOG" "  Passe o mouse sobre um botão para ver o que ele faz antes de clicar."
 Log-Message "LOG" "---------------------------------------------------------------"
-Log-Message "LOG" "NOVO NA v5.53"
+Log-Message "LOG" "NOVO NA v5.54"
+Log-Message "SUCESSO" "  LPR: na tela O que fazer com este PC, os botões USAR EM UMA IMPRESSORA JÁ CADASTRADA, CRIAR IMPRESSORA NOVA e CORRIGIR A PORTA SELECIONADA voltaram a funcionar (com o mouse por cima o clique se perdia)"
 Log-Message "SUCESSO" "  Janelas (correção da v5.52): minimizar uma janela aberta por cima da principal (XMLs, Backup, LPR, Impressoras...) não fecha mais a janela nem perde o que estava nela; minimizada, ela volta sozinha ao clicar na principal ou no programa na barra de tarefas"
 Log-Message "SUCESSO" "  Externos: novo botão TeamViewer com senha (QuickSupport de atendimento da NetControll)"
 Log-Message "SUCESSO" "  PREPARAR AMBIENTE WINDOWS pede confirmação antes de começar (o Não vem marcado, para um clique sem querer não disparar)"
-Log-Message "SUCESSO" "  LPR mais fácil: ao abrir a janela, a impressora que parou é procurada pelo MAC do PC e aparece um aviso com CORRIGIR AGORA (troca a porta e oferece a folha de teste); o PROCURAR NA REDE, depois de escolher o PC, pergunta se é para corrigir a porta selecionada, usar numa impressora já cadastrada (sem refazer a impressora) ou criar uma nova"
+Log-Message "SUCESSO" "  LPR mais fácil: ao abrir a janela, a impressora que parou é procurada pelo MAC do PC e aparece um aviso com CORRIGIR AGORA (troca a porta e oferece a folha de teste); o PROCURAR NA REDE, depois de escolher o PC, pergunta se é para corrigir a porta selecionada, usar em uma impressora já cadastrada (sem refazer a impressora) ou criar uma nova"
 Log-Message "SUCESSO" "  LPR: impressora repetida nas Configurações do Windows depois de trocar o IP: a troca já apaga o registro de dispositivo que sobrou, e o LIMPAR SEM USO arruma as que já estão repetidas (a impressora e o spooler não são mexidos)"
 Log-Message "SUCESSO" "  LPR: trocar o IP da porta TCP/IP padrão (a LPR do Windows novo) cria a porta nova IP:compartilhamento, passa a impressora para ela e apaga a antiga, em vez de só mudar o IP por dentro; a porta que ficou com o IP velho no nome aparece em amarelo e o TROCAR IP (já com o IP certo) corrige"
 Log-Message "SUCESSO" "  Backup: nome novo e igual para o .bak, o .zip e o .zip do BACKUP MANUAL: Backup NetWebPDV - Loja 110 - 28-09-2026 16h36 (sem ID da loja, entra sem ID; sai o ZIP e o nome da máquina); o Restaurar Backup continua lendo os nomes antigos"
