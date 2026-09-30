@@ -1,6 +1,6 @@
 ﻿# =============================================================================
 # PREPARADOR XMENU - VERSAO REVENDA
-# Baseado na v5.50
+# Baseado na v5.51
 # Alteracoes Revenda:
 #   - Wallpaper: fundo_revenda.png
 #   - Removido: Atalhos de Suporte e Pasta Netcontroll
@@ -15202,14 +15202,60 @@ function New-ImpressoraLpr {
     }
     # Driver antes da porta: se nao instalar, nao sobra porta sem impressora
     $driverInstalado = Install-DriverWindows -Driver $Driver
+    $portaNova = New-PortaLprSeFaltar -Servidor $Servidor -Fila $Fila
+    Add-Printer -Name $Nome -DriverName $Driver -PortName $portaNova.Porta -ErrorAction Stop
+    return @{ Porta = $portaNova.Porta; Impressora = $Nome; PortaJaExistia = $portaNova.JaExistia; DriverInstalado = $driverInstalado }
+}
+
+function New-PortaLprSeFaltar {
+    # Porta LPR "IP:FILA" pelo spooler (sem reiniciar nada), se ainda nao existir. Devolve hashtable: Porta / JaExistia
+    param([string]$Servidor, [string]$Fila)
     $porta = $Servidor + ":" + $Fila
     $jaExistia = ($null -ne (Get-PrinterPort -Name $porta -ErrorAction SilentlyContinue))
     if (-not $jaExistia) {
         try { Add-PrinterPort -Name $porta -LprHostAddress $Servidor -LprQueueName $Fila -SNMP 0 -LprByteCounting -ErrorAction Stop }
         catch { Add-PrinterPort -Name $porta -LprHostAddress $Servidor -LprQueueName $Fila -SNMP 0 -ErrorAction Stop }
     }
-    Add-Printer -Name $Nome -DriverName $Driver -PortName $porta -ErrorAction Stop
-    return @{ Porta = $porta; Impressora = $Nome; PortaJaExistia = $jaExistia; DriverInstalado = $driverInstalado }
+    return @{ Porta = $porta; JaExistia = $jaExistia }
+}
+
+function Get-ImpressorasParaLpr {
+    # Impressoras deste PC que podem passar a imprimir por uma porta LPR: fica de fora a de outro PC (\\PC\impressora) e
+    # a virtual (PDF, XPS, OneNote, Fax, AnyDesk, arquivo). Devolve Nome / Porta, em ordem de nome.
+    $listaImp = @()
+    foreach ($impL in @(Get-Printer -ErrorAction Stop)) {
+        $nomeL = "$($impL.Name)"
+        $portaL = "$($impL.PortName)"
+        if ($nomeL.StartsWith('\\') -or "$($impL.Type)" -eq 'Connection') { continue }
+        if ((Get-TipoPortaImpressora -Porta $portaL) -eq 'Virtual') { continue }
+        if ("$($impL.DriverName)" -match '^(Microsoft (Print To PDF|XPS Document Writer)|Send to Microsoft OneNote|Microsoft Shared Fax|AnyDesk)') { continue }
+        $listaImp += [pscustomobject]@{ Nome = $nomeL; Porta = $portaL }
+    }
+    return @($listaImp | Sort-Object Nome)
+}
+
+function Set-ImpressoraNaPortaLpr {
+    # Poe uma impressora ja cadastrada neste PC para imprimir no PC da impressora USB, pela porta LPR "IP:FILA" (criada se
+    # faltar), sem refazer a impressora. A porta de antes sai se era LPR e ficou sem nenhuma impressora.
+    # Se o Windows nao deixar trocar, a porta criada agora e apagada e o erro sobe.
+    # Devolve hashtable: Porta / PortaAntiga / PortaJaExistia / AntigaRemovida
+    param([string]$Impressora, [string]$Servidor, [string]$Fila)
+    $impAtual = @(Get-Printer -Name $Impressora -ErrorAction Stop)[0]
+    $portaAntiga = "$($impAtual.PortName)"
+    $portaNova = New-PortaLprSeFaltar -Servidor $Servidor -Fila $Fila
+    $res = @{ Porta = $portaNova.Porta; PortaAntiga = $portaAntiga; PortaJaExistia = $portaNova.JaExistia; AntigaRemovida = $false }
+    if ($portaAntiga -eq $portaNova.Porta) { return $res }
+    try { Set-Printer -Name $Impressora -PortName $portaNova.Porta -ErrorAction Stop }
+    catch {
+        if (-not $portaNova.JaExistia) { try { Remove-PrinterPort -Name $portaNova.Porta -ErrorAction Stop } catch {} }
+        throw
+    }
+    $portasLprAqui = @(@(Get-PortasLpr) + @(Get-PortasLprTcp) | ForEach-Object { $_.Porta })
+    $aindaUsada = @(Get-Printer -ErrorAction SilentlyContinue | Where-Object { $_.PortName -eq $portaAntiga }).Count -gt 0
+    if ($portaAntiga -ne "" -and $portasLprAqui -contains $portaAntiga -and -not $aindaUsada) {
+        try { Remove-PrinterPort -Name $portaAntiga -ErrorAction Stop; Remove-LprMac -Portas @($portaAntiga); $res.AntigaRemovida = $true } catch {}
+    }
+    return $res
 }
 
 function Install-DriverWindows {
@@ -15756,7 +15802,7 @@ function Show-PortasLpr {
 
         $btnLprMac = New-ToolButton $f "ATUALIZAR IP PELO MAC" 20 350 220 34 $Script:UiVerde $null "Procura na rede o PC da impressora pelo MAC guardado e corrige a porta para o IP atual dele"
         $btnLprTrocar = New-ToolButton $f "TROCAR IP..." 250 350 140 34 $Script:UiAzul $null "Digitar o IP novo do PC da impressora"
-        $btnLprProcurar = New-ToolButton $f "PROCURAR NA REDE" 400 350 180 34 $Script:UiCinza $null "Lista os PCs da rede com o LPD ativo (porta 515) para escolher"
+        $btnLprProcurar = New-ToolButton $f "PROCURAR NA REDE" 400 350 180 34 $Script:UiCinza $null "Lista os PCs da rede com o LPD ativo (porta 515). Depois de escolher o PC: corrigir a porta selecionada, usar numa impressora já cadastrada ou criar uma nova"
         $btnLprRecarregar = New-ToolButton $f "RECARREGAR" 590 350 130 34 $Script:UiCinza $null "Lê as portas de novo e testa se cada PC responde"
         $btnLprFechar = New-ToolButton $f "FECHAR" 744 350 100 34 $Script:UiCinza $null "Fecha esta janela"
         $btnLprNova = New-ToolButton $f "NOVA LPR COMPARTILHADA" 20 392 220 34 $Script:UiAzul $null "Cria a porta LPR compartilhada e a impressora neste PC de uma vez, sem o assistente do Windows"
@@ -15769,7 +15815,7 @@ function Show-PortasLpr {
         $lblLprStatus = New-ToolLabel $f "" 20 436 9.5 -Negrito -W 824
         $lblLprStatus.Height = 40
         $lblLprStatus.Anchor = 'Bottom,Left,Right'
-        $lblLprAjuda = New-ToolLabel $f "Como usar: selecione a porta que parou e clique em ATUALIZAR IP PELO MAC. O MAC do PC da impressora é guardado sozinho sempre que a porta está funcionando; se ainda não tiver MAC guardado, use PROCURAR NA REDE ou TROCAR IP. A troca reinicia o spooler de impressão deste PC. Portas sem impressora e impressora repetida no Windows saem com LIMPAR SEM USO." 20 478 8.5 -Cor $Script:UiSuave -W 824
+        $lblLprAjuda = New-ToolLabel $f "Como usar: ao abrir, a janela já procura pelo MAC o PC da impressora que parou e oferece CORRIGIR AGORA. Sem MAC guardado, use PROCURAR NA REDE: escolha o PC e depois corrija a porta, use numa impressora já cadastrada ou crie uma nova. A troca reinicia o spooler deste PC. Portas sem impressora e impressora repetida no Windows saem com LIMPAR SEM USO." 20 478 8.5 -Cor $Script:UiSuave -W 824
         $lblLprAjuda.Height = 44
         $lblLprAjuda.Anchor = 'Bottom,Left,Right'
 
@@ -15894,7 +15940,10 @@ function Show-PortasLpr {
                 }
                 elseif ($semResposta.Count -gt 0) {
                     $semResposta[0].Selected = $true
-                    & $statusLpr ("$($semResposta.Count) porta(s) com impressora sem resposta. Selecione e clique em ATUALIZAR IP PELO MAC." + $avisoSemUso) $Script:UiVermelho
+                    if (@($semResposta | Where-Object { "$($_.Tag.Mac)" -ne "" }).Count -eq 0) {
+                        & $statusLpr ("$($semResposta.Count) porta(s) com impressora sem resposta e sem MAC guardado: clique em PROCURAR NA REDE e escolha o PC da impressora." + $avisoSemUso) $Script:UiVermelho
+                    }
+                    else { & $statusLpr ("$($semResposta.Count) porta(s) com impressora sem resposta. Selecione e clique em ATUALIZAR IP PELO MAC." + $avisoSemUso) $Script:UiVermelho }
                 }
                 elseif ($nomeVelho.Count -gt 0) {
                     $nomeVelho[0].Selected = $true
@@ -16070,6 +16119,209 @@ function Show-PortasLpr {
             return $pcEscolhido
         }
 
+        # Ao abrir: impressora parada com o MAC do PC guardado. Procura o PC pelo MAC e, se ele responde em outro IP, oferece
+        # corrigir num clique (e imprimir teste). So entra o IP que responde no LPD, para nao apontar para outro aparelho.
+        $autoCorrigirLpr = {
+            $paradas = @($lvLpr.Items | Where-Object { -not $_.Tag.NoAr -and @($_.Tag.Impressoras).Count -gt 0 -and "$($_.Tag.Mac)" -ne "" } | ForEach-Object { $_.Tag })
+            if ($paradas.Count -eq 0) { return }
+            $correcoes = @()
+            & $travarLpr $true
+            try {
+                & $statusLpr "Impressora parada: procurando o PC dela na rede pelo MAC..." $Script:UiAmarelo
+                Log-Message "INFO" "LPR: ao abrir, $($paradas.Count) impressora(s) parada(s) com o MAC do PC guardado; procurando cada PC pelo MAC"
+                Invoke-AcordarRede -Subredes (Get-SubredesLocais)
+                $tabelaAuto = @(ConvertFrom-TabelaArp -Linhas (arp -a))
+                foreach ($pa in $paradas) {
+                    $candAuto = @(Find-IpPorMac -Mac $pa.Mac -Tabela $tabelaAuto | Where-Object { $_ -ne $pa.Servidor })
+                    $respAuto = @()
+                    if ($candAuto.Count -gt 0) { $respAuto = @(Test-PortaVarios -Ips $candAuto -Porta $portaLpd -TimeoutMs 1200) }
+                    if ($respAuto.Count -gt 0) {
+                        $correcoes += [pscustomobject]@{ Sel = $pa; Ip = "$($respAuto[0])" }
+                        Log-Message "INFO" "LPR: o PC da porta $($pa.Porta) (MAC $($pa.Mac)) agora está no IP $($respAuto[0]) e responde no LPD"
+                    }
+                    else { Log-Message "INFO" "LPR: não achei o PC da porta $($pa.Porta) (MAC $($pa.Mac)) respondendo em outro IP" }
+                }
+            }
+            catch { Log-Message "ERRO" "LPR: falha ao procurar pelo MAC ao abrir - $($_.Exception.Message)" }
+            finally { & $travarLpr $false }
+            if ($correcoes.Count -eq 0) {
+                & $statusLpr "Impressora parada e não achei o PC dela pelo MAC em outro IP: confira se o PC está ligado e na rede, ou use PROCURAR NA REDE." $Script:UiVermelho
+                return
+            }
+            $itensAuto = @($correcoes | ForEach-Object { @{ Tipo = 'ok'; Titulo = (@($_.Sel.Impressoras) -join ', ').ToUpper(); Texto = "O PC da impressora mudou de $($_.Sel.Servidor) para $($_.Ip) (achado pelo MAC $($_.Sel.Mac)).`r`nA porta $($_.Sel.Porta) vira $($_.Ip):$($_.Sel.Fila)." } })
+            $mancheteAuto = "$($correcoes.Count) IMPRESSORAS PARARAM: OS PCs DELAS MUDARAM DE IP"
+            if ($correcoes.Count -eq 1) { $mancheteAuto = "A IMPRESSORA $((@($correcoes[0].Sel.Impressoras) -join ', ').ToUpper()) PAROU: O PC DELA MUDOU DE IP" }
+            $resumoAuto = "O Preparador achou o PC pela rede. CORRIGIR AGORA troca a porta para o IP novo; o spooler de impressão deste PC é reiniciado."
+            $confirmouAuto = $false
+            try {
+                $respAv = @(Show-AvisoDestaque -Dono $f -Titulo "LPR Compartilhada" -Manchete $mancheteAuto -Resumo $resumoAuto -Tipo 'aviso' -Itens $itensAuto -TextoSim "CORRIGIR AGORA" -TextoNao "DEPOIS" -CorSim $Script:UiVerde)
+                $confirmouAuto = ($respAv.Count -gt 0 -and $respAv[-1] -eq $true)
+            }
+            catch {
+                $textoAuto = "$mancheteAuto`r`n`r`n" + ((@($itensAuto | ForEach-Object { "$($_.Titulo): $($_.Texto)" })) -join "`r`n`r`n") + "`r`n`r`nCorrigir agora?"
+                $confirmouAuto = ([System.Windows.Forms.MessageBox]::Show($f, $textoAuto, "LPR Compartilhada", "YesNo", "Question") -eq [System.Windows.Forms.DialogResult]::Yes)
+            }
+            if (-not $confirmouAuto) {
+                Log-Message "CANCEL" "LPR: o técnico deixou a correção pelo MAC para depois"
+                & $statusLpr "Correção deixada para depois: selecione a porta e clique em ATUALIZAR IP PELO MAC quando quiser." $Script:UiAmarelo
+                return
+            }
+            $corrigidasAuto = @()
+            foreach ($cAuto in $correcoes) {
+                & $aplicarLpr $cAuto.Sel $cAuto.Ip $cAuto.Sel.Mac
+                $corrigidasAuto += @($cAuto.Sel.Impressoras)
+            }
+            $rTesteAuto = [System.Windows.Forms.MessageBox]::Show($f, "Porta(s) corrigida(s).`r`n`r`nImprimir uma folha de teste agora em $($corrigidasAuto -join ', ')?", "LPR Compartilhada", "YesNo", "Question")
+            if ($rTesteAuto -eq [System.Windows.Forms.DialogResult]::Yes) {
+                foreach ($impTeste in $corrigidasAuto) {
+                    try { Send-TesteImpressao -Impressora $impTeste -Detalhe "Porta corrigida pelo MAC"; Log-Message "INFO" "LPR: teste enviado para $impTeste" }
+                    catch { & $statusLpr "Não foi possível enviar o teste para $($impTeste): $($_.Exception.Message)" $Script:UiVermelho }
+                }
+            }
+        }
+
+        # Depois de escolher o PC na varredura: corrigir a porta selecionada, usar numa impressora ja cadastrada ou criar
+        # uma nova. Devolve 'corrigir' / 'usar' / 'nova' ou $null.
+        $escolherAcaoLpr = {
+            param($PcAcao, $SelAcao)
+            $dlgA = New-ToolForm "O que fazer com este PC" 560 400
+            $dlgA.FormBorderStyle = 'FixedDialog'
+            $dlgA.MaximizeBox = $false
+            $dlgA.MinimizeBox = $false
+            $nomePcA = "$($PcAcao.IP)"
+            if ("$($PcAcao.Nome)" -ne "") { $nomePcA = "$nomePcA ($($PcAcao.Nome))" }
+            New-ToolLabel $dlgA "PC da impressora: $nomePcA" 20 16 10.5 -Negrito -W 500 | Out-Null
+            $descCorrigir = "Selecione antes, na lista, a porta que parou."
+            if ($null -ne $SelAcao) { $descCorrigir = "A porta $($SelAcao.Porta) passa a imprimir em $($PcAcao.IP). A impressora continua a mesma." }
+            $opcoesA = @(
+                @{ Acao = 'corrigir'; Texto = 'CORRIGIR A PORTA SELECIONADA'; Cor = $Script:UiVerde; Desc = $descCorrigir; Liga = ($null -ne $SelAcao) },
+                @{ Acao = 'usar'; Texto = 'USAR NUMA IMPRESSORA JÁ CADASTRADA'; Cor = $Script:UiAzul; Desc = "Escolha uma impressora deste PC: ela passa a imprimir em $($PcAcao.IP), sem refazer a impressora."; Liga = $true },
+                @{ Acao = 'nova'; Texto = 'CRIAR IMPRESSORA NOVA'; Cor = $Script:UiCinza; Desc = "Cria neste PC uma impressora LPR compartilhada que imprime em $($PcAcao.IP)."; Liga = $true })
+            $yA = 52
+            foreach ($opA in $opcoesA) {
+                $btnA = New-ToolButton $dlgA $opA.Texto 20 $yA 500 40 $opA.Cor $null ""
+                $btnA.Tag = $opA.Acao
+                $btnA.Enabled = $opA.Liga
+                $btnA.Add_Click({ $dlgA.Tag = "$($this.Tag)"; $dlgA.DialogResult = 'OK'; $dlgA.Close() })
+                $lblA = New-ToolLabel $dlgA $opA.Desc 22 ($yA + 44) 8.5 -Cor $Script:UiSuave -W 500
+                $lblA.Height = 32
+                $yA += 84
+            }
+            $btnCancA = New-ToolButton $dlgA "CANCELAR" 430 $yA 90 32 $Script:UiCinza $null ""
+            $btnCancA.Add_Click({ $dlgA.DialogResult = 'Cancel'; $dlgA.Close() })
+            $dlgA.CancelButton = $btnCancA
+            $acaoEscolhida = $null
+            if ($dlgA.ShowDialog($f) -eq [System.Windows.Forms.DialogResult]::OK) { $acaoEscolhida = "$($dlgA.Tag)" }
+            $dlgA.Dispose()
+            return $acaoEscolhida
+        }
+
+        # Impressora ja cadastrada neste PC que vai imprimir no PC encontrado. Devolve Impressora / Fila ou $null.
+        $pedirUsarLpr = {
+            param($PcUsar, [string]$FilaInicial, [string]$ImpressoraInicial = "")
+            $dlgU = New-ToolForm "Usar numa impressora já cadastrada" 600 480
+            $dlgU.FormBorderStyle = 'FixedDialog'
+            $dlgU.MaximizeBox = $false
+            $dlgU.MinimizeBox = $false
+            $nomePcU = "$($PcUsar.IP)"
+            if ("$($PcUsar.Nome)" -ne "") { $nomePcU = "$nomePcU ($($PcUsar.Nome))" }
+            New-ToolLabel $dlgU "PC da impressora: $nomePcU" 20 16 10.5 -Negrito -W 540 | Out-Null
+            New-ToolLabel $dlgU "Nome do compartilhamento no PC da impressora (fila):" 20 50 9.5 | Out-Null
+            $txtFilaU = New-Object System.Windows.Forms.TextBox
+            $txtFilaU.Location = New-Object System.Drawing.Point(20, 74)
+            $txtFilaU.Size = New-Object System.Drawing.Size(300, 26)
+            $txtFilaU.BackColor = [System.Drawing.Color]::FromArgb(20, 24, 34)
+            $txtFilaU.ForeColor = $Script:UiTexto
+            $txtFilaU.BorderStyle = 'FixedSingle'
+            $txtFilaU.Font = New-Object System.Drawing.Font("Segoe UI", 10)
+            $txtFilaU.Text = $FilaInicial
+            [void]$dlgU.Controls.Add($txtFilaU)
+            New-ToolLabel $dlgU "Impressora deste PC que vai imprimir nesse PC:" 20 114 9.5 | Out-Null
+            $lvU = New-Object System.Windows.Forms.ListView
+            $lvU.Location = New-Object System.Drawing.Point(20, 138)
+            $lvU.Size = New-Object System.Drawing.Size(544, 196)
+            $lvU.MultiSelect = $false
+            Format-ToolListView $lvU
+            [void]$lvU.Columns.Add("Impressora", 300)
+            [void]$lvU.Columns.Add("Porta de agora", 220)
+            $impsU = @()
+            try { $impsU = @(Get-ImpressorasParaLpr) } catch { Log-Message "ERRO" "LPR: não consegui ler as impressoras deste PC - $($_.Exception.Message)" }
+            foreach ($iu in $impsU) {
+                $itU = New-Object System.Windows.Forms.ListViewItem($iu.Nome)
+                [void]$itU.SubItems.Add($iu.Porta)
+                $itU.Tag = $iu.Nome
+                [void]$lvU.Items.Add($itU)
+                if ($iu.Nome -eq $ImpressoraInicial) { $itU.Selected = $true }
+            }
+            if ($lvU.SelectedItems.Count -eq 0 -and $lvU.Items.Count -gt 0) { $lvU.Items[0].Selected = $true }
+            [void]$dlgU.Controls.Add($lvU)
+            $lblDicaU = New-ToolLabel $dlgU "A impressora passa a usar a porta IP:fila deste PC da impressora. Se a porta de antes era LPR e ficou sem uso, ela sai sozinha." 20 342 8.5 -Cor $Script:UiSuave -W 544
+            $lblDicaU.Height = 34
+            if ($lvU.Items.Count -eq 0) { $lblDicaU.ForeColor = $Script:UiAmarelo; $lblDicaU.Text = "Nenhuma impressora deste PC pode receber a porta (só há impressoras virtuais ou de outro PC). Use CRIAR IMPRESSORA NOVA." }
+            $btnOkU = New-ToolButton $dlgU "USAR ESTA IMPRESSORA" 304 386 170 34 $Script:UiVerde $null ""
+            $btnCancU = New-ToolButton $dlgU "CANCELAR" 484 386 80 34 $Script:UiCinza $null ""
+            $btnOkU.Enabled = ($lvU.Items.Count -gt 0)
+            $usarU = {
+                if ($lvU.SelectedItems.Count -eq 0) { return }
+                $filaU = $txtFilaU.Text.Trim()
+                if ($filaU -eq "" -or $filaU -match '[\s:\\/]') {
+                    [System.Windows.Forms.MessageBox]::Show($dlgU, "Digite o nome do compartilhamento da impressora no PC $($PcUsar.IP), sem espaço, dois-pontos ou barra (ex.: caixa2).", "Usar numa impressora já cadastrada", "OK", "Warning") | Out-Null
+                    return
+                }
+                $dlgU.Tag = @{ Impressora = "$($lvU.SelectedItems[0].Tag)"; Fila = $filaU }
+                $dlgU.DialogResult = 'OK'
+                $dlgU.Close()
+            }
+            $btnOkU.Add_Click($usarU)
+            $lvU.Add_DoubleClick($usarU)
+            $btnCancU.Add_Click({ $dlgU.DialogResult = 'Cancel'; $dlgU.Close() })
+            $dlgU.CancelButton = $btnCancU
+            $escolhaU = $null
+            if ($dlgU.ShowDialog($f) -eq [System.Windows.Forms.DialogResult]::OK) { $escolhaU = $dlgU.Tag }
+            $dlgU.Dispose()
+            return $escolhaU
+        }
+
+        # USAR NUMA IMPRESSORA JA CADASTRADA: a impressora escolhida passa para a porta do PC encontrado
+        $usarImpressoraLpr = {
+            param($PcUsar, $SelUsar)
+            $filaIni = "IMPRESSORA"
+            $impIni = ""
+            if ($null -ne $SelUsar) {
+                if ("$($SelUsar.Fila)" -ne "") { $filaIni = "$($SelUsar.Fila)" }
+                if (@($SelUsar.Impressoras).Count -gt 0) { $impIni = "$(@($SelUsar.Impressoras)[0])" }
+            }
+            $escolhaUsar = & $pedirUsarLpr $PcUsar $filaIni $impIni
+            if ($null -eq $escolhaUsar) { return }
+            $resUsar = $null
+            & $travarLpr $true
+            try {
+                & $statusLpr "Colocando a impressora $($escolhaUsar.Impressora) na porta $($PcUsar.IP):$($escolhaUsar.Fila)..." $Script:UiAmarelo
+                $resUsar = Set-ImpressoraNaPortaLpr -Impressora $escolhaUsar.Impressora -Servidor $PcUsar.IP -Fila $escolhaUsar.Fila
+                if ("$($PcUsar.Mac)" -ne "") { Save-LprMac -Porta $resUsar.Porta -Mac $PcUsar.Mac }
+                Log-Message "SUCESSO" "LPR: a impressora $($escolhaUsar.Impressora) agora imprime na porta $($resUsar.Porta) (antes: $($resUsar.PortaAntiga))$(if ($resUsar.AntigaRemovida) { '; a porta de antes ficou sem uso e foi removida' })"
+            }
+            catch {
+                Log-Message "ERRO" "LPR: falha ao colocar a impressora $($escolhaUsar.Impressora) na porta $($PcUsar.IP):$($escolhaUsar.Fila) - $($_.Exception.Message)"
+                [System.Windows.Forms.MessageBox]::Show($f, "Não foi possível colocar a impressora $($escolhaUsar.Impressora) nessa porta:`r`n`r`n$($_.Exception.Message)", "Portas LPR", "OK", "Error") | Out-Null
+            }
+            finally { & $travarLpr $false }
+            if ($null -eq $resUsar) { return }
+            $textoRepUsar = & $limparRepetidasLpr @($escolhaUsar.Impressora)
+            & $carregarLpr $resUsar.Porta
+            $textoFimUsar = "A impressora $($escolhaUsar.Impressora) agora imprime no PC $($PcUsar.IP) (porta $($resUsar.Porta))."
+            if ($textoRepUsar -ne "") { $textoFimUsar = "$textoFimUsar $textoRepUsar" }
+            & $statusLpr $textoFimUsar $Script:UiVerde
+            $rTesteUsar = [System.Windows.Forms.MessageBox]::Show($f, "A impressora $($escolhaUsar.Impressora) agora imprime no PC $($PcUsar.IP).`r`n`r`nImprimir uma folha de teste agora?", "Portas LPR", "YesNo", "Question")
+            if ($rTesteUsar -eq [System.Windows.Forms.DialogResult]::Yes) {
+                try {
+                    Send-TesteImpressao -Impressora $escolhaUsar.Impressora -Detalhe "Porta: $($resUsar.Porta)"
+                    & $statusLpr "Teste enviado para $($escolhaUsar.Impressora). Se não sair, confira no PC $($PcUsar.IP) se a impressora está ligada e compartilhada como $($escolhaUsar.Fila)." $Script:UiVerde
+                }
+                catch { & $statusLpr "Não foi possível enviar o teste: $($_.Exception.Message)" $Script:UiVermelho }
+            }
+        }
+
         # ---------------------------------------------------------------------
         # EVENTOS
         # ---------------------------------------------------------------------
@@ -16191,14 +16443,19 @@ function Show-PortasLpr {
                 if ($achados.Count -eq 0) { return }
                 $pc = & $escolherPcLpr $achados
                 if ($null -eq $pc) { return }
-                # Sem porta para corrigir (PC ainda sem impressora LPR): cria a impressora com o PC escolhido
-                if ($lvLpr.SelectedItems.Count -eq 0) { & $criarNovaLpr $pc.IP; return }
-                $selLpr = $lvLpr.SelectedItems[0].Tag
-                if ($pc.IP -eq $selLpr.Servidor -and -not (Test-NomePortaLprDesatualizado -Porta $selLpr.Porta -Servidor $selLpr.Servidor)) { & $statusLpr "A porta $($selLpr.Porta) já aponta para $($pc.IP)." $Script:UiAmarelo; return }
-                $r = [System.Windows.Forms.MessageBox]::Show($f,
-                    "Trocar a porta $($selLpr.Porta) para o PC $($pc.IP)$(if ($pc.Nome) { " ($($pc.Nome))" })?`r`n`r`nO spooler de impressão deste PC será reiniciado.",
-                    "Portas LPR", "YesNo", "Question")
-                if ($r -eq [System.Windows.Forms.DialogResult]::Yes) { & $aplicarLpr $selLpr $pc.IP $pc.Mac }
+                $selLpr = $null
+                if ($lvLpr.SelectedItems.Count -gt 0) { $selLpr = $lvLpr.SelectedItems[0].Tag }
+                # O que fazer com o PC escolhido: corrigir a porta selecionada, usar numa impressora ja cadastrada ou criar nova
+                $acaoPc = & $escolherAcaoLpr $pc $selLpr
+                Log-Message "INFO" "LPR: PC $($pc.IP) escolhido na varredura; ação: $(if ($acaoPc) { $acaoPc } else { 'cancelou' })"
+                switch ("$acaoPc") {
+                    'corrigir' {
+                        if ($pc.IP -eq $selLpr.Servidor -and -not (Test-NomePortaLprDesatualizado -Porta $selLpr.Porta -Servidor $selLpr.Servidor)) { & $statusLpr "A porta $($selLpr.Porta) já aponta para $($pc.IP)." $Script:UiAmarelo; return }
+                        & $aplicarLpr $selLpr $pc.IP $pc.Mac
+                    }
+                    'usar' { & $usarImpressoraLpr $pc $selLpr }
+                    'nova' { & $criarNovaLpr $pc.IP }
+                }
             })
 
         # Drivers do catalogo (os mesmos da aba Drivers) para baixar. Devolve o item escolhido ou $null.
@@ -16552,6 +16809,7 @@ function Show-PortasLpr {
         $f.Add_Shown({
                 & $carregarLpr $SelecionarPorta
                 if ($AbrirNova) { $btnLprNova.PerformClick() }
+                else { & $autoCorrigirLpr }
             })
         Log-Message "INFO" "LPR: janela de portas aberta"
         [void]$f.ShowDialog($Dono)
@@ -19680,7 +19938,7 @@ $formWidth = if ($screen.Width -lt 1000) { 900 } else { 1000 }
 $formHeight = if ($screen.Height -lt 800) { 700 } else { 800 }
 
 $form = New-Object System.Windows.Forms.Form
-$form.Text = "Preparador XMenu – Suporte Técnico v5.50 - REVENDA"
+$form.Text = "Preparador XMenu – Suporte Técnico v5.51 - REVENDA"
 $form.Size = New-Object System.Drawing.Size($formWidth, $formHeight)
 $form.StartPosition = "CenterScreen"
 $form.BackColor = [System.Drawing.Color]::FromArgb(25, 25, 30); $form.ForeColor = 'White'
@@ -20541,7 +20799,7 @@ $bClock.Add_Click({ Invoke-ClockSync })
 [void]$tbl.Controls.Add($bClock)
 
 # Mensagem de abertura: explica o programa para quem abre pela primeira vez
-Log-Message "INFO" "Preparador XMenu v5.50 - REVENDA - preparo e suporte de computadores com XMenu e NetPDV"
+Log-Message "INFO" "Preparador XMenu v5.51 - REVENDA - preparo e suporte de computadores com XMenu e NetPDV"
 Log-Message "LOG" "==============================================================="
 Log-Message "LOG" "COMO USAR"
 Log-Message "LOG" "  PREPARAR AMBIENTE WINDOWS .. ajusta energia, UAC e desempenho do PC num clique"
@@ -20551,7 +20809,8 @@ Log-Message "LOG" "  EXTERNOS ................... acesso remoto, Chrome, TEF HUB
 Log-Message "LOG" "  SUPORTE E DIAGNÓSTICO ...... impressoras, rede, SQL, backup, XMLs e reparos do Windows"
 Log-Message "LOG" "  Passe o mouse sobre um botão para ver o que ele faz antes de clicar."
 Log-Message "LOG" "---------------------------------------------------------------"
-Log-Message "LOG" "NOVO NA v5.50"
+Log-Message "LOG" "NOVO NA v5.51"
+Log-Message "SUCESSO" "  LPR mais fácil: ao abrir a janela, a impressora que parou é procurada pelo MAC do PC e aparece um aviso com CORRIGIR AGORA (troca a porta e oferece a folha de teste); o PROCURAR NA REDE, depois de escolher o PC, pergunta se é para corrigir a porta selecionada, usar numa impressora já cadastrada (sem refazer a impressora) ou criar uma nova"
 Log-Message "SUCESSO" "  LPR: impressora repetida nas Configurações do Windows depois de trocar o IP: a troca já apaga o registro de dispositivo que sobrou, e o LIMPAR SEM USO arruma as que já estão repetidas (a impressora e o spooler não são mexidos)"
 Log-Message "SUCESSO" "  LPR: trocar o IP da porta TCP/IP padrão (a LPR do Windows novo) cria a porta nova IP:compartilhamento, passa a impressora para ela e apaga a antiga, em vez de só mudar o IP por dentro; a porta que ficou com o IP velho no nome aparece em amarelo e o TROCAR IP (já com o IP certo) corrige"
 Log-Message "SUCESSO" "  Backup: nome novo e igual para o .bak, o .zip e o .zip do BACKUP MANUAL: Backup NetWebPDV - Loja 110 - 28-09-2026 16h36 (sem ID da loja, entra sem ID; sai o ZIP e o nome da máquina); o Restaurar Backup continua lendo os nomes antigos"
