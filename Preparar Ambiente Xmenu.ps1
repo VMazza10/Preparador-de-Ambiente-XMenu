@@ -1,5 +1,5 @@
 ﻿# =============================================================================
-# PREPARADOR XMENU v5.49
+# PREPARADOR XMENU v5.50
 # Visual: Dashboard Moderno
 # Correcoes:
 #   - CRITICO: Removido DoEvents do loop de evento de download (causava crash).
@@ -14908,6 +14908,70 @@ function Update-PortaLprCompleto {
     return $res
 }
 
+# -----------------------------------------------------------------------------
+# IMPRESSORA REPETIDA NAS CONFIGURACOES DO WINDOWS
+# Cada impressora tem um dispositivo "fila de impressao" (SWD\PRINTENUM\{GUID}), e e ele que aparece em Configuracoes >
+# Impressoras. Quando a porta muda, o Windows as vezes deixa o dispositivo antigo e a mesma impressora aparece duas vezes.
+# O verdadeiro e o do QueueInstanceId da impressora; os outros com o mesmo nome sao sobra. Sem essa certeza, so sai o que
+# o proprio Windows ja marca como inexistente (Status Unknown). A impressora e o spooler nao sao mexidos.
+# -----------------------------------------------------------------------------
+function Get-FilasPnpImpressoras {
+    # Dispositivos "fila de impressao" do Windows, inclusive os que ja nao existem (Status Unknown). Vazio se nao der.
+    try { return @(Get-PnpDevice -Class PrintQueue -ErrorAction Stop) } catch { return @() }
+}
+
+function Get-QueueInstanceIdImpressora {
+    # "{GUID}" do dispositivo verdadeiro da impressora, guardado no registro dela pelo spooler. Vazio se nao achar.
+    param([string]$Impressora)
+    if ("$Impressora".Trim() -eq "" -or "$Impressora" -match '\\') { return "" }
+    try {
+        $baseQ = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::LocalMachine, [Microsoft.Win32.RegistryView]::Registry64)
+        try {
+            $chaveQ = $baseQ.OpenSubKey("SYSTEM\CurrentControlSet\Control\Print\Printers\$Impressora")
+            if ($null -eq $chaveQ) { return "" }
+            try { return "$($chaveQ.GetValue('QueueInstanceId'))".Trim() }
+            finally { $chaveQ.Close() }
+        }
+        finally { $baseQ.Close() }
+    }
+    catch { return "" }
+}
+
+function Get-SobrasFilaImpressora {
+    # Dispositivos que sobraram da impressora (InstanceId). Com o QueueInstanceId dela batendo com um dispositivo: todos os
+    # outros com o mesmo nome. Sem isso: so os que o Windows ja marca como inexistentes (Status Unknown).
+    param([string]$Impressora, [object[]]$Dispositivos, [string]$InstanceIdReal = "")
+    $mesmoNome = @($Dispositivos | Where-Object { "$($_.FriendlyName)" -eq $Impressora -and "$($_.InstanceId)" -like 'SWD\PRINTENUM\{*' })
+    $real = "SWD\PRINTENUM\" + "$InstanceIdReal".Trim()
+    if ("$InstanceIdReal".Trim() -ne "" -and @($mesmoNome | Where-Object { "$($_.InstanceId)" -eq $real }).Count -eq 1) {
+        return @($mesmoNome | Where-Object { "$($_.InstanceId)" -ne $real } | ForEach-Object { "$($_.InstanceId)" })
+    }
+    return @($mesmoNome | Where-Object { "$($_.Status)" -eq 'Unknown' } | ForEach-Object { "$($_.InstanceId)" })
+}
+
+function Invoke-RemoverDispositivoPnp {
+    # pnputil /remove-device (Windows 10 1903 em diante). Devolve hashtable: Ok / Saida (ultima linha da resposta)
+    param([string]$InstanceId)
+    $saidaPnp = @(& pnputil.exe /remove-device $InstanceId 2>&1 | ForEach-Object { "$_".Trim() } | Where-Object { $_ -ne "" })
+    return @{ Ok = ($LASTEXITCODE -eq 0); Saida = "$($saidaPnp | Select-Object -Last 1)" }
+}
+
+function Remove-SobrasFilaImpressora {
+    # Apaga os dispositivos que sobraram das impressoras. -Dispositivos: lista ja lida (senao, le agora).
+    # Devolve hashtable: Removidas / Falhas (Impressora, Id, Motivo)
+    param([string[]]$Impressoras, [object[]]$Dispositivos = $null)
+    $res = @{ Removidas = @(); Falhas = @() }
+    if ($null -eq $Dispositivos) { $Dispositivos = @(Get-FilasPnpImpressoras) }
+    foreach ($impR in @($Impressoras | Where-Object { "$_" -ne "" } | Select-Object -Unique)) {
+        foreach ($idSobra in @(Get-SobrasFilaImpressora -Impressora $impR -Dispositivos $Dispositivos -InstanceIdReal (Get-QueueInstanceIdImpressora $impR))) {
+            $rPnp = Invoke-RemoverDispositivoPnp -InstanceId $idSobra
+            if ($rPnp.Ok) { $res.Removidas += [pscustomobject]@{ Impressora = $impR; Id = $idSobra; Motivo = "" } }
+            else { $res.Falhas += [pscustomobject]@{ Impressora = $impR; Id = $idSobra; Motivo = $rPnp.Saida } }
+        }
+    }
+    return $res
+}
+
 function Get-CaminhoLprMacs {
     # MAC das portas LPR: fica em Arquivos Xmenu, na Area de Trabalho (nada no disco C:)
     $baseMac = "$($Script:DownloadFolder)"
@@ -15670,6 +15734,7 @@ function Show-PortasLpr {
     param($Dono = $null, [switch]$AbrirNova, [string]$SelecionarPorta = "")
     try {
         $Script:LprOcupado = $false
+        $Script:LprRepetidas = @()
         # Porta do LPD: sempre 515 no uso real; $Script:LprPorta existe para o teste
         $portaLpd = 515
         if ($Script:LprPorta) { $portaLpd = [int]$Script:LprPorta }
@@ -15725,13 +15790,13 @@ function Show-PortasLpr {
         $btnLprTeste = New-ToolButton $f "IMPRIMIR TESTE" 250 392 140 34 $Script:UiCinza $null "Manda uma folha curta de teste pela impressora que usa a porta selecionada"
         $corRemoverLpr = [System.Drawing.Color]::FromArgb(150, 40, 40)
         $btnLprRemover = New-ToolButton $f "REMOVER PORTA" 400 392 180 34 $corRemoverLpr $null "Apaga a porta selecionada. Só vale para porta que nenhuma impressora usa"
-        $btnLprLimpar = New-ToolButton $f "LIMPAR SEM USO" 590 392 130 34 $corRemoverLpr $null "Apaga de uma vez as portas LPR que nenhuma impressora usa (as que sobraram das trocas de IP)"
+        $btnLprLimpar = New-ToolButton $f "LIMPAR SEM USO" 590 392 130 34 $corRemoverLpr $null "Apaga de uma vez as portas LPR que nenhuma impressora usa (as que sobraram das trocas de IP) e arruma a impressora que aparece repetida nas Configurações do Windows"
         foreach ($b in @($btnLprMac, $btnLprTrocar, $btnLprProcurar, $btnLprRecarregar, $btnLprNova, $btnLprTeste, $btnLprRemover, $btnLprLimpar)) { $b.Anchor = 'Bottom,Left' }
         $btnLprFechar.Anchor = 'Bottom,Right'
         $lblLprStatus = New-ToolLabel $f "" 20 436 9.5 -Negrito -W 824
         $lblLprStatus.Height = 40
         $lblLprStatus.Anchor = 'Bottom,Left,Right'
-        $lblLprAjuda = New-ToolLabel $f "Como usar: selecione a porta que parou e clique em ATUALIZAR IP PELO MAC. O MAC do PC da impressora é guardado sozinho sempre que a porta está funcionando; se ainda não tiver MAC guardado, use PROCURAR NA REDE ou TROCAR IP. A troca reinicia o spooler de impressão deste PC. Portas que sobraram de trocas antigas (sem impressora) saem com LIMPAR SEM USO." 20 478 8.5 -Cor $Script:UiSuave -W 824
+        $lblLprAjuda = New-ToolLabel $f "Como usar: selecione a porta que parou e clique em ATUALIZAR IP PELO MAC. O MAC do PC da impressora é guardado sozinho sempre que a porta está funcionando; se ainda não tiver MAC guardado, use PROCURAR NA REDE ou TROCAR IP. A troca reinicia o spooler de impressão deste PC. Portas sem impressora e impressora repetida no Windows saem com LIMPAR SEM USO." 20 478 8.5 -Cor $Script:UiSuave -W 824
         $lblLprAjuda.Height = 44
         $lblLprAjuda.Anchor = 'Bottom,Left,Right'
 
@@ -15824,6 +15889,21 @@ function Show-PortasLpr {
                 # porta que ficou com o IP velho no nome (troca antiga so mudou o IP por dentro)
                 $nomeVelho = @($lvLpr.Items | Where-Object { @($_.Tag.Impressoras).Count -gt 0 -and (Test-NomePortaLprDesatualizado -Porta $_.Tag.Porta -Servidor $_.Tag.Servidor) })
                 foreach ($itNome in $nomeVelho) { Log-Message "INFO" "LPR: a porta $($itNome.Tag.Porta) aponta para $($itNome.Tag.Servidor), mas ficou com o IP antigo no nome" }
+                # impressora repetida nas Configuracoes do Windows (dispositivo que sobrou de uma troca de porta)
+                $Script:LprRepetidas = @()
+                $dispFilas = @(Get-FilasPnpImpressoras)
+                foreach ($impLpr in @($lvLpr.Items | ForEach-Object { @($_.Tag.Impressoras) } | Where-Object { "$_" -ne "" } | Select-Object -Unique)) {
+                    $mesmoNomeImp = @($dispFilas | Where-Object { "$($_.FriendlyName)" -eq $impLpr -and "$($_.InstanceId)" -like 'SWD\PRINTENUM\{*' })
+                    if ($mesmoNomeImp.Count -le 1 -and @($mesmoNomeImp | Where-Object { "$($_.Status)" -eq 'Unknown' }).Count -eq 0) { continue }
+                    $idRealImp = Get-QueueInstanceIdImpressora $impLpr
+                    Log-Message "INFO" "LPR: a impressora $impLpr tem $($mesmoNomeImp.Count) registro(s) de dispositivo no Windows (QueueInstanceId: $(if ($idRealImp) { $idRealImp } else { 'não achei' })): $((@($mesmoNomeImp | ForEach-Object { "$($_.InstanceId) [$($_.Status)]" })) -join ', ')"
+                    $sobrasImp = @(Get-SobrasFilaImpressora -Impressora $impLpr -Dispositivos $dispFilas -InstanceIdReal $idRealImp)
+                    if ($sobrasImp.Count -gt 0) {
+                        $Script:LprRepetidas += $impLpr
+                        Log-Message "INFO" "LPR: a impressora $impLpr aparece repetida no Windows: $($sobrasImp.Count) registro(s) sobrando; LIMPAR SEM USO apaga"
+                    }
+                }
+                if ($Script:LprRepetidas.Count -gt 0) { $avisoSemUso = $avisoSemUso + " Impressora repetida no Windows: LIMPAR SEM USO arruma." }
                 $pedida = @($lvLpr.Items | Where-Object { $Selecionar -ne "" -and $_.Tag.Porta -eq $Selecionar })
                 if ($lvLpr.Items.Count -eq 0) {
                     $diagLpr = Get-DiagnosticoPortasLpr
@@ -15876,6 +15956,9 @@ function Show-PortasLpr {
                 Log-Message "SUCESSO" "LPR: porta $($SelPorta.Porta) agora aponta para $NovoIp ($($resTroca.Porta))"
                 $mensagemFim = "Porta corrigida: agora imprime em $NovoIp (porta $($resTroca.Porta))."
                 if ($resTroca.Aviso -ne "") { $mensagemFim = $mensagemFim + " " + $resTroca.Aviso }
+                # trocar a porta as vezes deixa a impressora repetida nas Configuracoes do Windows: apaga o que sobrou
+                $textoRepTroca = & $limparRepetidasLpr @($resTroca.Impressoras)
+                if ($textoRepTroca -ne "") { $mensagemFim = $mensagemFim + " " + $textoRepTroca }
             }
             catch {
                 Log-Message "ERRO" "LPR: falha ao trocar a porta $($SelPorta.Porta) - $($_.Exception.Message)"
@@ -15931,6 +16014,19 @@ function Show-PortasLpr {
             $corRem = $Script:UiVerde
             if ($resRem.Removidas.Count -eq 0) { $corRem = $Script:UiAmarelo }
             if ($partes.Count -gt 0) { & $statusLpr ($partes -join " ") $corRem }
+        }
+
+        # Impressora repetida nas Configuracoes do Windows: apaga os dispositivos que sobraram. Devolve o texto para a tela.
+        $limparRepetidasLpr = {
+            param([string[]]$ImpressorasLimpar)
+            if (@($ImpressorasLimpar | Where-Object { "$_" -ne "" }).Count -eq 0) { return "" }
+            $resRep = Remove-SobrasFilaImpressora -Impressoras $ImpressorasLimpar
+            foreach ($rm in $resRep.Removidas) { Log-Message "SUCESSO" "LPR: a impressora $($rm.Impressora) aparecia repetida no Windows; registro que sobrou apagado ($($rm.Id))" }
+            foreach ($fl in $resRep.Falhas) { Log-Message "ERRO" "LPR: não consegui apagar o registro repetido da impressora $($fl.Impressora) ($($fl.Id)): $($fl.Motivo)" }
+            $textoRep = ""
+            if ($resRep.Removidas.Count -gt 0) { $textoRep = "Impressora repetida no Windows arrumada ($($resRep.Removidas.Count) registro(s) que sobraram apagado(s))." }
+            if ($resRep.Falhas.Count -gt 0) { $textoRep = ($textoRep + " Não consegui apagar $($resRep.Falhas.Count) registro(s) repetido(s): veja o Log.").Trim() }
+            return $textoRep
         }
 
         $pedirIpLpr = {
@@ -16435,16 +16531,42 @@ function Show-PortasLpr {
         $btnLprLimpar.Add_Click({
                 if ($Script:LprOcupado) { return }
                 $portasSemUso = @($lvLpr.Items | Where-Object { @($_.Tag.Impressoras).Count -eq 0 } | ForEach-Object { $_.Tag.Porta })
-                if ($portasSemUso.Count -eq 0) {
-                    & $statusLpr "Nenhuma porta sem uso: todas as portas LPR deste PC têm impressora." $Script:UiVerde
+                $repetidasLimpar = @($Script:LprRepetidas)
+                if ($portasSemUso.Count -eq 0 -and $repetidasLimpar.Count -eq 0) {
+                    & $statusLpr "Nada para limpar: todas as portas LPR deste PC têm impressora e nenhuma aparece repetida no Windows." $Script:UiVerde
                     return
                 }
-                $listaSemUso = ($portasSemUso | Select-Object -First 15 | ForEach-Object { "  - $_" }) -join "`r`n"
-                if ($portasSemUso.Count -gt 15) { $listaSemUso += "`r`n  ... e mais $($portasSemUso.Count - 15)" }
-                $r = [System.Windows.Forms.MessageBox]::Show($f,
-                    "Remover $($portasSemUso.Count) porta(s) LPR que nenhuma impressora usa?`r`n`r`n$listaSemUso`r`n`r`nAs portas com impressora não são mexidas.",
-                    "Portas LPR", "YesNo", "Question")
-                if ($r -eq [System.Windows.Forms.DialogResult]::Yes) { & $removerPortasLpr $portasSemUso }
+                $textoLimpar = ""
+                if ($portasSemUso.Count -gt 0) {
+                    $listaSemUso = ($portasSemUso | Select-Object -First 15 | ForEach-Object { "  - $_" }) -join "`r`n"
+                    if ($portasSemUso.Count -gt 15) { $listaSemUso += "`r`n  ... e mais $($portasSemUso.Count - 15)" }
+                    $textoLimpar = "Remover $($portasSemUso.Count) porta(s) LPR que nenhuma impressora usa:`r`n`r`n$listaSemUso`r`n`r`nAs portas com impressora não são mexidas."
+                }
+                if ($repetidasLimpar.Count -gt 0) {
+                    if ($textoLimpar -ne "") { $textoLimpar += "`r`n`r`n" }
+                    $textoLimpar += "Arrumar a impressora que aparece repetida nas Configurações do Windows (apaga só o registro que sobrou de uma troca de porta; a impressora continua igual):`r`n`r`n" + (($repetidasLimpar | ForEach-Object { "  - $_" }) -join "`r`n")
+                }
+                $r = [System.Windows.Forms.MessageBox]::Show($f, "$textoLimpar`r`n`r`nContinuar?", "Portas LPR", "YesNo", "Question")
+                if ($r -ne [System.Windows.Forms.DialogResult]::Yes) { return }
+                $textoRepLimpar = ""
+                if ($repetidasLimpar.Count -gt 0) {
+                    & $travarLpr $true
+                    try {
+                        & $statusLpr "Arrumando a impressora repetida no Windows..." $Script:UiAmarelo
+                        $textoRepLimpar = & $limparRepetidasLpr $repetidasLimpar
+                    }
+                    finally { & $travarLpr $false }
+                }
+                $corRepLimpar = $Script:UiVerde
+                if ($textoRepLimpar -like '*Não consegui*') { $corRepLimpar = $Script:UiAmarelo }
+                if ($portasSemUso.Count -gt 0) {
+                    & $removerPortasLpr $portasSemUso
+                    if ($textoRepLimpar -ne "") { & $statusLpr "$($lblLprStatus.Text) $textoRepLimpar".Trim() $corRepLimpar }
+                }
+                else {
+                    & $carregarLpr
+                    if ($textoRepLimpar -ne "") { & $statusLpr $textoRepLimpar $corRepLimpar }
+                }
             })
 
         $btnLprRecarregar.Add_Click({ if (-not $Script:LprOcupado) { & $carregarLpr } })
@@ -19640,7 +19762,7 @@ $formWidth = if ($screen.Width -lt 1200) { $screen.Width - 50 } else { 1200 }
 $formHeight = if ($screen.Height -lt 900) { $screen.Height - 50 } else { 900 }
 
 $form = New-Object System.Windows.Forms.Form
-$form.Text = "Preparador XMenu – Suporte Técnico v5.49"
+$form.Text = "Preparador XMenu – Suporte Técnico v5.50"
 $form.Size = New-Object System.Drawing.Size($formWidth, $formHeight)
 $form.StartPosition = "CenterScreen"
 $form.BackColor = [System.Drawing.Color]::FromArgb(25, 25, 30); $form.ForeColor = 'White'
@@ -20504,7 +20626,7 @@ $bClock.Add_Click({ Invoke-ClockSync })
 [void]$tbl.Controls.Add($bClock)
 
 # Mensagem de abertura: explica o programa para quem abre pela primeira vez
-Log-Message "INFO" "Preparador XMenu v5.49 - preparo e suporte de computadores com XMenu e NetPDV"
+Log-Message "INFO" "Preparador XMenu v5.50 - preparo e suporte de computadores com XMenu e NetPDV"
 Log-Message "LOG" "==============================================================="
 Log-Message "LOG" "COMO USAR"
 Log-Message "LOG" "  PREPARAR AMBIENTE WINDOWS .. ajusta energia, UAC e desempenho do PC num clique"
@@ -20514,7 +20636,8 @@ Log-Message "LOG" "  EXTERNOS ................... acesso remoto, Chrome, TEF HUB
 Log-Message "LOG" "  SUPORTE E DIAGNÓSTICO ...... impressoras, rede, SQL, backup, XMLs e reparos do Windows"
 Log-Message "LOG" "  Passe o mouse sobre um botão para ver o que ele faz antes de clicar."
 Log-Message "LOG" "---------------------------------------------------------------"
-Log-Message "LOG" "NOVO NA v5.49"
+Log-Message "LOG" "NOVO NA v5.50"
+Log-Message "SUCESSO" "  LPR: impressora repetida nas Configurações do Windows depois de trocar o IP: a troca já apaga o registro de dispositivo que sobrou, e o LIMPAR SEM USO arruma as que já estão repetidas (a impressora e o spooler não são mexidos)"
 Log-Message "SUCESSO" "  LPR: trocar o IP da porta TCP/IP padrão (a LPR do Windows novo) cria a porta nova IP:compartilhamento, passa a impressora para ela e apaga a antiga, em vez de só mudar o IP por dentro; a porta que ficou com o IP velho no nome aparece em amarelo e o TROCAR IP (já com o IP certo) corrige"
 Log-Message "SUCESSO" "  Backup: nome novo e igual para o .bak, o .zip e o .zip do BACKUP MANUAL: Backup NetWebPDV - Loja 110 - 28-09-2026 16h36 (sem ID da loja, entra sem ID; sai o ZIP e o nome da máquina); o Restaurar Backup continua lendo os nomes antigos"
 Log-Message "SUCESSO" "  Backup: além de ir dentro do .zip, a licença (lic.seg) fica também solta na pasta do backup, ao lado do .zip, com o nome dele na frente (NetWebPDV - Loja 1234 - data - lic.seg), no FAZER BACKUP e no BACKUP MANUAL"
