@@ -1,6 +1,6 @@
 ﻿# =============================================================================
 # PREPARADOR XMENU - VERSAO REVENDA
-# Baseado na v5.51
+# Baseado na v5.52
 # Alteracoes Revenda:
 #   - Wallpaper: fundo_revenda.png
 #   - Removido: Atalhos de Suporte e Pasta Netcontroll
@@ -11932,6 +11932,78 @@ function Set-JanelaAdaptavel {
     catch { return $false }
 }
 
+function Initialize-JanelasNativas {
+    # Funcoes do Windows para as janelas: esconder/mostrar as de cima de uma janela e saber o dono de verdade
+    if ('Preparador.Janelas' -as [type]) { return }
+    Add-Type -Namespace Preparador -Name Janelas -MemberDefinition @'
+[DllImport("user32.dll")] public static extern bool ShowOwnedPopups(System.IntPtr h, bool mostrar);
+[DllImport("user32.dll")] public static extern System.IntPtr GetWindow(System.IntPtr h, uint cmd);
+'@
+}
+
+function Get-DonoJanela {
+    # Dono da janela: o que o programa informou ou, quando abriu sem dono (ShowDialog sem janela), o que o Windows usou
+    param($Janela)
+    if ($null -eq $Janela) { return $null }
+    if ($null -ne $Janela.Owner) { return $Janela.Owner }
+    try {
+        Initialize-JanelasNativas
+        $hDono = [Preparador.Janelas]::GetWindow($Janela.Handle, 4)
+        if ($hDono -ne [IntPtr]::Zero) {
+            $formDono = [System.Windows.Forms.Control]::FromHandle($hDono)
+            if ($formDono -is [System.Windows.Forms.Form]) { return $formDono }
+        }
+    }
+    catch {}
+    return $null
+}
+
+function Invoke-MinimizarProgramaInteiro {
+    # Janela aberta por cima da principal (modal): minimizada sozinha, ela sumia e a principal ficava bloqueada esperando
+    # por ela, parecendo travado. Minimizar passa a minimizar o programa inteiro: pela barra de tarefas volta tudo, com a
+    # janela por cima da principal. Janela que nao bloqueia a principal (o Ping) continua minimizando sozinha.
+    param($Janela)
+    if ($null -eq $Janela -or -not $Janela.Modal -or $Janela.WindowState -ne [System.Windows.Forms.FormWindowState]::Minimized) { return }
+    $raiz = Get-DonoJanela $Janela
+    while ($null -ne $raiz -and $null -ne (Get-DonoJanela $raiz)) { $raiz = Get-DonoJanela $raiz }
+    $semDono = ($null -eq $raiz)
+    if ($semDono) { $raiz = $Script:MainForm }
+    if ($null -eq $raiz -or $raiz -eq $Janela -or $raiz.IsDisposed) { return }
+    # a principal ja minimizada: o Windows tambem da as de cima como minimizadas; nao e o tecnico minimizando esta
+    if ($raiz.WindowState -eq [System.Windows.Forms.FormWindowState]::Minimized) { return }
+    # aberta sem dono nenhum: passa a ser da principal, para sumir e voltar junto com ela
+    if ($semDono) { try { $Janela.Owner = $raiz } catch {} }
+    # janelas do meio (ex.: Impressoras, com o LPR aberto de dentro dela): o Windows so esconde as que estao direto
+    # sobre a principal, entao as de dentro delas sao escondidas junto e voltam quando a principal volta
+    $meio = @()
+    $dono = Get-DonoJanela $Janela
+    while ($null -ne $dono -and $dono -ne $raiz) { $meio += $dono; $dono = Get-DonoJanela $dono }
+    # primeiro esta volta ao normal, depois a principal minimiza e leva esta junto
+    $Janela.WindowState = [System.Windows.Forms.FormWindowState]::Normal
+    $raiz.WindowState = [System.Windows.Forms.FormWindowState]::Minimized
+    if ($meio.Count -eq 0) { return }
+    try {
+        Initialize-JanelasNativas
+        foreach ($m in $meio) { [void][Preparador.Janelas]::ShowOwnedPopups($m.Handle, $false) }
+        $Script:JanelasMeioEscondidas = $meio
+        if ($Script:RaizComRestaurarMeio -ne $raiz) {
+            $raiz.Add_Resize({ Show-JanelasMeioEscondidas $this })
+            $Script:RaizComRestaurarMeio = $raiz
+        }
+    }
+    catch {}
+}
+
+function Show-JanelasMeioEscondidas {
+    # A principal voltou: as janelas de dentro das do meio voltam junto
+    param($Raiz)
+    if ($Raiz.WindowState -eq [System.Windows.Forms.FormWindowState]::Minimized) { return }
+    foreach ($m in @($Script:JanelasMeioEscondidas)) {
+        if ($null -ne $m -and -not $m.IsDisposed) { try { [void][Preparador.Janelas]::ShowOwnedPopups($m.Handle, $true) } catch {} }
+    }
+    $Script:JanelasMeioEscondidas = @()
+}
+
 function New-ToolForm {
     param([string]$Titulo, [int]$Largura, [int]$Altura)
     $f = New-Object System.Windows.Forms.Form
@@ -11949,6 +12021,7 @@ function New-ToolForm {
             Set-JanelaAdaptavel $this | Out-Null
             try { Enable-SelecionarTudo $this } catch {}
         })
+    $f.Add_Resize({ Invoke-MinimizarProgramaInteiro $this })
     return $f
 }
 
@@ -16830,6 +16903,7 @@ function Show-PrinterManager {
         $Script:PrinterManagerForm.Text = "Impressoras: Compartilhamento, LPR Compartilhada e Drivers"; $Script:PrinterManagerForm.Size = "780,650"; $Script:PrinterManagerForm.StartPosition = 'CenterParent'
         $Script:PrinterManagerForm.BackColor = [System.Drawing.Color]::FromArgb(25, 25, 30); $Script:PrinterManagerForm.ForeColor = 'White'
         $Script:PrinterManagerForm.FormBorderStyle = 'FixedDialog'; $Script:PrinterManagerForm.MaximizeBox = $false
+        $Script:PrinterManagerForm.Add_Resize({ Invoke-MinimizarProgramaInteiro $this })
 
         # PAINEL 1: Impressoras Locais
         $pnlLocal = New-Object System.Windows.Forms.Panel
@@ -17370,6 +17444,7 @@ function Show-PrinterManager {
             $fInput.Text = "Nome do Compartilhamento"; $fInput.Size = "350,180"; $fInput.StartPosition = 'CenterParent'
             $fInput.BackColor = [System.Drawing.Color]::FromArgb(35, 35, 40); $fInput.ForeColor = 'White'
             $fInput.FormBorderStyle = 'FixedDialog'; $fInput.MaximizeBox = $false
+            $fInput.Add_Resize({ Invoke-MinimizarProgramaInteiro $this })
             
             $lbl = New-Object System.Windows.Forms.Label; $lbl.Text = "Digite o nome (sem acentos/espaços):"; $lbl.Location = '20,20'; $lbl.AutoSize = $true
             [void]$fInput.Controls.Add($lbl)
@@ -19278,6 +19353,7 @@ function Open-Selector {
     $fSel.Text = "Versoes - $Type"; $fSel.Size = "400,$height"; $fSel.StartPosition = 'CenterParent'
     $fSel.BackColor = [System.Drawing.Color]::FromArgb(30, 30, 30); $fSel.ForeColor = 'White'
     $fSel.FormBorderStyle = 'FixedDialog'; $fSel.MaximizeBox = $false
+    $fSel.Add_Resize({ Invoke-MinimizarProgramaInteiro $this })
     
     $lbl = New-Object System.Windows.Forms.Label; $lbl.Text = "Selecione da Lista:"; $lbl.Location = '20,20'; $lbl.AutoSize = $true
     [void]$fSel.Controls.Add($lbl)
@@ -19938,7 +20014,7 @@ $formWidth = if ($screen.Width -lt 1000) { 900 } else { 1000 }
 $formHeight = if ($screen.Height -lt 800) { 700 } else { 800 }
 
 $form = New-Object System.Windows.Forms.Form
-$form.Text = "Preparador XMenu – Suporte Técnico v5.51 - REVENDA"
+$form.Text = "Preparador XMenu – Suporte Técnico v5.52 - REVENDA"
 $form.Size = New-Object System.Drawing.Size($formWidth, $formHeight)
 $form.StartPosition = "CenterScreen"
 $form.BackColor = [System.Drawing.Color]::FromArgb(25, 25, 30); $form.ForeColor = 'White'
@@ -20329,7 +20405,13 @@ if ($null -eq $Script:ToolTip) {
 }
 $Script:ToolTip.SetToolTip($bCfg, "Ajusta UAC, Energia, Performance, Rede, Limpeza e Personalização padrão XMenu.")
 
-$bCfg.Add_Click({ Run-Config $this })
+# Clique sem querer acontece: confirma antes de mexer no Windows (o "Não" vem marcado, um Enter a toa não dispara)
+$bCfg.Add_Click({
+        $botaoCfg = $this
+        $rCfg = [System.Windows.Forms.MessageBox]::Show($Script:MainForm, "Preparar o ambiente Windows deste PC agora?`r`n`r`nAjusta UAC, energia, desempenho, rede, limpeza e personalização padrão XMenu.", "Preparar ambiente", [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Question, [System.Windows.Forms.MessageBoxDefaultButton]::Button2)
+        if ($rCfg -ne [System.Windows.Forms.DialogResult]::Yes) { Log-Message "CANCEL" "Preparar ambiente: cancelado na confirmação"; return }
+        Run-Config $botaoCfg
+    })
 [void]$layout.Controls.Add($bCfg, 0, 1)
 
 $pScroll = New-Object System.Windows.Forms.Panel; $pScroll.Dock = 'Fill'; $pScroll.AutoScroll = $true
@@ -20576,6 +20658,7 @@ Add-CopiarLinkAoBotao $bVspe "https://www.netcontroll.com.br/util/instaladores/V
 [void]$tbl.Controls.Add($bVspe)
 
 Add-Btn "TeamViewer Full" "" "https://download.teamviewer.com/download/TeamViewer_Setup_x64.exe" "Teamviewer.exe" -Help "Cliente completo para acesso remoto TeamViewer."
+Add-Btn "TeamViewer com senha" "" "https://www.netcontroll.com.br/util/TeamViewerAtendimento.exe" "TeamViewerAtendimento.exe" -Help "TeamViewer QuickSupport de atendimento da NetControll, com senha: roda sem instalar; é só passar o ID para o suporte."
 Add-Btn "AnyDesk" "" "https://download.anydesk.com/AnyDesk.exe" "AnyDesk.exe" -Help "Ferramenta de acesso remoto AnyDesk."
 Add-Btn "Google Chrome" "" "https://github.com/VMazza10/Preparador-de-Ambiente-XMenu/releases/download/Chrome/ChromeSetup.exe" "ChromeSetup.exe" -Help "Instalador online do navegador Google Chrome."
 Add-Btn "PDV EDGE (Criar Atalho)" "" "PDV-EDGE-SHORTCUT" "" -Color $colorBlue -Help "Cria na Área de Trabalho o atalho do NetPDV para abrir pelo Microsoft Edge em modo aplicativo/tela cheia."
@@ -20799,7 +20882,7 @@ $bClock.Add_Click({ Invoke-ClockSync })
 [void]$tbl.Controls.Add($bClock)
 
 # Mensagem de abertura: explica o programa para quem abre pela primeira vez
-Log-Message "INFO" "Preparador XMenu v5.51 - REVENDA - preparo e suporte de computadores com XMenu e NetPDV"
+Log-Message "INFO" "Preparador XMenu v5.52 - REVENDA - preparo e suporte de computadores com XMenu e NetPDV"
 Log-Message "LOG" "==============================================================="
 Log-Message "LOG" "COMO USAR"
 Log-Message "LOG" "  PREPARAR AMBIENTE WINDOWS .. ajusta energia, UAC e desempenho do PC num clique"
@@ -20809,7 +20892,10 @@ Log-Message "LOG" "  EXTERNOS ................... acesso remoto, Chrome, TEF HUB
 Log-Message "LOG" "  SUPORTE E DIAGNÓSTICO ...... impressoras, rede, SQL, backup, XMLs e reparos do Windows"
 Log-Message "LOG" "  Passe o mouse sobre um botão para ver o que ele faz antes de clicar."
 Log-Message "LOG" "---------------------------------------------------------------"
-Log-Message "LOG" "NOVO NA v5.51"
+Log-Message "LOG" "NOVO NA v5.52"
+Log-Message "SUCESSO" "  Janelas: minimizar uma janela aberta por cima da principal (Backup, LPR, Impressoras, Índices...) minimiza o programa inteiro e ela volta junto pela barra de tarefas, em vez de sumir e deixar a principal parecendo travada"
+Log-Message "SUCESSO" "  Externos: novo botão TeamViewer com senha (QuickSupport de atendimento da NetControll)"
+Log-Message "SUCESSO" "  PREPARAR AMBIENTE WINDOWS pede confirmação antes de começar (o Não vem marcado, para um clique sem querer não disparar)"
 Log-Message "SUCESSO" "  LPR mais fácil: ao abrir a janela, a impressora que parou é procurada pelo MAC do PC e aparece um aviso com CORRIGIR AGORA (troca a porta e oferece a folha de teste); o PROCURAR NA REDE, depois de escolher o PC, pergunta se é para corrigir a porta selecionada, usar numa impressora já cadastrada (sem refazer a impressora) ou criar uma nova"
 Log-Message "SUCESSO" "  LPR: impressora repetida nas Configurações do Windows depois de trocar o IP: a troca já apaga o registro de dispositivo que sobrou, e o LIMPAR SEM USO arruma as que já estão repetidas (a impressora e o spooler não são mexidos)"
 Log-Message "SUCESSO" "  LPR: trocar o IP da porta TCP/IP padrão (a LPR do Windows novo) cria a porta nova IP:compartilhamento, passa a impressora para ela e apaga a antiga, em vez de só mudar o IP por dentro; a porta que ficou com o IP velho no nome aparece em amarelo e o TROCAR IP (já com o IP certo) corrige"
