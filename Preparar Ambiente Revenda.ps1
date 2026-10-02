@@ -1,6 +1,6 @@
 ﻿# =============================================================================
 # PREPARADOR XMENU - VERSAO REVENDA
-# Baseado na v5.54
+# Baseado na v5.55
 # Alteracoes Revenda:
 #   - Wallpaper: fundo_revenda.png
 #   - Removido: Atalhos de Suporte e Pasta Netcontroll
@@ -19202,6 +19202,60 @@ function Install-VSPE-Combined {
     }
 }
 
+function New-GuiaSqlManual {
+    # Passo a passo da instalacao manual do SQL 2019 Express no padrao NetControll (instancia padrao, sa / netcontroll,
+    # sem Machine Learning e sem o SDK de Conectividade), num TXT ao lado dos instaladores. Devolve o caminho do TXT.
+    param([string]$Pasta)
+    if (-not (Test-Path -LiteralPath $Pasta)) { New-Item -ItemType Directory -Path $Pasta -Force | Out-Null }
+    $guia = Join-Path $Pasta "SQL 2019 manual - PASSO A PASSO.txt"
+    $linhas = @(
+        "PASSO A PASSO - INSTALAÇÃO MANUAL DO SQL SERVER 2019 EXPRESS (padrão NetControll)",
+        "Gerado pelo Preparador XMenu em $((Get-Date).ToString('dd/MM/yyyy HH:mm')).",
+        "",
+        "ANTES DE COMEÇAR",
+        "- Os instaladores ficam nesta mesma pasta: SQL2019-SSEI-Expr.exe (SQL) e vs_SSMS.exe (SSMS).",
+        "- Rode os dois como administrador.",
+        "",
+        "1. Abra o SQL2019-SSEI-Expr.exe e escolha ""Personalizado"". Confirme a pasta e clique em Instalar",
+        "   (ele baixa o restante do SQL e abre a Central de Instalação).",
+        "",
+        "2. Na Central de Instalação, clique em ""Nova instalação autônoma do SQL Server ou adicionar",
+        "   recursos a uma instalação existente"".",
+        "",
+        "3. Aceite os termos de licença e clique em Avançar (o Microsoft Update pode ficar desmarcado).",
+        "",
+        "4. SELEÇÃO DE RECURSOS",
+        "   - Deixe marcado: Serviços de Mecanismo de Banco de Dados (e a Replicação do SQL Server, se aparecer).",
+        "   - DESMARQUE: Machine Learning Services e Extensões de Linguagem (e tudo o que estiver embaixo dele).",
+        "   - DESMARQUE: SDK de Conectividade de Cliente do SQL.",
+        "",
+        "5. CONFIGURAÇÃO DA INSTÂNCIA",
+        "   - Escolha ""Instância padrão"" (o nome fica MSSQLSERVER). O sistema conecta em localhost.",
+        "",
+        "6. CONFIGURAÇÃO DO SERVIDOR",
+        "   - SQL Server Database Engine e SQL Server Browser com inicialização ""Automático"".",
+        "   - Não mude o agrupamento (collation).",
+        "",
+        "7. CONFIGURAÇÃO DO MECANISMO DE BANCO DE DADOS",
+        "   - Marque ""Modo Misto (autenticação do SQL Server e do Windows)"".",
+        "   - Senha do usuário sa: netcontroll (digite nos dois campos).",
+        "   - Clique em ""Adicionar Usuário Atual"".",
+        "",
+        "8. Avance até o fim e espere aparecer ""Concluída"". Pode fechar a Central de Instalação.",
+        "",
+        "9. DEPOIS DE INSTALAR (para os PDVs acharem o banco pela rede)",
+        "   - Abra o ""SQL Server 2019 Configuration Manager"" (Gerenciador de Configuração do SQL Server).",
+        "   - Configuração de Rede do SQL Server > Protocolos para MSSQLSERVER > TCP/IP: botão direito > Habilitar.",
+        "   - Em Serviços do SQL Server, reinicie o SQL Server (MSSQLSERVER).",
+        "   - No Preparador, Serviços do SQL > TESTAR PORTA 1433 mostra se o banco responde.",
+        "     Se não responder de outro PC, libere a porta 1433 (TCP) no Firewall do Windows deste PC.",
+        "",
+        "10. SSMS (opcional, para abrir o banco): rode o vs_SSMS.exe e instale com as opções padrão."
+    )
+    [System.IO.File]::WriteAllText($guia, (($linhas -join "`r`n") + "`r`n"), (New-Object System.Text.UTF8Encoding($true)))
+    return $guia
+}
+
 function Install-SqlManual {
     param($Button)
     if ($Script:IsDownloading) {
@@ -19212,13 +19266,22 @@ function Install-SqlManual {
     $aviso = "ATENÇÃO - INSTALAÇÃO MANUAL E AVANÇADA`n`n" +
              "Este botão baixa o SQL 2019 e o SSMS SEPARADAMENTE, para instalação manual (passo a passo).`n`n" +
              "Se você só precisa instalar o banco de dados normalmente, use o botão azul 'SQL Server 2019 (Instalador)' (automático).`n`n" +
+             "Junto vem um TXT com o passo a passo (o que marcar e desmarcar), que abre no Bloco de Notas.`n`n" +
              "Deseja realmente continuar com a instalação MANUAL?"
     $resp = [System.Windows.Forms.MessageBox]::Show($aviso, "Instalação Manual - Confirmação", [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Warning)
     if ($resp -ne [System.Windows.Forms.DialogResult]::Yes) { return }
 
+    # Passo a passo num TXT ao lado dos instaladores, aberto antes de baixar: o tecnico ja le enquanto baixa
+    try {
+        $guiaSql = New-GuiaSqlManual -Pasta $Script:DownloadFolder
+        Log-Message "INFO" "SQL manual: passo a passo salvo em $guiaSql"
+        try { Start-Process notepad.exe -ArgumentList "`"$guiaSql`"" } catch { Log-Message "ERRO" "SQL manual: não consegui abrir o passo a passo no Bloco de Notas - $($_.Exception.Message)" }
+    }
+    catch { Log-Message "ERRO" "SQL manual: não consegui criar o passo a passo - $($_.Exception.Message)" }
+
     try {
         $Button.Enabled = $false
-        Start-Download "https://download.microsoft.com/download/7/f/8/7f8a9c43-8c8a-4f7c-9f92-83c18d96b681/SQL2019-SSEI-Expr.exe" "SQL2019-SSEI-Expr.exe" $Button
+        Start-Download "https://go.microsoft.com/fwlink/?linkid=866658" "SQL2019-SSEI-Expr.exe" $Button
         
         if ($Script:CancelRequested) { return }
         
@@ -19954,7 +20017,7 @@ $formWidth = if ($screen.Width -lt 1000) { 900 } else { 1000 }
 $formHeight = if ($screen.Height -lt 800) { 700 } else { 800 }
 
 $form = New-Object System.Windows.Forms.Form
-$form.Text = "Preparador XMenu – Suporte Técnico v5.54 - REVENDA"
+$form.Text = "Preparador XMenu – Suporte Técnico v5.55 - REVENDA"
 $form.Size = New-Object System.Drawing.Size($formWidth, $formHeight)
 $form.StartPosition = "CenterScreen"
 $form.BackColor = [System.Drawing.Color]::FromArgb(25, 25, 30); $form.ForeColor = 'White'
@@ -20551,9 +20614,9 @@ $bSqlMan.FlatAppearance.MouseOverBackColor = [System.Drawing.Color]::FromArgb(33
 $bSqlMan.FlatAppearance.MouseDownBackColor = [System.Drawing.Color]::FromArgb(13, 36, 28)
 $bSqlMan.Text = "SQL 2019 + SSMS (Manual / Avançado)"; $bSqlMan.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
 $bSqlMan.Cursor = 'Hand'
-$Script:ToolTip.SetToolTip($bSqlMan, "ATENÇÃO: Instalação MANUAL e AVANÇADA. Baixa o SQL 2019 e o SSMS SEPARADAMENTE, para instalar passo a passo. Para a instalação normal/automática, use o botão azul 'SQL Server 2019 (Instalador)'.")
+$Script:ToolTip.SetToolTip($bSqlMan, "ATENÇÃO: Instalação MANUAL e AVANÇADA. Baixa o SQL 2019 e o SSMS SEPARADAMENTE, para instalar passo a passo, e abre um TXT com o passo a passo (o que marcar e desmarcar). Para a instalação normal/automática, use o botão azul 'SQL Server 2019 (Instalador)'.")
 $bSqlMan.Add_Click({ Install-SqlManual $this })
-Add-CopiarLinkAoBotao $bSqlMan "https://download.microsoft.com/download/7/f/8/7f8a9c43-8c8a-4f7c-9f92-83c18d96b681/SQL2019-SSEI-Expr.exe" "SQL 2019 (Microsoft)" "Botão direito: copia o link do instalador do SQL 2019 (Microsoft)."
+Add-CopiarLinkAoBotao $bSqlMan "https://go.microsoft.com/fwlink/?linkid=866658" "SQL 2019 (Microsoft)" "Botão direito: copia o link do instalador do SQL 2019 (Microsoft)."
 [void]$tbl.Controls.Add($bSqlMan)
 
 Add-Title "PROGRAMAS NETCONTROLL"
@@ -20822,7 +20885,7 @@ $bClock.Add_Click({ Invoke-ClockSync })
 [void]$tbl.Controls.Add($bClock)
 
 # Mensagem de abertura: explica o programa para quem abre pela primeira vez
-Log-Message "INFO" "Preparador XMenu v5.54 - REVENDA - preparo e suporte de computadores com XMenu e NetPDV"
+Log-Message "INFO" "Preparador XMenu v5.55 - REVENDA - preparo e suporte de computadores com XMenu e NetPDV"
 Log-Message "LOG" "==============================================================="
 Log-Message "LOG" "COMO USAR"
 Log-Message "LOG" "  PREPARAR AMBIENTE WINDOWS .. ajusta energia, UAC e desempenho do PC num clique"
@@ -20832,7 +20895,9 @@ Log-Message "LOG" "  EXTERNOS ................... acesso remoto, Chrome, TEF HUB
 Log-Message "LOG" "  SUPORTE E DIAGNÓSTICO ...... impressoras, rede, SQL, backup, XMLs e reparos do Windows"
 Log-Message "LOG" "  Passe o mouse sobre um botão para ver o que ele faz antes de clicar."
 Log-Message "LOG" "---------------------------------------------------------------"
-Log-Message "LOG" "NOVO NA v5.54"
+Log-Message "LOG" "NOVO NA v5.55"
+Log-Message "SUCESSO" "  Banco: o SQL 2019 + SSMS (Manual / Avançado) abre um TXT com o passo a passo (o que marcar e desmarcar: sem Machine Learning e sem o SDK de Conectividade, instância padrão, sa / netcontroll, TCP/IP)"
+Log-Message "SUCESSO" "  Banco: o SQL 2019 + SSMS (Manual / Avançado) voltou a baixar: o link antigo da Microsoft saiu do ar (404) e agora usa o link oficial dela (go.microsoft.com), que acompanha as mudanças"
 Log-Message "SUCESSO" "  LPR: na tela O que fazer com este PC, os botões USAR EM UMA IMPRESSORA JÁ CADASTRADA, CRIAR IMPRESSORA NOVA e CORRIGIR A PORTA SELECIONADA voltaram a funcionar (com o mouse por cima o clique se perdia)"
 Log-Message "SUCESSO" "  Janelas (correção da v5.52): minimizar uma janela aberta por cima da principal (XMLs, Backup, LPR, Impressoras...) não fecha mais a janela nem perde o que estava nela; minimizada, ela volta sozinha ao clicar na principal ou no programa na barra de tarefas"
 Log-Message "SUCESSO" "  Externos: novo botão TeamViewer com senha (QuickSupport de atendimento da NetControll)"
