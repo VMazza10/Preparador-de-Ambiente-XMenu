@@ -1,6 +1,6 @@
 ﻿# =============================================================================
 # PREPARADOR XMENU - VERSAO REVENDA
-# Baseado na v5.56
+# Baseado na v5.57
 # Alteracoes Revenda:
 #   - Wallpaper: fundo_revenda.png
 #   - Removido: Atalhos de Suporte e Pasta Netcontroll
@@ -20348,8 +20348,8 @@ function Run-Config {
 # SENHA PARA ABRIR
 # O cliente as vezes abre o Preparador e baixa algo sem querer: so abre com a senha dos tecnicos, pedida toda vez.
 # -----------------------------------------------------------------------------
-# Maiuscula/minuscula nao importa (o Caps Lock ligado nao atrapalha o tecnico)
-$Script:SenhaPreparador = "Preparador@Xmenu"
+# Um X no teclado numerico: 7-5-3 e 1-5-9
+$Script:SenhaPreparador = "753159"
 $Script:LogSenhaPendente = New-Object System.Collections.Generic.List[string]
 
 function Write-LogArquivoDireto {
@@ -20386,6 +20386,21 @@ function Request-SenhaPreparador {
     # Cursor na senha mesmo quando o Windows nao traz a janela para a frente (volta para ela no primeiro clique)
     $dlgS.ActiveControl = $txtSenhaAbrir
     $lblErroSenha = New-ToolLabel $dlgS "" 20 114 9 -Cor $Script:UiVermelho -W 360
+    $lblErroSenha.Height = 32
+    # A senha e um X no teclado numerico: com o Num Lock desligado aquelas teclas nao digitam numero
+    $mostraAvisoSenha = {
+        $numLockLigado = [System.Windows.Forms.Control]::IsKeyLocked([System.Windows.Forms.Keys]::NumLock)
+        if ($Script:SenhaTentativas -gt 0) {
+            $lblErroSenha.ForeColor = $Script:UiVermelho
+            $lblErroSenha.Text = "Senha errada. Tentativa $($Script:SenhaTentativas) de 3."
+            if (-not $numLockLigado) { $lblErroSenha.Text = $lblErroSenha.Text + "`r`nO Num Lock está desligado." }
+        }
+        elseif (-not $numLockLigado) {
+            $lblErroSenha.ForeColor = $Script:UiAmarelo
+            $lblErroSenha.Text = "Num Lock desligado: ligue para usar o teclado numérico."
+        }
+        else { $lblErroSenha.Text = "" }
+    }
     $btnEntrar = New-ToolButton $dlgS "ENTRAR" 170 146 120 34 $Script:UiVerde $null ""
     $btnSairSenha = New-ToolButton $dlgS "SAIR" 300 146 80 34 $Script:UiCinza $null ""
     $btnEntrar.Add_Click({
@@ -20396,14 +20411,16 @@ function Request-SenhaPreparador {
                 $dlgS.DialogResult = 'Cancel'; $dlgS.Close(); return
             }
             $Script:LogSenhaPendente.Add("Senha de abertura: tentativa errada ($($Script:SenhaTentativas) de 3)")
-            $lblErroSenha.Text = "Senha errada. Tentativa $($Script:SenhaTentativas) de 3."
+            & $mostraAvisoSenha
             $txtSenhaAbrir.Clear()
             $txtSenhaAbrir.Focus() | Out-Null
         })
     $btnSairSenha.Add_Click({ $dlgS.DialogResult = 'Cancel'; $dlgS.Close() })
     $dlgS.AcceptButton = $btnEntrar
     $dlgS.CancelButton = $btnSairSenha
-    $dlgS.Add_Shown({ $this.Activate(); $txtSenhaAbrir.Focus() | Out-Null })
+    # Ligar ou desligar o Num Lock com a janela aberta atualiza o aviso na hora
+    $txtSenhaAbrir.Add_KeyUp({ & $mostraAvisoSenha })
+    $dlgS.Add_Shown({ & $mostraAvisoSenha; $this.Activate(); $txtSenhaAbrir.Focus() | Out-Null })
     $liberado = ($dlgS.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK)
     $dlgS.Dispose()
     return $liberado
@@ -20422,7 +20439,7 @@ $formWidth = if ($screen.Width -lt 1000) { 900 } else { 1000 }
 $formHeight = if ($screen.Height -lt 800) { 700 } else { 800 }
 
 $form = New-Object System.Windows.Forms.Form
-$form.Text = "Preparador XMenu – Suporte Técnico v5.56 - REVENDA"
+$form.Text = "Preparador XMenu – Suporte Técnico v5.57 - REVENDA"
 $form.Size = New-Object System.Drawing.Size($formWidth, $formHeight)
 $form.StartPosition = "CenterScreen"
 $form.BackColor = [System.Drawing.Color]::FromArgb(25, 25, 30); $form.ForeColor = 'White'
@@ -21290,7 +21307,7 @@ $bClock.Add_Click({ Invoke-ClockSync })
 [void]$tbl.Controls.Add($bClock)
 
 # Mensagem de abertura: explica o programa para quem abre pela primeira vez
-Log-Message "INFO" "Preparador XMenu v5.56 - REVENDA - preparo e suporte de computadores com XMenu e NetPDV"
+Log-Message "INFO" "Preparador XMenu v5.57 - REVENDA - preparo e suporte de computadores com XMenu e NetPDV"
 foreach ($msgSenha in $Script:LogSenhaPendente) { Log-Message "INFO" $msgSenha }
 Log-Message "INFO" "Senha de abertura: acesso liberado"
 Log-Message "LOG" "==============================================================="
@@ -21302,7 +21319,8 @@ Log-Message "LOG" "  EXTERNOS ................... acesso remoto, Chrome, TEF HUB
 Log-Message "LOG" "  SUPORTE E DIAGNÓSTICO ...... impressoras, rede, SQL, backup, XMLs e reparos do Windows"
 Log-Message "LOG" "  Passe o mouse sobre um botão para ver o que ele faz antes de clicar."
 Log-Message "LOG" "---------------------------------------------------------------"
-Log-Message "LOG" "NOVO NA v5.56"
+Log-Message "LOG" "NOVO NA v5.57"
+Log-Message "SUCESSO" "  Senha para abrir: a senha dos técnicos agora é só de números (um X no teclado numérico); com o Num Lock desligado a janela da senha avisa para ligar"
 Log-Message "SUCESSO" "  Senha para abrir: o Preparador só abre com a senha dos técnicos (para o cliente não abrir e baixar algo sem querer); maiúscula e minúscula não importam, 3 tentativas erradas fecham o programa e tudo fica no Log"
 Log-Message "SUCESSO" "  XMLs: o ESPELHO FISCAL agora também imprime direto na impressora, sem passar por PDF (na bobina sai igual ao cupom, em folha A4 sai no meio); a janela pergunta IMPRIMIR ou SALVAR PDF e já vem marcada a impressora da última vez"
 Log-Message "SUCESSO" "  Backup: a cópia solta da licença ficou só com o ID da loja na frente (16436 - lic.seg; sem ID, sem ID - lic.seg) e não repete a cada backup: com a mesma licença, fica uma cópia só"
