@@ -1,6 +1,6 @@
 ﻿# =============================================================================
 # PREPARADOR XMENU - VERSAO REVENDA
-# Baseado na v5.55
+# Baseado na v5.56
 # Alteracoes Revenda:
 #   - Wallpaper: fundo_revenda.png
 #   - Removido: Atalhos de Suporte e Pasta Netcontroll
@@ -2607,20 +2607,19 @@ function New-DanfeNfceBlocos {
     return $b.ToArray()
 }
 
-function Save-PdfCupom {
-    # PDF de uma pagina com a largura da bobina (80 mm) e a altura do conteudo.
+function Get-CupomMedidas {
+    # Mede o cupom em pontos, na largura da bobina (80 mm): cada bloco vira operacoes
+    # de desenho com a altura que ocupam. O PDF e a impressao usam estas mesmas medidas.
     # Blocos: txt (texto quebrado por palavras), lin (linha pronta, alinhada por
     # espacos), par (esquerda e direita na mesma linha), sep (tracejado), qr e
     # faixa (tarja preta com letra branca). Na Courier toda letra tem 0,6 da
     # altura de largura, entao o tamanho sai exato do numero de colunas.
-    param($Blocos, [string]$Caminho, [string]$Titulo = "")
-    $inv = [System.Globalization.CultureInfo]::InvariantCulture
+    param($Blocos)
     $larg = 80 / 25.4 * 72
     $marg = 3 / 25.4 * 72
     $util = $larg - 2 * $marg
     $tamDe = { param([int]$Col) return ($util / ($Col * 0.6)) }
 
-    # 1) Mede: cada bloco vira operacoes de desenho com a altura que ocupam
     $ops = New-Object System.Collections.Generic.List[object]
     foreach ($bl in @($Blocos)) {
         if ($bl.K -eq 'txt') {
@@ -2658,6 +2657,21 @@ function Save-PdfCupom {
     }
     $altura = 20.0
     foreach ($op in $ops) { $altura += $op.Alt }
+    return @{ Ops = $ops; Altura = $altura; Larg = $larg; Marg = $marg; Util = $util }
+}
+
+function Save-PdfCupom {
+    # PDF de uma pagina com a largura da bobina (80 mm) e a altura do conteudo
+    param($Blocos, [string]$Caminho, [string]$Titulo = "")
+    $inv = [System.Globalization.CultureInfo]::InvariantCulture
+
+    # 1) Mede: cada bloco vira operacoes de desenho com a altura que ocupam
+    $medidas = Get-CupomMedidas -Blocos $Blocos
+    $ops = $medidas.Ops
+    $altura = $medidas.Altura
+    $larg = $medidas.Larg
+    $marg = $medidas.Marg
+    $util = $medidas.Util
 
     # 2) Desenha de cima para baixo (no PDF o zero do eixo Y fica embaixo)
     $n = "0.###"
@@ -2749,6 +2763,236 @@ function Export-DanfeNfcePdf {
     $dados = Get-DanfeNfceDados -Xml $Xml
     $blocos = New-DanfeNfceBlocos -Dados $dados -Cancelada:$Cancelada -DataCancelamento $DataCancelamento
     Save-PdfCupom -Blocos $blocos -Caminho $Caminho -Titulo ("Espelho NFC-e " + $dados.Numero + " Serie " + $dados.Serie)
+}
+
+function Invoke-DesenhaCupom {
+    # Desenha o cupom medido (Get-CupomMedidas) num Graphics, em pontos, de cima para baixo:
+    # comeca na operacao $Inicio e para quando acaba ou a pagina enche. Devolve onde parou,
+    # para a proxima pagina continuar dali. A largura util do cupom (74 mm) encolhe para
+    # caber na area que a bobina imprime (72 mm, por exemplo); em folha larga sai do
+    # tamanho normal, no meio. Mesmas contas do PDF: na Courier cada letra tem 0,6 da altura.
+    param($Graphics, $Medidas, [int]$Inicio = 0, [double]$Largura, [double]$Altura)
+    $g = $Graphics
+    $g.PageUnit = [System.Drawing.GraphicsUnit]::Point
+    # Sem o ajuste a grade de pixels (GridFit) a letra fica com a largura do desenho da
+    # fonte: as colunas dos itens e os valores alinhados a direita nao escorregam
+    $g.TextRenderingHint = [System.Drawing.Text.TextRenderingHint]::AntiAlias
+    $ops = $Medidas.Ops
+    # 1 mm de folga de cada lado: tem termica que perde o ponto da beirada
+    $folga = 1 / 25.4 * 72
+    $esc = [Math]::Min(1.0, ($Largura - 2 * $folga) / $Medidas.Util)
+    $largUtil = $Medidas.Util * $esc
+    $x0 = ($Largura - $largUtil) / 2
+    $formato = [System.Drawing.StringFormat]::GenericTypographic.Clone()
+    $formato.FormatFlags = $formato.FormatFlags -bor [System.Drawing.StringFormatFlags]::MeasureTrailingSpaces -bor [System.Drawing.StringFormatFlags]::NoWrap
+    $familia = New-Object System.Drawing.FontFamily("Courier New")
+    $fontes = @{}
+    $fonteDe = {
+        param([double]$Tam, [bool]$Neg)
+        $chave = "$Tam|$Neg"
+        if (-not $fontes.ContainsKey($chave)) {
+            $estilo = if ($Neg) { [System.Drawing.FontStyle]::Bold } else { [System.Drawing.FontStyle]::Regular }
+            $fontes[$chave] = New-Object System.Drawing.Font($familia, [single]$Tam, $estilo, [System.Drawing.GraphicsUnit]::Point)
+        }
+        return $fontes[$chave]
+    }
+    # O GDI+ posiciona pelo topo da letra e o PDF pela linha de base (0,82 da altura abaixo
+    # do topo da linha no texto, 0,85 na tarja): a diferenca e a subida da fonte
+    $subida = [double]$familia.GetCellAscent([System.Drawing.FontStyle]::Regular) / $familia.GetEmHeight([System.Drawing.FontStyle]::Regular)
+    $preto = [System.Drawing.Brushes]::Black
+    $branco = [System.Drawing.Brushes]::White
+    $caneta = New-Object System.Drawing.Pen([System.Drawing.Color]::Black, [single]0.5)
+    $caneta.DashPattern = [single[]]@(3, 3)
+    $y = 4.0
+    $i = $Inicio
+    try {
+        while ($i -lt $ops.Count) {
+            $op = $ops[$i]
+            $alt = $op.Alt * $esc
+            # Pagina cheia: o resto vai para a proxima (o primeiro desenho da pagina entra sempre)
+            if ($i -gt $Inicio -and ($y + $alt) -gt $Altura) { break }
+            if ($op.K -eq 't') {
+                $tam = $op.Tam * $esc
+                $largTxt = $op.Txt.Length * 0.6 * $tam
+                $x = $x0
+                if ($op.Al -eq 'C') { $x = $x0 + ($largUtil - $largTxt) / 2 }
+                elseif ($op.Al -eq 'D') { $x = $x0 + $largUtil - $largTxt }
+                $g.DrawString($op.Txt, (& $fonteDe $tam ([bool]$op.Neg)), $preto, [single]$x, [single]($y + $tam * (0.82 - $subida)), $formato)
+            }
+            elseif ($op.K -eq 's') {
+                $yy = [single]($y + $alt / 2)
+                $g.DrawLine($caneta, [single]$x0, $yy, [single]($x0 + $largUtil), $yy)
+            }
+            elseif ($op.K -eq 'q') {
+                $mat = $op.Mat
+                $qtd = $mat.GetLength(0)
+                $lado = $op.Lado * $esc
+                $mod = $lado / $qtd
+                $xq = $x0 + ($largUtil - $lado) / 2
+                $topo = $y + 4 * $esc
+                for ($r = 0; $r -lt $qtd; $r++) {
+                    $c = 0
+                    while ($c -lt $qtd) {
+                        if ($mat[$r, $c]) {
+                            $ini = $c
+                            while ($c -lt $qtd -and $mat[$r, $c]) { $c++ }
+                            $g.FillRectangle($preto, [single]($xq + $ini * $mod), [single]($topo + $r * $mod), [single](($c - $ini) * $mod + 0.05), [single]($mod + 0.05))
+                        }
+                        else { $c++ }
+                    }
+                }
+            }
+            elseif ($op.K -eq 'f') {
+                $g.FillRectangle($preto, [single]$x0, [single]($y + 2 * $esc), [single]$largUtil, [single]($alt - 4 * $esc))
+                $tam = $op.Tam * $esc
+                $topoTxt = $y + 4 * $esc
+                foreach ($l in $op.Linhas) {
+                    $largTxt = $l.Length * 0.6 * $tam
+                    $g.DrawString($l, (& $fonteDe $tam $true), $branco, [single]($x0 + ($largUtil - $largTxt) / 2), [single]($topoTxt + $tam * (0.85 - $subida)), $formato)
+                    $topoTxt += $tam * 1.15
+                }
+            }
+            $y += $alt
+            $i++
+        }
+    }
+    finally {
+        foreach ($fonte in $fontes.Values) { $fonte.Dispose() }
+        $caneta.Dispose()
+        $formato.Dispose()
+        $familia.Dispose()
+    }
+    return $i
+}
+
+function Send-CupomImpressora {
+    # Imprime o cupom direto na impressora, sem PDF no meio. Devolve quantas paginas sairam.
+    # Bobina: usa a largura que a fila ja tem. Fila de termica com o papel padrao errado
+    # (largo) troca para a bobina cadastrada mais perto de 80 mm, como no teste de impressao.
+    # Impressora comum (so folha) imprime na folha, do tamanho do cupom e no meio.
+    # Cupom maior que a pagina continua na seguinte.
+    param($Blocos, [string]$Impressora, [string]$Titulo = "Espelho NFC-e")
+    $medidas = Get-CupomMedidas -Blocos $Blocos
+    $doc = New-Object System.Drawing.Printing.PrintDocument
+    try {
+        $doc.DocumentName = $Titulo
+        $doc.PrinterSettings.PrinterName = $Impressora
+        if (-not $doc.PrinterSettings.IsValid) { throw "a impressora ""$Impressora"" não existe mais neste PC" }
+        $papelOriginal = $null
+        try {
+            $tamAtual = $doc.DefaultPageSettings.PaperSize
+            $largAtual = $tamAtual.Width * 0.254
+            if ($largAtual -lt 45 -or $largAtual -gt 90) {
+                $melhor = $null
+                foreach ($tam in @($doc.PrinterSettings.PaperSizes)) {
+                    $lMm = $tam.Width * 0.254
+                    if ($lMm -lt 45 -or $lMm -gt 90) { continue }
+                    if ($null -eq $melhor -or [Math]::Abs($lMm - 80) -lt [Math]::Abs(($melhor.Width * 0.254) - 80)) { $melhor = $tam }
+                }
+                if ($null -ne $melhor) {
+                    $papelOriginal = $tamAtual
+                    $doc.DefaultPageSettings.PaperSize = $melhor
+                    Log-Message "INFO" "Espelho impresso: papel de '$Impressora' trocado de $($tamAtual.PaperName) para a bobina $($melhor.PaperName)"
+                }
+            }
+        }
+        catch {}
+        $estado = @{ Proxima = 0; Paginas = 0 }
+        $doc.Add_PrintPage({
+                param($s, $e)
+                $ev = $null
+                foreach ($candidato in @($e, $_, $EventArgs, $args)) {
+                    foreach ($item in @($candidato)) {
+                        if ($item -is [System.Drawing.Printing.PrintPageEventArgs]) { $ev = $item; break }
+                    }
+                    if ($null -ne $ev) { break }
+                }
+                if ($null -eq $ev) { throw "Evento de impressão inválido." }
+                # Area que a impressora alcanca, em centesimos de polegada (x 0,72 = pontos)
+                $area = $ev.PageSettings.PrintableArea
+                $estado.Proxima = Invoke-DesenhaCupom -Graphics $ev.Graphics -Medidas $medidas -Inicio $estado.Proxima -Largura ($area.Width * 0.72) -Altura ($area.Height * 0.72 - 4)
+                $estado.Paginas++
+                $ev.HasMorePages = ($estado.Proxima -lt $medidas.Ops.Count)
+            })
+        try { $doc.Print() }
+        catch {
+            # Driver que recusa a bobina escolhida: imprime no papel que a fila ja tinha
+            if ($null -eq $papelOriginal) { throw }
+            Log-Message "ERRO" "Espelho impresso: '$Impressora' recusou a bobina ($($_.Exception.Message)); tentando com o papel padrão da fila"
+            $doc.DefaultPageSettings.PaperSize = $papelOriginal
+            $estado.Proxima = 0
+            $estado.Paginas = 0
+            $doc.Print()
+        }
+        return $estado.Paginas
+    }
+    finally { $doc.Dispose() }
+}
+
+function Send-DanfeNfceImpressora {
+    # XML da NFC-e -> espelho impresso. Devolve quantas paginas sairam; lanca excecao com o motivo quando nao da.
+    param([string]$Xml, [string]$Impressora, [switch]$Cancelada, $DataCancelamento = $null)
+    $dados = Get-DanfeNfceDados -Xml $Xml
+    $blocos = New-DanfeNfceBlocos -Dados $dados -Cancelada:$Cancelada -DataCancelamento $DataCancelamento
+    return Send-CupomImpressora -Blocos $blocos -Impressora $Impressora -Titulo ("Espelho NFC-e " + $dados.Numero + " Serie " + $dados.Serie)
+}
+
+function Show-EscolhaEspelho {
+    # Espelho fiscal: imprimir direto ou salvar em PDF. Devolve @{ Modo = 'Imprimir' ou 'Pdf';
+    # Impressora } ou $null quando o tecnico cancela. Vem marcada a impressora usada da ultima
+    # vez no espelho; sem ela, a padrao do Windows.
+    param([int]$Quantidade, [string]$Notas = "")
+    $impressoras = @()
+    try { $impressoras = @([System.Drawing.Printing.PrinterSettings]::InstalledPrinters | ForEach-Object { "$_" } | Sort-Object) } catch {}
+    $padrao = ""
+    try { $padrao = (New-Object System.Drawing.Printing.PrinterSettings).PrinterName } catch {}
+    $arqUltima = Join-Path $Script:DownloadFolder "espelho_impressora.txt"
+    $ultima = ""
+    try { if (Test-Path -LiteralPath $arqUltima) { $ultima = "$([System.IO.File]::ReadAllText($arqUltima, [System.Text.Encoding]::UTF8))".Trim() } } catch {}
+
+    $dlg = New-ToolForm "Espelho fiscal" 480 236
+    $dlg.FormBorderStyle = 'FixedDialog'
+    $dlg.MaximizeBox = $false
+    $dlg.MinimizeBox = $false
+    New-ToolLabel $dlg "ESPELHO FISCAL" 20 16 12 -Negrito | Out-Null
+    $resumo = if ($Quantidade -eq 1) { "1 nota" } else { "$Quantidade notas" }
+    if ($Notas -ne "") { $resumo = "$resumo - $Notas" }
+    $lblResumo = New-ToolLabel $dlg $resumo 20 48 9.5 -Cor $Script:UiSuave -W 430
+    $lblResumo.AutoEllipsis = $true
+    New-ToolLabel $dlg "Impressora:" 20 86 9.5 | Out-Null
+    $cmbImp = New-Object System.Windows.Forms.ComboBox
+    $cmbImp.Location = New-Object System.Drawing.Point(110, 82)
+    $cmbImp.Width = 338
+    $cmbImp.BackColor = [System.Drawing.Color]::FromArgb(20, 24, 34)
+    $cmbImp.ForeColor = $Script:UiTexto
+    $cmbImp.FlatStyle = 'Flat'
+    $cmbImp.DropDownStyle = 'DropDownList'
+    foreach ($nome in $impressoras) { [void]$cmbImp.Items.Add($nome) }
+    [void]$dlg.Controls.Add($cmbImp)
+    if ($impressoras -contains $ultima) { $cmbImp.SelectedItem = $ultima }
+    elseif ($impressoras -contains $padrao) { $cmbImp.SelectedItem = $padrao }
+    elseif ($cmbImp.Items.Count -gt 0) { $cmbImp.SelectedIndex = 0 }
+    $lblAviso = New-ToolLabel $dlg "" 20 116 9 -Cor $Script:UiAmarelo -W 430
+    if ($impressoras.Count -eq 0) { $lblAviso.Text = "Nenhuma impressora instalada neste PC: dá para salvar em PDF." }
+    # A escolha volta pelo DialogResult de cada botao (o Tag desses botoes e do desenho do mouse)
+    $btnImp = New-ToolButton $dlg "IMPRIMIR" 20 146 136 34 $Script:UiVerde $null "Imprime o espelho direto na impressora escolhida: na bobina sai igual ao cupom, em folha A4 sai no meio"
+    $btnSalvarPdf = New-ToolButton $dlg "SALVAR PDF" 166 146 136 34 $Script:UiAzul $null "Gera o espelho em PDF: uma nota abre sozinha, várias vão para a pasta do lote"
+    $btnCancelarEsp = New-ToolButton $dlg "CANCELAR" 312 146 136 34 $Script:UiCinza $null ""
+    $btnImp.DialogResult = [System.Windows.Forms.DialogResult]::Yes
+    $btnSalvarPdf.DialogResult = [System.Windows.Forms.DialogResult]::No
+    $btnCancelarEsp.DialogResult = [System.Windows.Forms.DialogResult]::Cancel
+    $btnImp.Enabled = ($impressoras.Count -gt 0)
+    if ($btnImp.Enabled) { $dlg.AcceptButton = $btnImp } else { $dlg.AcceptButton = $btnSalvarPdf }
+    $dlg.CancelButton = $btnCancelarEsp
+    $res = $dlg.ShowDialog()
+    $escolhida = "$($cmbImp.SelectedItem)"
+    $dlg.Dispose()
+    if ($res -eq [System.Windows.Forms.DialogResult]::Yes -and $escolhida -ne "") {
+        try { [System.IO.File]::WriteAllText($arqUltima, $escolhida, (New-Object System.Text.UTF8Encoding($false))) } catch {}
+        return @{ Modo = 'Imprimir'; Impressora = $escolhida }
+    }
+    if ($res -eq [System.Windows.Forms.DialogResult]::No) { return @{ Modo = 'Pdf'; Impressora = "" } }
+    return $null
 }
 
 # Preenche uma DataTable em outra thread. O SqlDataAdapter.Fill so volta quando TODAS as linhas chegaram (e cada nota
@@ -3108,7 +3352,7 @@ function Show-XmlDownloader {
         $btnCopiar = New-ToolButton $f "COPIAR FALTANTES" 12 620 184 30 $Script:UiCinza $null "Copia os números que faltaram na última busca ou conferência, já formatados, para colar num e-mail ou WhatsApp para o cliente"
         $btnPasta = New-ToolButton $f "ABRIR PASTA" 206 620 184 30 $Script:UiCinza $null "Abre a pasta do ultimo lote baixado"
         $btnZip = New-ToolButton $f "ABRIR ZIP" 400 620 184 30 $Script:UiCinza $null "Abre a pasta compactada do ultimo lote"
-        $btnPdf = New-ToolButton $f "ESPELHO FISCAL (PDF)" 594 620 184 30 $Script:UiVerde $null "Gera o espelho fiscal da nota em PDF, igual ao cupom (80 mm, com QR Code), das notas marcadas. Por chave ou por pedido, busca e gera direto."
+        $btnPdf = New-ToolButton $f "ESPELHO FISCAL" 594 620 184 30 $Script:UiVerde $null "Espelho fiscal das notas marcadas, igual ao cupom (80 mm, com QR Code): imprime direto na impressora ou salva em PDF. Por chave ou por pedido, busca e já pergunta."
         $btnFechar = New-ToolButton $f "FECHAR" 788 620 184 30 $Script:UiCinza $null "Fecha esta janela"
         foreach ($b in @($btnBuscar, $btnBaixarSel, $btnBaixarTudo, $btnConferir, $btnAjuda, $btnCopiar, $btnPasta, $btnZip, $btnPdf, $btnFechar)) {
             $b.Anchor = 'Bottom,Left'
@@ -4999,7 +5243,7 @@ function Show-XmlDownloader {
             }
             # A busca que acabou de rodar ja explicou na tela por que nao veio nada
             if ($lv.Items.Count -eq 0) {
-                if (-not $acabouDeBuscar) { & $setStatus "Faça a busca antes de gerar o PDF." $Script:UiAmarelo }
+                if (-not $acabouDeBuscar) { & $setStatus "Faça a busca antes de gerar o espelho." $Script:UiAmarelo }
                 return
             }
             # Marcadas; sem nenhuma marcada vale a lista inteira, como no BAIXAR TUDO
@@ -5017,12 +5261,12 @@ function Show-XmlDownloader {
                 $repetidos = @($sel | Where-Object { $null -ne $_.Pedido } | Group-Object { "$($_.Pedido)" } | Where-Object { $_.Count -gt 1 })
                 if ($repetidos.Count -gt 0) {
                     $detalhe = @($repetidos | Select-Object -First 10 | ForEach-Object { "Pedido $($_.Name): $($_.Count) notas" }) -join "`r`n"
-                    & $setStatus "Pedido repetido em mais de uma nota: marque só a do dia certo e clique de novo em ESPELHO FISCAL (PDF)." $Script:UiAmarelo
+                    & $setStatus "Pedido repetido em mais de uma nota: marque só a do dia certo e clique de novo em ESPELHO FISCAL." $Script:UiAmarelo
                     [System.Windows.Forms.MessageBox]::Show(
                         "O número do pedido se repete (ele zera por dia), então a busca trouxe mais de uma nota:`r`n`r`n$detalhe`r`n`r`n" +
-                        "A lista está da mais recente para a mais antiga. Confira a coluna Data, marque só a nota certa e clique de novo em ESPELHO FISCAL (PDF). " +
+                        "A lista está da mais recente para a mais antiga. Confira a coluna Data, marque só a nota certa e clique de novo em ESPELHO FISCAL. " +
                         "Se quiser todas, é só clicar de novo sem marcar nenhuma.",
-                        "Espelho fiscal (PDF)", "OK", "Information") | Out-Null
+                        "Espelho fiscal", "OK", "Information") | Out-Null
                     return
                 }
             }
@@ -5044,10 +5288,84 @@ function Show-XmlDownloader {
                 return ($txtFora -join "`r`n")
             }
             if ($podem.Count -eq 0) {
-                & $setStatus "Nenhuma nota autorizada marcada - nenhum PDF gerado." $Script:UiAmarelo
+                & $setStatus "Nenhuma nota autorizada marcada - nenhum espelho gerado." $Script:UiAmarelo
                 [System.Windows.Forms.MessageBox]::Show(
                     "Nenhuma das notas marcadas tem espelho para gerar. O espelho fiscal só existe para NFC-e autorizada (a cancelada sai com a tarja NOTA CANCELADA).`r`n`r`n" + (& $descreveFora),
-                    "Espelho fiscal (PDF)", "OK", "Information") | Out-Null
+                    "Espelho fiscal", "OK", "Information") | Out-Null
+                return
+            }
+
+            # Imprimir direto ou salvar em PDF: pergunta depois da busca, ja sabendo quantas notas vao
+            $listaNotas = (@($podem | Select-Object -First 5 | ForEach-Object { "$($_.Nota)" })) -join ", "
+            if ($podem.Count -gt 5) { $listaNotas = $listaNotas + " e mais $($podem.Count - 5)" }
+            if ($fora.Count -eq 1) { $listaNotas = $listaNotas + " (1 sem espelho fica de fora)" }
+            elseif ($fora.Count -gt 1) { $listaNotas = $listaNotas + " ($($fora.Count) sem espelho ficam de fora)" }
+            $escolha = Show-EscolhaEspelho -Quantidade $podem.Count -Notas ("nº " + $listaNotas)
+            if ($null -eq $escolha) {
+                & $setStatus "Espelho fiscal cancelado." $Script:UiSuave
+                Log-Message "CANCEL" "Espelho fiscal: fechou a escolha sem imprimir nem gerar PDF"
+                return
+            }
+            if ($escolha.Modo -eq 'Imprimir') {
+                $impressora = $escolha.Impressora
+                $Script:XmlOcupado = $true
+                $Script:XmlCancelar = $false
+                $btnCancelar.Enabled = $true
+                $btnPdf.Enabled = $false
+                $pb.Maximum = $podem.Count
+                $pb.Value = 0
+                $impressos = 0
+                $falhasImp = @()
+                $interrompido = $false
+                try {
+                    & $setStatus "Imprimindo o espelho fiscal em $impressora..." $Script:UiAmarelo
+                    Log-Message "INFO" "Espelho impresso: $($podem.Count) nota(s) para '$impressora'"
+                    $i = 0
+                    foreach ($it in $podem) {
+                        $i++
+                        if ($Script:XmlCancelar) {
+                            $interrompido = $true
+                            Log-Message "CANCEL" "Espelho impresso: interrompido em $i de $($podem.Count)"
+                            break
+                        }
+                        $lblProg.Text = "Imprimindo $i de $($podem.Count)..."
+                        $pb.Value = $i
+                        [System.Windows.Forms.Application]::DoEvents()
+                        try {
+                            $paginas = Send-DanfeNfceImpressora -Xml $it.Conteudo -Impressora $impressora -Cancelada:([bool]$it.Cancelada) -DataCancelamento $it.DataCancelamento
+                            $impressos++
+                            Log-Message "INFO" "Espelho impresso: série $($it.Serie) nota $($it.Nota) ($paginas página(s))"
+                        }
+                        catch {
+                            $falhasImp += "Série $($it.Serie) nota $($it.Nota): $($_.Exception.Message)"
+                            Log-Message "ERRO" "Espelho impresso: falha na nota $($it.Nota) - $($_.Exception.Message)"
+                        }
+                    }
+                    $resumo = "$impressos espelho(s) enviado(s) para $impressora"
+                    if ($fora.Count -gt 0) { $resumo = $resumo + " | $($fora.Count) sem espelho" }
+                    if ($falhasImp.Count -gt 0) { $resumo = $resumo + " | $($falhasImp.Count) com erro" }
+                    if ($interrompido) { $resumo = "INTERROMPIDO - " + $resumo }
+                    if ($impressos -gt 0) { Log-Message "SUCESSO" "Espelho impresso: $resumo" } else { Log-Message "ERRO" "Espelho impresso: $resumo" }
+                    if ($fora.Count -gt 0 -or $falhasImp.Count -gt 0 -or $interrompido) {
+                        & $setStatus $resumo $Script:UiAmarelo
+                        $msg = $resumo
+                        if ($fora.Count -gt 0) { $msg = $msg + "`r`n`r`nSem espelho (só NFC-e autorizada tem espelho fiscal):`r`n" + (& $descreveFora) }
+                        if ($falhasImp.Count -gt 0) { $msg = $msg + "`r`n`r`nNão deu para imprimir:`r`n" + (($falhasImp | Select-Object -First 15) -join "`r`n") }
+                        [System.Windows.Forms.MessageBox]::Show($msg, "Espelho fiscal (impressão)", "OK", "Warning") | Out-Null
+                    }
+                    else { & $setStatus $resumo $Script:UiVerde }
+                }
+                catch {
+                    & $setStatus ("Erro ao imprimir o espelho: " + $_.Exception.Message) $Script:UiVermelho
+                    Log-Message "ERRO" "Espelho impresso: $($_.Exception.Message)"
+                }
+                finally {
+                    $btnCancelar.Enabled = $false
+                    $btnPdf.Enabled = $true
+                    $lblProg.Text = ""
+                    $pb.Value = 0
+                    $Script:XmlOcupado = $false
+                }
                 return
             }
 
@@ -5619,15 +5937,18 @@ function Show-XmlDownloader {
             "   todas vieram, um aviso grande mostra exatamente quais faltaram.",
             "   CANCELAR interrompe tanto a busca quanto o download.",
             "",
-            "6) ESPELHO FISCAL (PDF)",
-            "   Gera o espelho fiscal da nota em PDF, no mesmo formato do cupom",
-            "   (80 mm, com QR Code), das notas marcadas; sem nenhuma marcada, de",
-            "   todas da lista. Por chave ou por pedido nem precisa buscar antes:",
-            "   digite e clique em ESPELHO FISCAL (PDF).",
+            "6) ESPELHO FISCAL",
+            "   Espelho fiscal da nota no mesmo formato do cupom (80 mm, com",
+            "   QR Code), das notas marcadas; sem nenhuma marcada, de todas da",
+            "   lista. Por chave ou por pedido nem precisa buscar antes: digite",
+            "   e clique em ESPELHO FISCAL.",
+            "   Na janela que abre: IMPRIMIR manda direto para a impressora",
+            "   escolhida (vem marcada a da ultima vez) e SALVAR PDF gera o",
+            "   arquivo. Na bobina sai igual ao cupom; em folha A4, no meio.",
             "   O numero do pedido pode se repetir (zera por dia): se ele aparecer",
             "   em mais de uma nota, a lista mostra todas, da mais recente para a",
             "   mais antiga. Marque so a do dia certo e clique de novo.",
-            "   Uma nota: o PDF abre sozinho. Varias: abre a pasta do lote.",
+            "   PDF de uma nota abre sozinho. Varias: abre a pasta do lote.",
             "   So NFC-e autorizada tem espelho. A cancelada sai com a tarja",
             "   NOTA CANCELADA; inutilizada e sem protocolo ficam de fora e",
             "   aparecem no aviso do fim.",
@@ -6134,7 +6455,7 @@ function Get-SqlIdLoja {
 function Get-BackupNomeArquivo {
     # "Backup NetWebPDV - Loja 1234 - 12-09-2026 15h30.bak": banco, ID da loja, dia e hora. O mesmo nome serve
     # para o .bak, o .zip e o .zip do BACKUP MANUAL (troque a extensao). Sem ID da loja, entra "sem ID". Nunca
-    # repete um .bak, .zip ou copia da licenca (" - lic.seg") que ja esteja na pasta: vira "(2)", "(3)".
+    # repete um .bak ou .zip que ja esteja na pasta: vira "(2)", "(3)".
     param([string]$Banco, [string]$Loja, [datetime]$Data, [string]$Pasta)
     $nomeBanco = $Banco
     if ($Banco -ieq 'netwebpdv') { $nomeBanco = 'NetWebPDV' }
@@ -6143,8 +6464,7 @@ function Get-BackupNomeArquivo {
     $base = ("Backup " + $nomeBanco + " - " + $origem + " - " + $Data.ToString("dd-MM-yyyy HH'h'mm")) -replace '[\\/:*?"<>|]', '-'
     $nomeLivre = $base
     $n = 1
-    while ((Test-Path -LiteralPath (Join-Path $Pasta ($nomeLivre + ".bak"))) -or (Test-Path -LiteralPath (Join-Path $Pasta ($nomeLivre + ".zip"))) -or
-        (@(Get-ChildItem -LiteralPath $Pasta -Filter ($nomeLivre + " - *.seg") -File -ErrorAction SilentlyContinue).Count -gt 0)) {
+    while ((Test-Path -LiteralPath (Join-Path $Pasta ($nomeLivre + ".bak"))) -or (Test-Path -LiteralPath (Join-Path $Pasta ($nomeLivre + ".zip")))) {
         $n++
         $nomeLivre = $base + " ($n)"
     }
@@ -6404,17 +6724,32 @@ function Test-LicencaNoZip {
     return ""
 }
 
+function Get-NomeLicencaAoLado {
+    # Nome da copia solta da licenca: so o ID da loja na frente ("1234 - lic.seg"; sem ID, "sem ID - lic.seg")
+    param([string]$Loja, [string]$Nome = "lic.seg")
+    $origem = "$Loja".Trim()
+    if ($origem -eq "") { $origem = "sem ID" }
+    return (($origem + " - " + $Nome) -replace '[\\/:*?"<>|]', '-')
+}
+
 function Save-LicencaAoLado {
-    # Copia a licenca solta na pasta do backup, ao lado do .bak/.zip, com o nome dele na frente
-    # ("Backup NetWebPDV - Loja 1234 - 28-09-2026 15h30 - lic.seg"), sem sobrescrever nada, e confere a copia (SHA-256).
-    # Devolve os caminhos gravados; lanca excecao se falhar.
-    param([object[]]$Itens, [string]$Backup)
-    $baseLic = Join-Path (Split-Path -Parent $Backup) ([System.IO.Path]::GetFileNameWithoutExtension($Backup))
+    # Copia a licenca solta na pasta do backup, ao lado do .bak/.zip, com o ID da loja na frente ("1234 - lic.seg"),
+    # e confere a copia (SHA-256). Backup de outro dia da mesma loja: se a licenca la ja e igual, fica a mesma (nao
+    # repete); se mudou, a nova vai ao lado como "1234 - lic (2).seg". Nunca escreve por cima.
+    # Devolve os caminhos (gravados ou que ja estavam iguais); lanca excecao se falhar.
+    param([object[]]$Itens, [string]$Pasta, [string]$Loja)
     $gravados = @()
     foreach ($itemLic in $Itens) {
-        $destLic = "$baseLic - $($itemLic.Nome)"
+        $nomeLic = Get-NomeLicencaAoLado -Loja $Loja -Nome $itemLic.Nome
+        $destLic = Join-Path $Pasta $nomeLic
         $nLic = 1
-        while (Test-Path -LiteralPath $destLic) { $nLic++; $destLic = "$baseLic - ($nLic) $($itemLic.Nome)" }
+        $jaIgual = $false
+        while (Test-Path -LiteralPath $destLic) {
+            if ((Get-HashSha256 ([System.IO.File]::ReadAllBytes($destLic))) -eq $itemLic.Hash) { $jaIgual = $true; break }
+            $nLic++
+            $destLic = Join-Path $Pasta ([System.IO.Path]::GetFileNameWithoutExtension($nomeLic) + " ($nLic)" + [System.IO.Path]::GetExtension($nomeLic))
+        }
+        if ($jaIgual) { $gravados += $destLic; continue }
         # CreateNew: nunca escreve por cima de um arquivo que ja exista
         $fsDest = [System.IO.File]::Open($destLic, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
         try { $fsDest.Write($itemLic.Conteudo, 0, $itemLic.Conteudo.Length) }
@@ -6639,9 +6974,9 @@ function Invoke-BackupBanco {
                 else { Log-Message "ERRO" "Backup: $problemaLic" }
             }
             try {
-                $copiasLic = @(Save-LicencaAoLado -Itens $licBkp -Backup $arquivo)
+                $copiasLic = @(Save-LicencaAoLado -Itens $licBkp -Pasta (Split-Path -Parent $arquivo) -Loja $res.Loja)
                 $res.LicencaAoLado = ($copiasLic -join "; ")
-                foreach ($copiaLic in $copiasLic) { Log-Message "SUCESSO" "Backup: licença copiada solta na pasta do backup e conferida (igual à original): $copiaLic" }
+                foreach ($copiaLic in $copiasLic) { Log-Message "SUCESSO" "Backup: licença solta na pasta do backup e conferida (igual à original): $copiaLic" }
             }
             catch { Log-Message "ERRO" "Backup: não consegui copiar a licença $nomesLic solta na pasta do backup - $($_.Exception.Message)" }
             if ($res.LicencaNoZip -or $res.LicencaAoLado -ne "") { $res.Licenca = @($licBkp | ForEach-Object { $_.Nome }) }
@@ -6936,9 +7271,9 @@ function Invoke-BackupArquivosBanco {
         # Licenca tambem solta na pasta, ao lado do .zip (so depois do .zip pronto: nada fica sobrando se a copia falhar)
         if ($licArq.Count -gt 0) {
             try {
-                $copiasLic = @(Save-LicencaAoLado -Itens $licArq -Backup $zipCaminho)
+                $copiasLic = @(Save-LicencaAoLado -Itens $licArq -Pasta (Split-Path -Parent $zipCaminho) -Loja $lojaZip)
                 $res.LicencaAoLado = ($copiasLic -join "; ")
-                foreach ($copiaLic in $copiasLic) { & $arqLog "SUCESSO" "licença copiada solta na pasta, ao lado do .zip, e conferida (igual à original): $copiaLic" }
+                foreach ($copiaLic in $copiasLic) { & $arqLog "SUCESSO" "licença solta na pasta, ao lado do .zip, e conferida (igual à original): $copiaLic" }
             }
             catch { & $arqLog "ERRO" "não consegui copiar a licença solta na pasta do backup - $($_.Exception.Message)" }
             if ($res.LicencaNoZip -or $res.LicencaAoLado -ne "") { $res.Licenca = @($licArq | ForEach-Object { $_.Nome }) }
@@ -9443,7 +9778,7 @@ function Show-BackupBanco {
             $Script:ToolTip.SetToolTip($txtBkpSenha, "Senha do usuário escolhido. Com sa costuma ser netcontroll; com sa2 (ou outro usuário) normalmente é outra - digite aqui.")
             $Script:ToolTip.SetToolTip($cmbBkpBanco, "Bancos de usuário desse SQL Server. O netwebpdv já vem escolhido quando existe.")
             $Script:ToolTip.SetToolTip($lblBkpPasta, "Pasta fixa dos backups, dentro de Arquivos Xmenu na Área de Trabalho.")
-            $Script:ToolTip.SetToolTip($lblBkpArquivo, "A licença do NetControll (lic.seg), da pasta do Concentrador, vai junto: dentro do .zip e também solta na pasta, ao lado do backup (com o nome dele na frente).`r`nO original só é copiado: nunca é movido nem alterado.")
+            $Script:ToolTip.SetToolTip($lblBkpArquivo, "A licença do NetControll (lic.seg), da pasta do Concentrador, vai junto: dentro do .zip e também solta na pasta, ao lado do backup, só com o ID da loja na frente (1234 - lic.seg).`r`nO original só é copiado: nunca é movido nem alterado.")
             $Script:ToolTip.SetToolTip($chkBkpZip, "O .bak tem o tamanho dos dados. Compactado costuma ficar 80 a 90% menor, bom para WeTransfer ou pendrive.")
             $Script:ToolTip.SetToolTip($btnBkpArquivos, "Backup manual, do jeito antigo: copia os arquivos do banco (MDF e LDF) para um .zip, sem usar o backup do SQL. O SISTEMA TRAVA: o banco fica offline durante a cópia e o PDV e o Concentrador perdem a conexão. Serve quando o backup normal falha (banco corrompido, suspeito ou em recuperação pendente). No fim o Preparador tenta colocar o banco de volta ONLINE.")
         }
@@ -9494,7 +9829,7 @@ function Show-BackupBanco {
             $licPrevia = @(@((Find-LicencaNetControll).Arquivos) | ForEach-Object { $_.Name })
             if ($licPrevia.Count -gt 0) {
                 if ($chkBkpZip.Checked) { $nomeArq = $nomeArq + " (com o $($licPrevia -join ', '))" }
-                $nomeArq = $nomeArq + "   +   $($licPrevia -join ', ')"
+                $nomeArq = $nomeArq + "   +   $((@($licPrevia | ForEach-Object { Get-NomeLicencaAoLado -Loja $lojaPrevia -Nome $_ })) -join ', ')"
                 $lblBkpArquivo.ForeColor = $Script:UiSuave
             }
             else {
@@ -20010,6 +20345,76 @@ function Run-Config {
 }
 
 # -----------------------------------------------------------------------------
+# SENHA PARA ABRIR
+# O cliente as vezes abre o Preparador e baixa algo sem querer: so abre com a senha dos tecnicos, pedida toda vez.
+# -----------------------------------------------------------------------------
+# Maiuscula/minuscula nao importa (o Caps Lock ligado nao atrapalha o tecnico)
+$Script:SenhaPreparador = "Preparador@Xmenu"
+$Script:LogSenhaPendente = New-Object System.Collections.Generic.List[string]
+
+function Write-LogArquivoDireto {
+    # Antes da janela principal o Log-Message nao grava (nao ha onde mostrar): escreve direto no arquivo do dia
+    param([string]$Tag, [string]$Msg)
+    try {
+        $pastaLogDireto = Join-Path $Script:DownloadFolder "Logs"
+        if (-not (Test-Path -LiteralPath $pastaLogDireto)) { New-Item -ItemType Directory -Path $pastaLogDireto -Force | Out-Null }
+        "[$((Get-Date).ToString('HH:mm:ss'))] [$Tag] $Msg" | Out-File -FilePath (Join-Path $pastaLogDireto "log_preparar_ambiente_$((Get-Date).ToString('yyyy-MM-dd')).txt") -Append -Encoding UTF8
+    }
+    catch {}
+}
+
+function Request-SenhaPreparador {
+    # Janela da senha antes da principal. Devolve $true quando a senha confere; SAIR ou 3 erros fecham o programa.
+    $Script:SenhaTentativas = 0
+    $dlgS = New-ToolForm "Preparador XMenu" 420 240
+    $dlgS.FormBorderStyle = 'FixedDialog'
+    $dlgS.MaximizeBox = $false
+    $dlgS.MinimizeBox = $false
+    $dlgS.StartPosition = 'CenterScreen'
+    $dlgS.TopMost = $true
+    New-ToolLabel $dlgS "PREPARADOR XMENU" 20 16 12 -Negrito | Out-Null
+    New-ToolLabel $dlgS "Digite a senha dos técnicos para abrir:" 20 50 9.5 -Cor $Script:UiSuave | Out-Null
+    $txtSenhaAbrir = New-Object System.Windows.Forms.TextBox
+    $txtSenhaAbrir.Location = New-Object System.Drawing.Point(20, 76)
+    $txtSenhaAbrir.Size = New-Object System.Drawing.Size(360, 30)
+    $txtSenhaAbrir.BackColor = [System.Drawing.Color]::FromArgb(20, 24, 34)
+    $txtSenhaAbrir.ForeColor = $Script:UiTexto
+    $txtSenhaAbrir.BorderStyle = 'FixedSingle'
+    $txtSenhaAbrir.Font = New-Object System.Drawing.Font("Segoe UI", 12)
+    $txtSenhaAbrir.UseSystemPasswordChar = $true
+    [void]$dlgS.Controls.Add($txtSenhaAbrir)
+    # Cursor na senha mesmo quando o Windows nao traz a janela para a frente (volta para ela no primeiro clique)
+    $dlgS.ActiveControl = $txtSenhaAbrir
+    $lblErroSenha = New-ToolLabel $dlgS "" 20 114 9 -Cor $Script:UiVermelho -W 360
+    $btnEntrar = New-ToolButton $dlgS "ENTRAR" 170 146 120 34 $Script:UiVerde $null ""
+    $btnSairSenha = New-ToolButton $dlgS "SAIR" 300 146 80 34 $Script:UiCinza $null ""
+    $btnEntrar.Add_Click({
+            if ($txtSenhaAbrir.Text.Trim() -eq $Script:SenhaPreparador) { $dlgS.DialogResult = 'OK'; $dlgS.Close(); return }
+            $Script:SenhaTentativas++
+            if ($Script:SenhaTentativas -ge 3) {
+                Write-LogArquivoDireto "ERRO" "Senha de abertura: 3 tentativas erradas, o Preparador foi fechado"
+                $dlgS.DialogResult = 'Cancel'; $dlgS.Close(); return
+            }
+            $Script:LogSenhaPendente.Add("Senha de abertura: tentativa errada ($($Script:SenhaTentativas) de 3)")
+            $lblErroSenha.Text = "Senha errada. Tentativa $($Script:SenhaTentativas) de 3."
+            $txtSenhaAbrir.Clear()
+            $txtSenhaAbrir.Focus() | Out-Null
+        })
+    $btnSairSenha.Add_Click({ $dlgS.DialogResult = 'Cancel'; $dlgS.Close() })
+    $dlgS.AcceptButton = $btnEntrar
+    $dlgS.CancelButton = $btnSairSenha
+    $dlgS.Add_Shown({ $this.Activate(); $txtSenhaAbrir.Focus() | Out-Null })
+    $liberado = ($dlgS.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK)
+    $dlgS.Dispose()
+    return $liberado
+}
+
+if (-not (Request-SenhaPreparador)) {
+    Write-LogArquivoDireto "CANCEL" "Senha de abertura: o Preparador não foi aberto"
+    exit
+}
+
+# -----------------------------------------------------------------------------
 # 6. UI WINDOWS FORMS
 # -----------------------------------------------------------------------------
 $screen = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
@@ -20017,7 +20422,7 @@ $formWidth = if ($screen.Width -lt 1000) { 900 } else { 1000 }
 $formHeight = if ($screen.Height -lt 800) { 700 } else { 800 }
 
 $form = New-Object System.Windows.Forms.Form
-$form.Text = "Preparador XMenu – Suporte Técnico v5.55 - REVENDA"
+$form.Text = "Preparador XMenu – Suporte Técnico v5.56 - REVENDA"
 $form.Size = New-Object System.Drawing.Size($formWidth, $formHeight)
 $form.StartPosition = "CenterScreen"
 $form.BackColor = [System.Drawing.Color]::FromArgb(25, 25, 30); $form.ForeColor = 'White'
@@ -20732,7 +21137,7 @@ $bXml.Text = "Baixar XMLs NFC-e"
 $bXml.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
 $bXml.Cursor = 'Hand'
 Format-SupportBtn $bXml $colorSql
-$Script:ToolTip.SetToolTip($bXml, "Conecta no banco netwebpdv e baixa em lote os XMLs das NFC-e por série e sequência, por período, por chave de acesso ou pelo número do pedido. Já monta a pasta organizada e o .zip pronto para enviar ao cliente, avisa quais notas não estão no banco e gera o espelho fiscal da nota em PDF, igual ao cupom.")
+$Script:ToolTip.SetToolTip($bXml, "Conecta no banco netwebpdv e baixa em lote os XMLs das NFC-e por série e sequência, por período, por chave de acesso ou pelo número do pedido. Já monta a pasta organizada e o .zip pronto para enviar ao cliente, avisa quais notas não estão no banco e imprime ou gera em PDF o espelho fiscal da nota, igual ao cupom.")
 $bXml.Add_Click({ Show-XmlDownloader })
 [void]$tbl.Controls.Add($bXml)
 
@@ -20885,7 +21290,9 @@ $bClock.Add_Click({ Invoke-ClockSync })
 [void]$tbl.Controls.Add($bClock)
 
 # Mensagem de abertura: explica o programa para quem abre pela primeira vez
-Log-Message "INFO" "Preparador XMenu v5.55 - REVENDA - preparo e suporte de computadores com XMenu e NetPDV"
+Log-Message "INFO" "Preparador XMenu v5.56 - REVENDA - preparo e suporte de computadores com XMenu e NetPDV"
+foreach ($msgSenha in $Script:LogSenhaPendente) { Log-Message "INFO" $msgSenha }
+Log-Message "INFO" "Senha de abertura: acesso liberado"
 Log-Message "LOG" "==============================================================="
 Log-Message "LOG" "COMO USAR"
 Log-Message "LOG" "  PREPARAR AMBIENTE WINDOWS .. ajusta energia, UAC e desempenho do PC num clique"
@@ -20895,7 +21302,10 @@ Log-Message "LOG" "  EXTERNOS ................... acesso remoto, Chrome, TEF HUB
 Log-Message "LOG" "  SUPORTE E DIAGNÓSTICO ...... impressoras, rede, SQL, backup, XMLs e reparos do Windows"
 Log-Message "LOG" "  Passe o mouse sobre um botão para ver o que ele faz antes de clicar."
 Log-Message "LOG" "---------------------------------------------------------------"
-Log-Message "LOG" "NOVO NA v5.55"
+Log-Message "LOG" "NOVO NA v5.56"
+Log-Message "SUCESSO" "  Senha para abrir: o Preparador só abre com a senha dos técnicos (para o cliente não abrir e baixar algo sem querer); maiúscula e minúscula não importam, 3 tentativas erradas fecham o programa e tudo fica no Log"
+Log-Message "SUCESSO" "  XMLs: o ESPELHO FISCAL agora também imprime direto na impressora, sem passar por PDF (na bobina sai igual ao cupom, em folha A4 sai no meio); a janela pergunta IMPRIMIR ou SALVAR PDF e já vem marcada a impressora da última vez"
+Log-Message "SUCESSO" "  Backup: a cópia solta da licença ficou só com o ID da loja na frente (16436 - lic.seg; sem ID, sem ID - lic.seg) e não repete a cada backup: com a mesma licença, fica uma cópia só"
 Log-Message "SUCESSO" "  Banco: o SQL 2019 + SSMS (Manual / Avançado) abre um TXT com o passo a passo (o que marcar e desmarcar: sem Machine Learning e sem o SDK de Conectividade, instância padrão, sa / netcontroll, TCP/IP)"
 Log-Message "SUCESSO" "  Banco: o SQL 2019 + SSMS (Manual / Avançado) voltou a baixar: o link antigo da Microsoft saiu do ar (404) e agora usa o link oficial dela (go.microsoft.com), que acompanha as mudanças"
 Log-Message "SUCESSO" "  LPR: na tela O que fazer com este PC, os botões USAR EM UMA IMPRESSORA JÁ CADASTRADA, CRIAR IMPRESSORA NOVA e CORRIGIR A PORTA SELECIONADA voltaram a funcionar (com o mouse por cima o clique se perdia)"
