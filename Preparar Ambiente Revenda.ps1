@@ -1,6 +1,6 @@
 ﻿# =============================================================================
 # PREPARADOR XMENU - VERSAO REVENDA
-# Baseado na v5.58
+# Baseado na v5.59
 # Alteracoes Revenda:
 #   - Wallpaper: fundo_revenda.png
 #   - Removido: Atalhos de Suporte e Pasta Netcontroll
@@ -11746,7 +11746,7 @@ function Invoke-ClockSync {
 # -----------------------------------------------------------------------------
 # NETSTART COM O WINDOWS
 # O NetStart (na pasta do Concentrador) abre os programas da NetControll. Um NetStart.bat na pasta Inicializar do
-# Windows (a de todos os usuarios) faz ele abrir sozinho quando o Windows inicia.
+# usuario (shell:startup) faz ele abrir sozinho quando o Windows inicia.
 # -----------------------------------------------------------------------------
 function Find-InicializacoesNetStart {
     # Onde o NetStart ja abre sozinho com o Windows, para nao criar um segundo e ele abrir duas vezes: arquivos das
@@ -11787,14 +11787,38 @@ function Find-InicializacoesNetStart {
     return $achados
 }
 
+function Get-PastaInicializarUsuario {
+    # shell:startup do usuario que esta logado no PC (o dono do Explorer desta sessao). O Preparador roda como
+    # administrador: aberto com OUTRO usuario administrador, o Startup "deste processo" seria o do admin, e o NetStart
+    # nao abriria para quem usa o PC. Sem como descobrir, fica o Startup do usuario do Preparador.
+    $pasta = [Environment]::GetFolderPath('Startup')
+    try {
+        $sessao = [System.Diagnostics.Process]::GetCurrentProcess().SessionId
+        $explorer = @(Get-CimInstance Win32_Process -Filter "Name='explorer.exe' AND SessionId=$sessao" -ErrorAction Stop)[0]
+        if ($null -eq $explorer) { return $pasta }
+        $dono = Invoke-CimMethod -InputObject $explorer -MethodName GetOwner -ErrorAction Stop
+        if ("$($dono.User)" -eq "" -or "$($dono.User)" -ieq $env:USERNAME) { return $pasta }
+        $sid = (New-Object System.Security.Principal.NTAccount("$($dono.Domain)", "$($dono.User)")).Translate([System.Security.Principal.SecurityIdentifier]).Value
+        $perfil = "$((Get-CimInstance Win32_UserProfile -Filter "SID='$sid'" -ErrorAction Stop).LocalPath)"
+        $outra = Join-Path $perfil "AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Startup"
+        if ($perfil -ne "" -and (Test-Path -LiteralPath $outra)) {
+            Log-Message "INFO" "NetStart com o Windows: o Preparador está com o usuário $env:USERNAME, mas quem está logado é $($dono.Domain)\$($dono.User): usa o Inicializar dele"
+            return $outra
+        }
+    }
+    catch {}
+    return $pasta
+}
+
 function Set-NetStartInicializacao {
-    # Cria o NetStart.bat (start do netstart.exe) na pasta Inicializar de todos os usuarios. Confere antes se o
-    # netstart.exe existe e se o NetStart ja inicia por outro caminho; pergunta antes de gravar e confere o arquivo.
+    # Cria o NetStart.bat (start do netstart.exe) na pasta Inicializar do usuario logado (shell:startup). Confere antes
+    # se o netstart.exe existe e se o NetStart ja inicia por outro caminho (inclusive pelo Inicializar de todos os
+    # usuarios); pergunta antes de gravar e confere o arquivo.
     # Os parametros so servem para o teste (pastas e chaves trocadas); no uso normal ficam os padroes.
     param($Botao, [string]$NetStart = "", [string]$PastaInicializar = "", [string[]]$OutrasPastas = $null, [string[]]$ChavesRun = $null)
     $titulo = "NetStart com o Windows"
-    if ($PastaInicializar -eq "") { $PastaInicializar = [Environment]::GetFolderPath('CommonStartup') }
-    if ($null -eq $OutrasPastas) { $OutrasPastas = @([Environment]::GetFolderPath('Startup')) }
+    if ($PastaInicializar -eq "") { $PastaInicializar = Get-PastaInicializarUsuario }
+    if ($null -eq $OutrasPastas) { $OutrasPastas = @([Environment]::GetFolderPath('CommonStartup'), [Environment]::GetFolderPath('Startup')) }
     if ($null -eq $ChavesRun) {
         $ChavesRun = @('HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run', 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Run', 'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run')
     }
@@ -11840,7 +11864,7 @@ function Set-NetStartInicializacao {
         if ($resp -ne [System.Windows.Forms.DialogResult]::Yes) { Log-Message "CANCEL" "NetStart com o Windows: manteve o NetStart.bat que já existia"; return }
     }
     else {
-        $resp = [System.Windows.Forms.MessageBox]::Show("Criar o NetStart.bat na pasta Inicializar do Windows (vale para todos os usuários)?`r`n`r`nToda vez que o Windows iniciar, ele abre o NetStart, que abre os programas da NetControll.`r`n`r`n$bat", $titulo, "YesNo", "Question")
+        $resp = [System.Windows.Forms.MessageBox]::Show("Criar o NetStart.bat na pasta Inicializar do usuário (shell:startup)?`r`n`r`nToda vez que o Windows iniciar, ele abre o NetStart, que abre os programas da NetControll.`r`n`r`n$bat", $titulo, "YesNo", "Question")
         if ($resp -ne [System.Windows.Forms.DialogResult]::Yes) { Log-Message "CANCEL" "NetStart com o Windows: não criado"; return }
     }
 
@@ -20631,7 +20655,7 @@ $formWidth = if ($screen.Width -lt 1000) { 900 } else { 1000 }
 $formHeight = if ($screen.Height -lt 800) { 700 } else { 800 }
 
 $form = New-Object System.Windows.Forms.Form
-$form.Text = "Preparador XMenu – Suporte Técnico v5.58 - REVENDA"
+$form.Text = "Preparador XMenu – Suporte Técnico v5.59 - REVENDA"
 $form.Size = New-Object System.Drawing.Size($formWidth, $formHeight)
 $form.StartPosition = "CenterScreen"
 $form.BackColor = [System.Drawing.Color]::FromArgb(25, 25, 30); $form.ForeColor = 'White'
@@ -21538,12 +21562,12 @@ $bNetStart = New-Object System.Windows.Forms.Button; $bNetStart.Height = 50; $bN
 $bNetStart.Text = "Iniciar NetStart com o Windows"; $bNetStart.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
 $bNetStart.Cursor = 'Hand'
 Format-SupportBtn $bNetStart $colorGray
-$Script:ToolTip.SetToolTip($bNetStart, "Cria o NetStart.bat na pasta Inicializar do Windows (todos os usuários): o NetStart, que abre os programas da NetControll, passa a abrir sozinho quando o Windows inicia. Confere antes se o netstart.exe existe e se ele já inicia por outro caminho (para não abrir duas vezes).")
+$Script:ToolTip.SetToolTip($bNetStart, "Cria o NetStart.bat na pasta Inicializar do usuário (shell:startup): o NetStart, que abre os programas da NetControll, passa a abrir sozinho quando o Windows inicia. Confere antes se o netstart.exe existe e se ele já inicia por outro caminho (para não abrir duas vezes).")
 $bNetStart.Add_Click({ Set-NetStartInicializacao $this })
 [void]$tbl.Controls.Add($bNetStart)
 
 # Mensagem de abertura: explica o programa para quem abre pela primeira vez
-Log-Message "INFO" "Preparador XMenu v5.58 - REVENDA - preparo e suporte de computadores com XMenu e NetPDV"
+Log-Message "INFO" "Preparador XMenu v5.59 - REVENDA - preparo e suporte de computadores com XMenu e NetPDV"
 foreach ($msgSenha in $Script:LogSenhaPendente) { Log-Message "INFO" $msgSenha }
 Log-Message "INFO" "Senha de abertura: acesso liberado"
 Log-Message "LOG" "==============================================================="
@@ -21555,7 +21579,8 @@ Log-Message "LOG" "  EXTERNOS ................... acesso remoto, Chrome, TEF HUB
 Log-Message "LOG" "  SUPORTE E DIAGNÓSTICO ...... impressoras, rede, SQL, backup, XMLs e reparos do Windows"
 Log-Message "LOG" "  Passe o mouse sobre um botão para ver o que ele faz antes de clicar."
 Log-Message "LOG" "---------------------------------------------------------------"
-Log-Message "LOG" "NOVO NA v5.58"
+Log-Message "LOG" "NOVO NA v5.59"
+Log-Message "SUCESSO" "  Suporte: o Iniciar NetStart com o Windows agora grava o NetStart.bat na pasta Inicializar do usuário (shell:startup, a mesma do Executar > shell:startup); se o Preparador foi aberto com outro usuário administrador, usa a de quem está logado no PC"
 Log-Message "SUCESSO" "  Suporte: novo botão Iniciar NetStart com o Windows: cria o NetStart.bat na pasta Inicializar (todos os usuários), que abre o NetStart e os programas da NetControll quando o Windows inicia; avisa se o netstart.exe não existe ou se ele já inicia por outro caminho (para não abrir duas vezes)"
 Log-Message "SUCESSO" "  Programas NetControll: novo botão KDS Monitor (5.0), com instalador, executável e APK da 5.0.0.12, copiar link e versão manual"
 Log-Message "SUCESSO" "  Totem Auto-Atendimento: abas Totem 5.0 (5.0.0.11) e Pesável 5.0 (Totem Pesável, 5.0.0.7); Cardápio Tablet: aba Versão 5.0 (5.0.0.7); todas com instalador, executável, APK, copiar link e BAIXAR MANUAL, e o botão direito copia os links da 5.0"
