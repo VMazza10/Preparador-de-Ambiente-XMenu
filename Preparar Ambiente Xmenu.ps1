@@ -1,5 +1,5 @@
 ﻿# =============================================================================
-# PREPARADOR XMENU v5.57
+# PREPARADOR XMENU v5.58
 # Visual: Dashboard Moderno
 # Correcoes:
 #   - CRITICO: Removido DoEvents do loop de evento de download (causava crash).
@@ -11745,6 +11745,124 @@ function Invoke-ClockSync {
 }
 
 # -----------------------------------------------------------------------------
+# NETSTART COM O WINDOWS
+# O NetStart (na pasta do Concentrador) abre os programas da NetControll. Um NetStart.bat na pasta Inicializar do
+# Windows (a de todos os usuarios) faz ele abrir sozinho quando o Windows inicia.
+# -----------------------------------------------------------------------------
+function Find-InicializacoesNetStart {
+    # Onde o NetStart ja abre sozinho com o Windows, para nao criar um segundo e ele abrir duas vezes: arquivos das
+    # pastas Inicializar que citam o netstart (no nome, dentro do .bat/.cmd ou no destino do atalho) e valores Run do
+    # registro. So le, nao muda nada. -Ignorar: o NetStart.bat do proprio Preparador.
+    param([string[]]$Pastas, [string[]]$ChavesRun, [string]$Ignorar = "")
+    $achados = @()
+    $shell = $null
+    foreach ($pasta in $Pastas) {
+        if ("$pasta".Trim() -eq "" -or -not (Test-Path -LiteralPath $pasta)) { continue }
+        foreach ($arq in @(Get-ChildItem -LiteralPath $pasta -File -ErrorAction SilentlyContinue)) {
+            if ($Ignorar -ne "" -and $arq.FullName -ieq $Ignorar) { continue }
+            $cita = ($arq.Name -match '(?i)netstart')
+            if (-not $cita -and $arq.Extension -match '^(?i)\.(bat|cmd)$') {
+                try { $cita = ([System.IO.File]::ReadAllText($arq.FullName) -match '(?i)netstart') } catch {}
+            }
+            elseif (-not $cita -and $arq.Extension -ieq '.lnk') {
+                try {
+                    if ($null -eq $shell) { $shell = New-Object -ComObject WScript.Shell }
+                    $atalho = $shell.CreateShortcut($arq.FullName)
+                    $cita = ("$($atalho.TargetPath) $($atalho.Arguments)" -match '(?i)netstart')
+                }
+                catch {}
+            }
+            if ($cita) { $achados += $arq.FullName }
+        }
+    }
+    foreach ($chave in $ChavesRun) {
+        try {
+            $valores = Get-ItemProperty -Path $chave -ErrorAction Stop
+            foreach ($valor in $valores.PSObject.Properties) {
+                if ($valor.Name -in @('PSPath', 'PSParentPath', 'PSChildName', 'PSDrive', 'PSProvider')) { continue }
+                if ("$($valor.Value)" -match '(?i)netstart') { $achados += "$chave ($($valor.Name))" }
+            }
+        }
+        catch {}
+    }
+    return $achados
+}
+
+function Set-NetStartInicializacao {
+    # Cria o NetStart.bat (start do netstart.exe) na pasta Inicializar de todos os usuarios. Confere antes se o
+    # netstart.exe existe e se o NetStart ja inicia por outro caminho; pergunta antes de gravar e confere o arquivo.
+    # Os parametros so servem para o teste (pastas e chaves trocadas); no uso normal ficam os padroes.
+    param($Botao, [string]$NetStart = "", [string]$PastaInicializar = "", [string[]]$OutrasPastas = $null, [string[]]$ChavesRun = $null)
+    $titulo = "NetStart com o Windows"
+    if ($PastaInicializar -eq "") { $PastaInicializar = [Environment]::GetFolderPath('CommonStartup') }
+    if ($null -eq $OutrasPastas) { $OutrasPastas = @([Environment]::GetFolderPath('Startup')) }
+    if ($null -eq $ChavesRun) {
+        $ChavesRun = @('HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run', 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Run', 'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run')
+    }
+    Log-Message "INFO" "NetStart com o Windows: conferindo o netstart.exe e o que já inicia com o Windows"
+
+    # netstart.exe da pasta do Concentrador que estiver rodando; senao, o lugar padrao
+    if ($NetStart -eq "") {
+        $NetStart = "C:\netcontroll\concentrador\netstart.exe"
+        foreach ($procNs in @(Get-Process -Name "Concentrador", "NetStart" -ErrorAction SilentlyContinue)) {
+            $exeNs = ""
+            try { $exeNs = "$($procNs.Path)" } catch {}
+            if ($exeNs -eq "") { continue }
+            $candNs = Join-Path (Split-Path -Parent $exeNs) "netstart.exe"
+            if (Test-Path -LiteralPath $candNs) { $NetStart = $candNs; break }
+        }
+    }
+    if (-not (Test-Path -LiteralPath $NetStart)) {
+        Log-Message "ERRO" "NetStart com o Windows: não achei o $NetStart"
+        $resp = [System.Windows.Forms.MessageBox]::Show("Não achei o netstart.exe em:`r`n$NetStart`r`n`r`nO Concentrador está instalado neste PC? Dá para criar o BAT mesmo assim, mas ele só funciona quando o netstart.exe estiver nesse lugar.`r`n`r`nCriar mesmo assim?", $titulo, "YesNo", "Warning", "Button2")
+        if ($resp -ne [System.Windows.Forms.DialogResult]::Yes) { Log-Message "CANCEL" "NetStart com o Windows: não criado (netstart.exe não encontrado)"; return }
+    }
+
+    $bat = Join-Path $PastaInicializar "NetStart.bat"
+    $conteudo = "@echo off`r`nstart """" ""$NetStart""`r`nexit`r`n"
+
+    $outros = @(Find-InicializacoesNetStart -Pastas (@($PastaInicializar) + @($OutrasPastas)) -ChavesRun $ChavesRun -Ignorar $bat)
+    if ($outros.Count -gt 0) {
+        Log-Message "INFO" "NetStart com o Windows: ele já inicia por $($outros -join '; ')"
+        $resp = [System.Windows.Forms.MessageBox]::Show("O NetStart já abre sozinho com o Windows por:`r`n`r`n$($outros -join "`r`n")`r`n`r`nCriar o NetStart.bat também faria o NetStart abrir duas vezes.`r`n`r`nCriar mesmo assim?", $titulo, "YesNo", "Warning", "Button2")
+        if ($resp -ne [System.Windows.Forms.DialogResult]::Yes) { Log-Message "CANCEL" "NetStart com o Windows: deixou como estava (já inicia por outro caminho)"; return }
+    }
+
+    if (Test-Path -LiteralPath $bat) {
+        $atual = ""
+        try { $atual = [System.IO.File]::ReadAllText($bat) } catch {}
+        if ($atual -eq $conteudo) {
+            Log-Message "INFO" "NetStart com o Windows: o NetStart.bat já estava pronto em $bat"
+            if ($null -ne $Botao) { Set-ButtonDone -Button $Botao -Label "JÁ ESTAVA PRONTO" }
+            [System.Windows.Forms.MessageBox]::Show("Já está pronto: o NetStart.bat já está na pasta Inicializar e abre o NetStart quando o Windows inicia.`r`n`r`n$bat", $titulo, "OK", "Information") | Out-Null
+            return
+        }
+        $resp = [System.Windows.Forms.MessageBox]::Show("Já existe um NetStart.bat na pasta Inicializar, com outro conteúdo:`r`n`r`n$($atual.Trim())`r`n`r`nTrocar pelo do Preparador (abre $NetStart)?", $titulo, "YesNo", "Question", "Button2")
+        if ($resp -ne [System.Windows.Forms.DialogResult]::Yes) { Log-Message "CANCEL" "NetStart com o Windows: manteve o NetStart.bat que já existia"; return }
+    }
+    else {
+        $resp = [System.Windows.Forms.MessageBox]::Show("Criar o NetStart.bat na pasta Inicializar do Windows (vale para todos os usuários)?`r`n`r`nToda vez que o Windows iniciar, ele abre o NetStart, que abre os programas da NetControll.`r`n`r`n$bat", $titulo, "YesNo", "Question")
+        if ($resp -ne [System.Windows.Forms.DialogResult]::Yes) { Log-Message "CANCEL" "NetStart com o Windows: não criado"; return }
+    }
+
+    try {
+        if (-not (Test-Path -LiteralPath $PastaInicializar)) { New-Item -ItemType Directory -Path $PastaInicializar -Force | Out-Null }
+        # Sem BOM (o cmd leria o BOM como lixo na primeira linha); caminho com acento vai na pagina de codigo do prompt
+        $codBat = [System.Text.Encoding]::ASCII
+        if ($NetStart -match '[^\x00-\x7F]') { $codBat = [System.Text.Encoding]::GetEncoding([System.Globalization.CultureInfo]::CurrentCulture.TextInfo.OEMCodePage) }
+        [System.IO.File]::WriteAllText($bat, $conteudo, $codBat)
+        if ([System.IO.File]::ReadAllText($bat, $codBat) -ne $conteudo) { throw "o arquivo gravado não ficou igual" }
+        Log-Message "SUCESSO" "NetStart com o Windows: NetStart.bat criado em $bat (abre $NetStart)"
+        if ($null -ne $Botao) { Set-ButtonDone -Button $Botao -Label "CRIADO" }
+        [System.Windows.Forms.MessageBox]::Show("Pronto: o NetStart vai abrir sozinho quando o Windows iniciar.`r`n`r`nArquivo: $bat`r`nAbre: $NetStart", $titulo, "OK", "Information") | Out-Null
+    }
+    catch {
+        Log-Message "ERRO" "NetStart com o Windows: não consegui criar o $bat - $($_.Exception.Message)"
+        [System.Windows.Forms.MessageBox]::Show("Não consegui criar o NetStart.bat:`r`n$($_.Exception.Message)`r`n`r`n$bat", $titulo, "OK", "Error") | Out-Null
+    }
+}
+
+# -----------------------------------------------------------------------------
 # TEF HUB DA ELGIN - RESOLVE A VERSAO MAIS RECENTE SOZINHO
 # A Elgin publica os instaladores nesta pasta do GitHub e troca a versao sem
 # aviso. Em vez de deixar o link fixo (que envelhece), a gente pergunta a API
@@ -19697,6 +19815,9 @@ function Get-VersoesSelector {
         $versions += @{Name = "Totem 1.0.88.50"; Url = "https://github.com/VMazza10/Preparador-de-Ambiente-XMenu/releases/download/Tablet_totem/Totem.1.0.88.50.zip"; File = "Totem_1.0.88.50.zip" }
         $versions += @{Name = "Totem 1.0.88.44"; Url = "https://github.com/VMazza10/Preparador-de-Ambiente-XMenu/releases/download/Tablet_totem/Totem.1.0.88.44.zip"; File = "Totem_1.0.88.44.zip" }
     }
+    elseif ($Type -eq "KDS") {
+        # O KDS Monitor so tem a linha 5.0 (Get-Apps50): nenhuma versao em ZIP
+    }
     else {
         # A 1.3.68.0 precisa do AjustesInstalacao.exe dentro da pasta extraida
         $versions += @{Name = "Concentrador v1.3.68.0"; Url = "https://netcontroll.com.br/util/instaladores/Concentrador/1.3.68.0/Concentrador.zip"; File = "Concentrador.1.3.68.0.zip"
@@ -19713,9 +19834,179 @@ function Get-VersoesSelector {
     return $versions
 }
 
+# Apps da linha 5.0 no site da NetControll (Apps/<versao>/<pasta>/): cada um tem instalador, executavel e APK.
+# Cada app anda na sua versao (o Totem 5.0 saiu na 5.0.0.11; o Totem Pesavel e o Cardapio Tablet, na 5.0.0.7).
+# Aba = nome da aba no seletor do botao (o Totem tem duas: Totem e Pesavel).
+function Get-Apps50 {
+    param([string]$Type)
+    switch ($Type) {
+        "PDV" { return @(@{ Nome = "NetPDV"; Aba = "Versão 5.0"; Versao = "5.0.0.12"; Pasta = "xmenu-pdv"; Base = "NetPDV" }) }
+        "Totem" {
+            return @(
+                @{ Nome = "Totem"; Aba = "Totem 5.0"; Versao = "5.0.0.11"; Pasta = "xmenu-autoatendimento"; Base = "Totem" },
+                @{ Nome = "Totem Pesável"; Aba = "Pesável 5.0"; Versao = "5.0.0.7"; Pasta = "xmenu-autoatendimentobalanca"; Base = "AutoAtendimentoBalanca" }
+            )
+        }
+        "Tablet" { return @(@{ Nome = "Cardápio Tablet"; Aba = "Versão 5.0"; Versao = "5.0.0.7"; Pasta = "xmenu-tablet-cardapio"; Base = "TabletCardapio" }) }
+        "KDS" { return @(@{ Nome = "KDS Monitor"; Aba = "Versão 5.0"; Versao = "5.0.0.12"; Pasta = "xmenu-app-monitor"; Base = "KDSMonitor" }) }
+    }
+    return @()
+}
+
+function Get-UrlApp50 {
+    param($App, [string]$Versao, [string]$Arquivo)
+    return "http://netcontroll.com.br/util/instaladores/Apps/$Versao/$($App.Pasta)/$Arquivo"
+}
+
+function Get-ArquivosApp50 {
+    param($App)
+    return @(
+        @{ Name = "$($App.Base)-setup.exe (instalador) - v$($App.Versao)"; Arquivo = "$($App.Base)-setup.exe" },
+        @{ Name = "$($App.Base).exe (executável) - v$($App.Versao)"; Arquivo = "$($App.Base).exe" },
+        @{ Name = "$($App.Base).apk (Android) - v$($App.Versao)"; Arquivo = "$($App.Base).apk" }
+    )
+}
+
+function Get-NomeArqApp50 {
+    # "NetPDV-setup.exe" na 5.0.0.12 vira "NetPDV-setup_5.0.0.12.exe": duas versoes baixadas nao se misturam
+    param([string]$Versao, [string]$Arquivo)
+    return ([System.IO.Path]::GetFileNameWithoutExtension($Arquivo) + "_$Versao" + [System.IO.Path]::GetExtension($Arquivo))
+}
+
+function Add-PaginaApp50 {
+    # Pagina de um app 5.0 dentro do seletor (aba, ou painel quando o app so tem a 5.0): lista dos 3 arquivos,
+    # copiar link, baixar e a versao manual (o "5.0." fixo e o resto digitado, ex.: 0.12; muda dos dois lados:
+    # 5.0.0.13, 5.0.1.0...). O estado fica no Tag do container e os cliques so leem dali: a mesma janela pode ter
+    # duas paginas (Totem e Pesavel) sem uma pegar a lista da outra.
+    # O instalador e o exe abrem sozinhos depois de baixar; o apk (Android) so baixa e abre a pasta.
+    param($Pai, $App)
+    $arquivos = @(Get-ArquivosApp50 $App)
+    $fimVersao = $App.Versao.Substring(4)
+
+    $lbl50 = New-Object System.Windows.Forms.Label; $lbl50.Text = "$($App.Nome) - selecione da lista:"; $lbl50.Location = '20,20'; $lbl50.AutoSize = $true
+    [void]$Pai.Controls.Add($lbl50)
+    $cb50 = New-Object System.Windows.Forms.ComboBox
+    $cb50.Location = '20,45'; $cb50.Width = 265; $cb50.DropDownStyle = 'DropDownList'; $cb50.FlatStyle = 'Flat'
+    $cb50.BackColor = [System.Drawing.Color]::FromArgb(50, 50, 60); $cb50.ForeColor = 'White'
+    foreach ($a50 in $arquivos) { [void]$cb50.Items.Add($a50.Name) }
+    $cb50.SelectedIndex = 0
+    # Nome comprido (AutoAtendimentoBalanca-setup.exe...): a lista aberta fica larga o bastante para ler inteiro
+    # (mede com a fonte das abas, em negrito: a pagina ainda nao esta presa na janela para herdar a fonte)
+    $maiorNome = 0
+    $fonteMedida = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold)
+    foreach ($a50 in $arquivos) { $maiorNome = [Math]::Max($maiorNome, [System.Windows.Forms.TextRenderer]::MeasureText($a50.Name, $fonteMedida).Width) }
+    $fonteMedida.Dispose()
+    $cb50.DropDownWidth = [Math]::Max($cb50.Width, $maiorNome + 24)
+    [void]$Pai.Controls.Add($cb50)
+
+    $novoBotaoLink = {
+        param([string]$Pos)
+        $bl = New-Object System.Windows.Forms.Button
+        $bl.Text = "copiar link"; $bl.Location = $Pos; $bl.Size = '69,24'
+        $bl.FlatStyle = 'Flat'; $bl.FlatAppearance.BorderSize = 1
+        $bl.FlatAppearance.BorderColor = [System.Drawing.Color]::FromArgb(70, 70, 80)
+        $bl.BackColor = [System.Drawing.Color]::FromArgb(45, 45, 52); $bl.ForeColor = [System.Drawing.Color]::FromArgb(190, 190, 195)
+        $bl.Font = New-Object System.Drawing.Font("Segoe UI", 7.5)
+        $bl.Cursor = 'Hand'
+        [void]$Pai.Controls.Add($bl)
+        return $bl
+    }
+    # Copia, avisa "copiado!" no proprio botao por 1,5 s e registra no Log
+    $Script:CopiaLinkApp50 = {
+        param($Botao, [string]$Url, [string]$Descricao)
+        try { Set-Clipboard -Value $Url -ErrorAction Stop }
+        catch { [System.Windows.Forms.Clipboard]::SetText($Url) }
+        Log-Message "INFO" "Link copiado: $Descricao ($Url)"
+        $Botao.Text = "copiado!"
+        $volta50 = New-Object System.Windows.Forms.Timer
+        $volta50.Interval = 1500
+        $volta50.Tag = $Botao
+        $volta50.Add_Tick({ $this.Stop(); $this.Tag.Text = "copiar link"; $this.Dispose() })
+        $volta50.Start()
+    }
+    $Script:ManualInvalidoApp50 = {
+        param($Estado)
+        [System.Windows.Forms.MessageBox]::Show("Digite o final da versão no formato $($Estado.FimVersao) (Ex: $($Estado.FimVersao) para a $($Estado.App.Versao))", "Erro", "OK", "Warning") | Out-Null
+    }
+    # Escolha que volta para o Open-Selector pelo Tag da janela
+    $Script:EscolheApp50 = {
+        param($Origem, [string]$Versao, $Arq, [string]$Nome)
+        $janela = $Origem.FindForm()
+        $janela.Tag = @{ Url = (Get-UrlApp50 $Origem.Parent.Tag.App $Versao $Arq.Arquivo); File = (Get-NomeArqApp50 $Versao $Arq.Arquivo); Name = $Nome; Deploy = $false; SomenteSalvar = ($Arq.Arquivo -like '*.apk') }
+        $janela.DialogResult = 'OK'
+        $janela.Close()
+    }
+
+    $btnLink50 = & $novoBotaoLink '291,44'
+    $btnLink50.Add_Click({
+            $st = $this.Parent.Tag
+            $sel = $st.Arquivos[$st.Lista.SelectedIndex]
+            & $Script:CopiaLinkApp50 $this (Get-UrlApp50 $st.App $st.App.Versao $sel.Arquivo) $sel.Name
+        })
+
+    $btn50 = New-Object System.Windows.Forms.Button
+    $btn50.Text = "BAIXAR SELECIONADO"; $btn50.Location = '20,80'; $btn50.Size = '340,35'
+    $btn50.BackColor = [System.Drawing.Color]::FromArgb(14, 88, 62); $btn50.ForeColor = 'White'; $btn50.FlatStyle = 'Flat'
+    $btn50.Add_Click({
+            $st = $this.Parent.Tag
+            $sel = $st.Arquivos[$st.Lista.SelectedIndex]
+            & $Script:EscolheApp50 $this $st.App.Versao $sel $sel.Name
+        })
+    [void]$Pai.Controls.Add($btn50)
+
+    $sep50 = New-Object System.Windows.Forms.Label; $sep50.Text = "__________________________________________________"
+    $sep50.Location = '20,125'; $sep50.AutoSize = $true; $sep50.ForeColor = 'Gray'
+    [void]$Pai.Controls.Add($sep50)
+    $lblMan50 = New-Object System.Windows.Forms.Label; $lblMan50.Text = "Ou digite a Versao Manual:"; $lblMan50.Location = '20,155'; $lblMan50.AutoSize = $true
+    [void]$Pai.Controls.Add($lblMan50)
+    $lblPre50 = New-Object System.Windows.Forms.Label; $lblPre50.Text = "5.0."; $lblPre50.Location = '20,183'; $lblPre50.AutoSize = $true; $lblPre50.Font = New-Object System.Drawing.Font("Consolas", 12)
+    [void]$Pai.Controls.Add($lblPre50)
+    $txtMan50 = New-Object System.Windows.Forms.TextBox
+    $txtMan50.Location = '75,180'; $txtMan50.Width = 80; $txtMan50.Text = $fimVersao; $txtMan50.MaxLength = 12; $txtMan50.Font = New-Object System.Drawing.Font("Consolas", 10); $txtMan50.TextAlign = 'Center'
+    [void]$Pai.Controls.Add($txtMan50)
+    $btnMan50 = New-Object System.Windows.Forms.Button
+    $btnMan50.Text = "BAIXAR MANUAL"; $btnMan50.Location = '165,178'; $btnMan50.Size = '120,30'; $btnMan50.Font = New-Object System.Drawing.Font("Segoe UI", 8, [System.Drawing.FontStyle]::Bold)
+    $btnMan50.BackColor = [System.Drawing.Color]::FromArgb(46, 204, 113); $btnMan50.ForeColor = 'White'; $btnMan50.FlatStyle = 'Flat'
+    $btnMan50.Add_Click({
+            $st = $this.Parent.Tag
+            $v = $st.Manual.Text.Trim()
+            if ($v -notmatch '^\d+\.\d+$') { & $Script:ManualInvalidoApp50 $st; return }
+            $sel = $st.Arquivos[$st.Lista.SelectedIndex]
+            $verManual = "5.0.$v"
+            & $Script:EscolheApp50 $this $verManual $sel "$($sel.Arquivo) v$verManual"
+        })
+    [void]$Pai.Controls.Add($btnMan50)
+    # Copiar o link da versao digitada (o tipo de arquivo vem da lista de cima)
+    $btnManLink50 = & $novoBotaoLink '291,181'
+    $btnManLink50.Add_Click({
+            $st = $this.Parent.Tag
+            $v = $st.Manual.Text.Trim()
+            if ($v -notmatch '^\d+\.\d+$') { & $Script:ManualInvalidoApp50 $st; return }
+            $sel = $st.Arquivos[$st.Lista.SelectedIndex]
+            & $Script:CopiaLinkApp50 $this (Get-UrlApp50 $st.App "5.0.$v" $sel.Arquivo) "$($sel.Arquivo) v5.0.$v (versão manual)"
+        })
+    $lblNota50 = New-Object System.Windows.Forms.Label
+    $lblNota50.Text = "A versão manual baixa o tipo de arquivo escolhido na lista."
+    $lblNota50.Location = '20,214'; $lblNota50.AutoSize = $true; $lblNota50.ForeColor = [System.Drawing.Color]::Gray; $lblNota50.Font = New-Object System.Drawing.Font("Segoe UI", 8)
+    [void]$Pai.Controls.Add($lblNota50)
+
+    $sep502 = New-Object System.Windows.Forms.Label; $sep502.Text = "__________________________________________________"
+    $sep502.Location = '20,232'; $sep502.AutoSize = $true; $sep502.ForeColor = 'Gray'
+    [void]$Pai.Controls.Add($sep502)
+    $lblDest50 = New-Object System.Windows.Forms.Label
+    $lblDest50.Text = "Instalador e executável abrem sozinhos depois de baixar.`r`nO APK (Android) só baixa e abre a pasta."
+    $lblDest50.Location = '20,256'; $lblDest50.AutoSize = $true; $lblDest50.ForeColor = [System.Drawing.Color]::Gray; $lblDest50.Font = New-Object System.Drawing.Font("Segoe UI", 8)
+    [void]$Pai.Controls.Add($lblDest50)
+
+    $Pai.Tag = @{ App = $App; Arquivos = $arquivos; Lista = $cb50; Manual = $txtMan50; FimVersao = $fimVersao }
+}
+
 function Open-Selector {
     param($Type, $Button)
-    $height = if ($Type -eq "PDV") { 415 } elseif ($Type -eq "LinkXMenu") { 380 } else { 220 }
+    # Apps da linha 5.0 deste botao (abas); o KDS so tem a 5.0 e abre direto nela, sem a lista de ZIP
+    $apps50 = @(Get-Apps50 $Type)
+    $soApps50 = ($apps50.Count -gt 0 -and @(Get-VersoesSelector $Type).Count -eq 0)
+    $height = if ($Type -eq "PDV") { 415 } elseif ($soApps50) { 345 } elseif ($apps50.Count -gt 0) { 380 } elseif ($Type -eq "LinkXMenu") { 380 } else { 220 }
 
     $fSel = New-Object System.Windows.Forms.Form
     $fSel.Text = "Versoes - $Type"; $fSel.Size = "400,$height"; $fSel.StartPosition = 'CenterParent'
@@ -19750,7 +20041,7 @@ function Open-Selector {
     $versions = @(Get-VersoesSelector $Type)
 
     foreach ($v in $versions) { [void]$cb.Items.Add($v.Name) }
-    $cb.SelectedIndex = 0
+    if ($cb.Items.Count -gt 0) { $cb.SelectedIndex = 0 }
     [void]$fSel.Controls.Add($cb)
 
     $btn = New-Object System.Windows.Forms.Button
@@ -19877,152 +20168,53 @@ function Open-Selector {
         [void]$fSel.Controls.Add($lblDest)
     }
 
-    # Aba "Versão 5.0": o PDV novo (ainda nao lancado) fica separado das versoes 1.3. As funcoes sao as mesmas da
-    # aba 1.3 (lista, copiar link, baixar e versao manual), mas os arquivos da 5.0 nao sao ZIP (instalador, exe e apk):
-    # o instalador e o exe abrem sozinhos depois de baixar; o apk (Android) so baixa e abre a pasta. Nao mexe em C:\netcontroll\NetPDV.
-    if ($Type -eq "PDV") {
+    # Linha 5.0 (instalador, exe e apk, no site da NetControll): cada app ganha uma aba ao lado das versoes em ZIP
+    # (NetPDV: 1.3 e 5.0; Totem: 1.0, Totem 5.0 e Pesavel 5.0; Cardapio Tablet: 1.1 e 5.0). O KDS, que so tem a 5.0,
+    # abre direto na pagina dele. Instalador e exe abrem sozinhos ao baixar; o apk (Android) so baixa e abre a pasta.
+    # Nao mexe nas pastas dos programas (sem atualizar C:\netcontroll\NetPDV).
+    if ($apps50.Count -gt 0) {
         $corFundoAba = [System.Drawing.Color]::FromArgb(30, 30, 30)
-        $tabs = New-Object System.Windows.Forms.TabControl
-        $tabs.Location = '0,0'
-        $tabs.Size = $fSel.ClientSize
-        $tabs.Anchor = 'Top,Bottom,Left,Right'
-        $tabs.DrawMode = 'OwnerDrawFixed'
-        $tabs.SizeMode = 'Fixed'
-        $tabs.ItemSize = New-Object System.Drawing.Size(130, 28)
-        $tabs.Font = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold)
-        $tabs.Add_DrawItem({
-                param($s, $e)
-                $sel = ($e.Index -eq $s.SelectedIndex)
-                $cor = if ($sel) { [System.Drawing.Color]::FromArgb(14, 88, 62) } else { [System.Drawing.Color]::FromArgb(45, 45, 52) }
-                $br = New-Object System.Drawing.SolidBrush($cor)
-                $e.Graphics.FillRectangle($br, $e.Bounds)
-                $br.Dispose()
-                [System.Windows.Forms.TextRenderer]::DrawText($e.Graphics, $s.TabPages[$e.Index].Text, $s.Font, $e.Bounds, [System.Drawing.Color]::White, [System.Windows.Forms.TextFormatFlags]'HorizontalCenter, VerticalCenter')
-            })
-        $pg13 = New-Object System.Windows.Forms.TabPage; $pg13.Text = "Versão 1.3"
-        $pg50 = New-Object System.Windows.Forms.TabPage; $pg50.Text = "Versão 5.0"
-        foreach ($pg in @($pg13, $pg50)) { $pg.UseVisualStyleBackColor = $false; $pg.BackColor = $corFundoAba; $pg.ForeColor = 'White' }
-        # A aba 1.3 e tudo o que ja estava montado na janela, sem mudar nada
-        foreach ($ctl in @($fSel.Controls | ForEach-Object { $_ })) { $fSel.Controls.Remove($ctl); [void]$pg13.Controls.Add($ctl) }
-
-        $versions50 = @(
-            @{ Name = "NetPDV-setup.exe (instalador) - v5.0.0.11"; Arquivo = "NetPDV-setup.exe"; Versao = "5.0.0.11" },
-            @{ Name = "NetPDV.exe (executável) - v5.0.0.11"; Arquivo = "NetPDV.exe"; Versao = "5.0.0.11" },
-            @{ Name = "NetPDV.apk (Android) - v5.0.0.11"; Arquivo = "NetPDV.apk"; Versao = "5.0.0.11" }
-        )
-        $urlPdv50 = { param($ver, $arq) "http://netcontroll.com.br/util/instaladores/Apps/$ver/xmenu-pdv/$arq" }
-        $nomeArq50 = { param($ver, $arq) $base = [System.IO.Path]::GetFileNameWithoutExtension($arq); $ext = [System.IO.Path]::GetExtension($arq); "${base}_$ver$ext" }
-
-        $lbl50 = New-Object System.Windows.Forms.Label; $lbl50.Text = "Selecione da Lista:"; $lbl50.Location = '20,20'; $lbl50.AutoSize = $true
-        [void]$pg50.Controls.Add($lbl50)
-        $cb50 = New-Object System.Windows.Forms.ComboBox
-        $cb50.Location = '20,45'; $cb50.Width = 265; $cb50.DropDownStyle = 'DropDownList'; $cb50.FlatStyle = 'Flat'
-        $cb50.BackColor = [System.Drawing.Color]::FromArgb(50, 50, 60); $cb50.ForeColor = 'White'
-        foreach ($v50 in $versions50) { [void]$cb50.Items.Add($v50.Name) }
-        $cb50.SelectedIndex = 0
-        [void]$pg50.Controls.Add($cb50)
-
-        $btnLink50 = New-Object System.Windows.Forms.Button
-        $btnLink50.Text = "copiar link"; $btnLink50.Location = '291,44'; $btnLink50.Size = '69,24'
-        $btnLink50.FlatStyle = 'Flat'; $btnLink50.FlatAppearance.BorderSize = 1
-        $btnLink50.FlatAppearance.BorderColor = [System.Drawing.Color]::FromArgb(70, 70, 80)
-        $btnLink50.BackColor = [System.Drawing.Color]::FromArgb(45, 45, 52); $btnLink50.ForeColor = [System.Drawing.Color]::FromArgb(190, 190, 195)
-        $btnLink50.Font = New-Object System.Drawing.Font("Segoe UI", 7.5)
-        $btnLink50.Cursor = 'Hand'
-        [void]$pg50.Controls.Add($btnLink50)
-        $btnLink50.Add_Click({
-                $sel = $versions50[$cb50.SelectedIndex]
-                $url = "$(& $urlPdv50 $sel.Versao $sel.Arquivo)"
-                try { Set-Clipboard -Value $url -ErrorAction Stop }
-                catch { [System.Windows.Forms.Clipboard]::SetText($url) }
-                Log-Message "INFO" "Link copiado: $($sel.Name)"
-                $btnLink50.Text = "copiado!"
-                $volta50 = New-Object System.Windows.Forms.Timer
-                $volta50.Interval = 1500
-                $volta50.Tag = $btnLink50
-                $volta50.Add_Tick({ $this.Stop(); $this.Tag.Text = "copiar link"; $this.Dispose() })
-                $volta50.Start()
-            })
-
-        $btn50 = New-Object System.Windows.Forms.Button
-        $btn50.Text = "BAIXAR SELECIONADO"; $btn50.Location = '20,80'; $btn50.Size = '340,35'
-        $btn50.BackColor = [System.Drawing.Color]::FromArgb(14, 88, 62); $btn50.ForeColor = 'White'; $btn50.FlatStyle = 'Flat'
-        $btn50.Add_Click({
-                $sel = $versions50[$cb50.SelectedIndex]
-                $fSel.Tag = @{ Url = (& $urlPdv50 $sel.Versao $sel.Arquivo); File = (& $nomeArq50 $sel.Versao $sel.Arquivo); Name = $sel.Name; Deploy = $false; SomenteSalvar = ($sel.Arquivo -like '*.apk') }
-                $fSel.DialogResult = 'OK'
-                $fSel.Close()
-            })
-        [void]$pg50.Controls.Add($btn50)
-
-        $sep50 = New-Object System.Windows.Forms.Label; $sep50.Text = "__________________________________________________"
-        $sep50.Location = '20,125'; $sep50.AutoSize = $true; $sep50.ForeColor = 'Gray'
-        [void]$pg50.Controls.Add($sep50)
-        $lblMan50 = New-Object System.Windows.Forms.Label; $lblMan50.Text = "Ou digite a Versao Manual:"; $lblMan50.Location = '20,155'; $lblMan50.AutoSize = $true
-        [void]$pg50.Controls.Add($lblMan50)
-        $lblPre50 = New-Object System.Windows.Forms.Label; $lblPre50.Text = "5.0."; $lblPre50.Location = '20,183'; $lblPre50.AutoSize = $true; $lblPre50.Font = New-Object System.Drawing.Font("Consolas", 12)
-        [void]$pg50.Controls.Add($lblPre50)
-        $txtMan50 = New-Object System.Windows.Forms.TextBox
-        $txtMan50.Location = '75,180'; $txtMan50.Width = 80; $txtMan50.Text = "0.11"; $txtMan50.MaxLength = 12; $txtMan50.Font = New-Object System.Drawing.Font("Consolas", 10); $txtMan50.TextAlign = 'Center'
-        [void]$pg50.Controls.Add($txtMan50)
-        $btnMan50 = New-Object System.Windows.Forms.Button
-        $btnMan50.Text = "BAIXAR MANUAL"; $btnMan50.Location = '165,178'; $btnMan50.Size = '120,30'; $btnMan50.Font = New-Object System.Drawing.Font("Segoe UI", 8, [System.Drawing.FontStyle]::Bold)
-        $btnMan50.BackColor = [System.Drawing.Color]::FromArgb(46, 204, 113); $btnMan50.ForeColor = 'White'; $btnMan50.FlatStyle = 'Flat'
-        $btnMan50.Add_Click({
-                # O "5.0." e fixo; o resto (ex.: 0.11) e editavel e pode mudar dos dois lados (5.0.0.12, 5.0.1.0...)
-                $v = $txtMan50.Text.Trim()
-                if ($v -match '^\d+\.\d+$') {
-                    $sel = $versions50[$cb50.SelectedIndex]
-                    $verManual = "5.0.$v"
-                    $fSel.Tag = @{ Url = (& $urlPdv50 $verManual $sel.Arquivo); File = (& $nomeArq50 $verManual $sel.Arquivo); Name = "$($sel.Arquivo) v$verManual"; Deploy = $false; SomenteSalvar = ($sel.Arquivo -like '*.apk') }
-                    $fSel.DialogResult = 'OK'
-                    $fSel.Close()
-                }
-                else { [System.Windows.Forms.MessageBox]::Show("Digite o final da versao no formato 0.11 (Ex: 0.11 para a 5.0.0.11)", "Erro", "OK", "Warning") | Out-Null }
-            })
-        [void]$pg50.Controls.Add($btnMan50)
-        # Copiar o link da versao digitada (o tipo de arquivo vem da lista de cima)
-        $btnManLink50 = New-Object System.Windows.Forms.Button
-        $btnManLink50.Text = "copiar link"; $btnManLink50.Location = '291,181'; $btnManLink50.Size = '69,24'
-        $btnManLink50.FlatStyle = 'Flat'; $btnManLink50.FlatAppearance.BorderSize = 1
-        $btnManLink50.FlatAppearance.BorderColor = [System.Drawing.Color]::FromArgb(70, 70, 80)
-        $btnManLink50.BackColor = [System.Drawing.Color]::FromArgb(45, 45, 52); $btnManLink50.ForeColor = [System.Drawing.Color]::FromArgb(190, 190, 195)
-        $btnManLink50.Font = New-Object System.Drawing.Font("Segoe UI", 7.5)
-        $btnManLink50.Cursor = 'Hand'
-        $btnManLink50.Add_Click({
-                $v = $txtMan50.Text.Trim()
-                if ($v -match '^\d+\.\d+$') {
-                    $sel = $versions50[$cb50.SelectedIndex]
-                    $url = "$(& $urlPdv50 "5.0.$v" $sel.Arquivo)"
-                    try { Set-Clipboard -Value $url -ErrorAction Stop }
-                    catch { [System.Windows.Forms.Clipboard]::SetText($url) }
-                    Log-Message "INFO" "Link copiado (versao manual): $url"
-                    $btnManLink50.Text = "copiado!"
-                    $voltaMan50 = New-Object System.Windows.Forms.Timer
-                    $voltaMan50.Interval = 1500
-                    $voltaMan50.Tag = $btnManLink50
-                    $voltaMan50.Add_Tick({ $this.Stop(); $this.Tag.Text = "copiar link"; $this.Dispose() })
-                    $voltaMan50.Start()
-                }
-                else { [System.Windows.Forms.MessageBox]::Show("Digite o final da versao no formato 0.11 (Ex: 0.11 para a 5.0.0.11)", "Erro", "OK", "Warning") | Out-Null }
-            })
-        [void]$pg50.Controls.Add($btnManLink50)
-        $lblNota50 = New-Object System.Windows.Forms.Label
-        $lblNota50.Text = "A versão manual baixa o tipo de arquivo escolhido na lista."
-        $lblNota50.Location = '20,214'; $lblNota50.AutoSize = $true; $lblNota50.ForeColor = [System.Drawing.Color]::Gray; $lblNota50.Font = New-Object System.Drawing.Font("Segoe UI", 8)
-        [void]$pg50.Controls.Add($lblNota50)
-
-        $sep502 = New-Object System.Windows.Forms.Label; $sep502.Text = "__________________________________________________"
-        $sep502.Location = '20,232'; $sep502.AutoSize = $true; $sep502.ForeColor = 'Gray'
-        [void]$pg50.Controls.Add($sep502)
-        $lblDest50 = New-Object System.Windows.Forms.Label
-        $lblDest50.Text = "Instalador e executável abrem sozinhos depois de baixar.`r`nO APK (Android) só baixa e abre a pasta."
-        $lblDest50.Location = '20,256'; $lblDest50.AutoSize = $true; $lblDest50.ForeColor = [System.Drawing.Color]::Gray; $lblDest50.Font = New-Object System.Drawing.Font("Segoe UI", 8)
-        [void]$pg50.Controls.Add($lblDest50)
-
-        [void]$tabs.TabPages.Add($pg13)
-        [void]$tabs.TabPages.Add($pg50)
-        [void]$fSel.Controls.Add($tabs)
+        if ($soApps50) {
+            $fSel.Controls.Clear()
+            $pnl50 = New-Object System.Windows.Forms.Panel
+            $pnl50.Dock = 'Fill'; $pnl50.BackColor = $corFundoAba; $pnl50.ForeColor = 'White'
+            Add-PaginaApp50 -Pai $pnl50 -App $apps50[0]
+            [void]$fSel.Controls.Add($pnl50)
+        }
+        else {
+            $tabs = New-Object System.Windows.Forms.TabControl
+            $tabs.Location = '0,0'
+            $tabs.Size = $fSel.ClientSize
+            $tabs.Anchor = 'Top,Bottom,Left,Right'
+            $tabs.DrawMode = 'OwnerDrawFixed'
+            $tabs.SizeMode = 'Fixed'
+            # Tres abas (Totem) tem que caber na largura da janela sem as setinhas de rolar
+            $tabs.ItemSize = New-Object System.Drawing.Size([Math]::Min(130, [int][Math]::Floor(($fSel.ClientSize.Width - 8) / (1 + $apps50.Count))), 28)
+            $tabs.Font = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold)
+            $tabs.Add_DrawItem({
+                    param($s, $e)
+                    $sel = ($e.Index -eq $s.SelectedIndex)
+                    $cor = if ($sel) { [System.Drawing.Color]::FromArgb(14, 88, 62) } else { [System.Drawing.Color]::FromArgb(45, 45, 52) }
+                    $br = New-Object System.Drawing.SolidBrush($cor)
+                    $e.Graphics.FillRectangle($br, $e.Bounds)
+                    $br.Dispose()
+                    [System.Windows.Forms.TextRenderer]::DrawText($e.Graphics, $s.TabPages[$e.Index].Text, $s.Font, $e.Bounds, [System.Drawing.Color]::White, [System.Windows.Forms.TextFormatFlags]'HorizontalCenter, VerticalCenter')
+                })
+            # A primeira aba e tudo o que ja estava montado na janela (as versoes em ZIP), sem mudar nada
+            $pgZip = New-Object System.Windows.Forms.TabPage
+            $pgZip.Text = switch ($Type) { "PDV" { "Versão 1.3" } "Totem" { "Versão 1.0" } "Tablet" { "Versão 1.1" } default { "Versões ZIP" } }
+            $pgZip.UseVisualStyleBackColor = $false; $pgZip.BackColor = $corFundoAba; $pgZip.ForeColor = 'White'
+            foreach ($ctl in @($fSel.Controls | ForEach-Object { $_ })) { $fSel.Controls.Remove($ctl); [void]$pgZip.Controls.Add($ctl) }
+            [void]$tabs.TabPages.Add($pgZip)
+            foreach ($app50 in $apps50) {
+                $pgApp = New-Object System.Windows.Forms.TabPage
+                $pgApp.Text = $app50.Aba
+                $pgApp.UseVisualStyleBackColor = $false; $pgApp.BackColor = $corFundoAba; $pgApp.ForeColor = 'White'
+                Add-PaginaApp50 -Pai $pgApp -App $app50
+                [void]$tabs.TabPages.Add($pgApp)
+            }
+            [void]$fSel.Controls.Add($tabs)
+        }
     }
     $fSel.Add_Shown({ try { Set-JanelaAdaptavel $this | Out-Null } catch {} })
     [void]$fSel.ShowDialog()
@@ -20521,7 +20713,7 @@ $formWidth = if ($screen.Width -lt 1200) { $screen.Width - 50 } else { 1200 }
 $formHeight = if ($screen.Height -lt 900) { $screen.Height - 50 } else { 900 }
 
 $form = New-Object System.Windows.Forms.Form
-$form.Text = "Preparador XMenu – Suporte Técnico v5.57"
+$form.Text = "Preparador XMenu – Suporte Técnico v5.58"
 $form.Size = New-Object System.Drawing.Size($formWidth, $formHeight)
 $form.StartPosition = "CenterScreen"
 $form.BackColor = [System.Drawing.Color]::FromArgb(25, 25, 30); $form.ForeColor = 'White'
@@ -20533,11 +20725,38 @@ $linkMenu = New-Object System.Windows.Forms.ContextMenuStrip
 $linkMenu.ShowImageMargin = $false
 $linkMenu.Font = New-Object System.Drawing.Font("Segoe UI", 10)
 
+# Clique abre o link; botao direito copia. O menu tambem dispara o Click no botao direito (antes do MouseUp), entao
+# o MouseDown marca o direito e quem chegar primeiro (Click ou MouseUp) copia; o outro nao faz nada. As marcas zeram
+# toda vez que o menu abre: Enter pelo teclado sempre abre.
+$linkMenu.ShowItemToolTips = $true
+$linkMenu.Add_Opening({ $Script:LinksDireitoPendente = $false; $Script:LinksIgnorarClique = $false })
+function Copy-LinkUtil {
+    param($Item)
+    $Script:LinksDireitoPendente = $false
+    $linkMenu.Close()
+    [void](Copy-LinkDoBotao $Item.Tag "Links úteis: $($Item.Text)" $btnLinks)
+}
 function Add-CtxLink {
     param($Text, $Url)
     $item = $linkMenu.Items.Add($Text)
     $item.Tag = $Url
-    $item.Add_Click({ Start-Process $this.Tag })
+    $item.ToolTipText = "Clique: abre no navegador. Botão direito: copia o link."
+    $item.Add_MouseDown({
+            param($s, $e)
+            $Script:LinksDireitoPendente = ($e.Button -eq [System.Windows.Forms.MouseButtons]::Right)
+        })
+    $item.Add_MouseUp({
+            param($s, $e)
+            if ($e.Button -ne [System.Windows.Forms.MouseButtons]::Right -or -not $Script:LinksDireitoPendente) { return }
+            $Script:LinksIgnorarClique = $true
+            Copy-LinkUtil $s
+        })
+    $item.Add_Click({
+            if ($Script:LinksIgnorarClique) { $Script:LinksIgnorarClique = $false; return }
+            if ($Script:LinksDireitoPendente) { Copy-LinkUtil $this; return }
+            Log-Message "INFO" "Links úteis: abrindo $($this.Text) ($($this.Tag))"
+            Start-Process $this.Tag
+        })
 }
 
 Add-CtxLink "Manual Técnico" "https://netcontroll.gitbook.io/xmenu-tecnico"
@@ -20545,6 +20764,7 @@ Add-CtxLink "Versões XMenu" "https://netcontroll.gitbook.io/xmenu-versoes"
 Add-CtxLink "Universidade XMenu" "https://netcontroll.gitbook.io/xmenu-universidade"
 Add-CtxLink "ADM Master" "https://netcontroll.com.br/adm/"
 Add-CtxLink "Portal Xmenu" "https://portal.netcontroll.com.br/#/auth/login"
+Add-CtxLink "Portal Shipay" "https://painel-conexaoitau.shipay.com.br/admin"
 # ============================================
 
 # HEADER
@@ -20813,9 +21033,10 @@ $btnLinks.Font = New-Object System.Drawing.Font("Segoe UI", 8.5, [System.Drawing
 $btnLinks.Margin = '0,0,0,0'
 $btnLinks.FlatAppearance.MouseOverBackColor = [System.Drawing.Color]::FromArgb(240, 240, 240)
 $btnLinks.FlatAppearance.MouseDownBackColor = [System.Drawing.Color]::FromArgb(220, 220, 220)
-$btnLinks.Add_Click({ 
-        $linkMenu.Show($btnLinks, 0, $btnLinks.Height) 
+$btnLinks.Add_Click({
+        $linkMenu.Show($btnLinks, 0, $btnLinks.Height)
     })
+$Script:ToolTip.SetToolTip($btnLinks, "Links do dia a dia. Clique num link para abrir no navegador; botão direito num link copia o endereço.")
 [void]$hRight.Controls.Add($btnLinks)
 # ----------------------------------
 
@@ -21000,12 +21221,8 @@ function Show-MenuLinksVersoes {
     $menuV = New-Object System.Windows.Forms.ContextMenuStrip
     $menuV.ShowImageMargin = $false
     $menuV.Font = New-Object System.Drawing.Font("Segoe UI", 10)
-    # Concentrador, Tablet e Totem ficam no repositorio interno (ou precisam de arquivo extra): nao ha link para repassar
-    if ($Type -ne "PDV" -and $Type -ne "LinkXMenu") {
-        $semLink = $menuV.Items.Add("Sem link para repassar: esses arquivos ficam no repositório interno do preparador")
-        $semLink.Enabled = $false
-    }
-    else {
+    $apps50 = @(Get-Apps50 $Type)
+    if ($Type -eq "PDV" -or $Type -eq "LinkXMenu") {
         $cabecalho = $menuV.Items.Add("Copiar o link da versão:")
         $cabecalho.Enabled = $false
         foreach ($v in @(Get-VersoesSelector $Type)) {
@@ -21013,13 +21230,21 @@ function Show-MenuLinksVersoes {
             $mi.Tag = @{ Url = "$($v.Url)"; Nome = "$($v.Name)"; Botao = $Botao }
             $mi.Add_Click({ [void](Copy-LinkDoBotao $this.Tag.Url $this.Tag.Nome $this.Tag.Botao) })
         }
-        if ($Type -eq "PDV") {
-            [void]$menuV.Items.Add("-")
-            foreach ($arq in @("NetPDV-setup.exe", "NetPDV.exe", "NetPDV.apk")) {
-                $mi5 = $menuV.Items.Add("NetPDV 5.0: $arq (v5.0.0.11)")
-                $mi5.Tag = @{ Url = "http://netcontroll.com.br/util/instaladores/Apps/5.0.0.11/xmenu-pdv/$arq"; Nome = "NetPDV 5.0 $arq"; Botao = $Botao }
-                $mi5.Add_Click({ [void](Copy-LinkDoBotao $this.Tag.Url $this.Tag.Nome $this.Tag.Botao) })
-            }
+    }
+    elseif (@(Get-VersoesSelector $Type).Count -gt 0) {
+        # Concentrador, Tablet e Totem em ZIP ficam no repositorio interno (ou precisam de arquivo extra): nao ha link para repassar
+        $semLink = $menuV.Items.Add("Versões em ZIP: sem link para repassar (ficam no repositório interno do preparador)")
+        $semLink.Enabled = $false
+    }
+    # Linha 5.0 (site da NetControll): esses links podem ser repassados
+    foreach ($app50 in $apps50) {
+        if ($menuV.Items.Count -gt 0) { [void]$menuV.Items.Add("-") }
+        $cab50 = $menuV.Items.Add("Copiar o link - $($app50.Nome) $($app50.Versao):")
+        $cab50.Enabled = $false
+        foreach ($arq50 in @(Get-ArquivosApp50 $app50)) {
+            $mi5 = $menuV.Items.Add("$($app50.Nome) 5.0: $($arq50.Arquivo) (v$($app50.Versao))")
+            $mi5.Tag = @{ Url = (Get-UrlApp50 $app50 $app50.Versao $arq50.Arquivo); Nome = "$($app50.Nome) 5.0 $($arq50.Arquivo)"; Botao = $Botao }
+            $mi5.Add_Click({ [void](Copy-LinkDoBotao $this.Tag.Url $this.Tag.Nome $this.Tag.Botao) })
         }
     }
     $menuV.Show([System.Windows.Forms.Cursor]::Position)
@@ -21132,8 +21357,9 @@ Add-Btn "Link XMenu (Instalador)" "" "https://netcontroll.com.br/util/instalador
 Add-Btn "Link XMenu (ZIP)" "" "" "" $true "LinkXMenu" -Help "Menu para baixar versões específicas do Link XMenu."
 Add-Btn "XBot" "" "https://aws.netcontroll.com.br/XBotClient/setup.exe" "XBotSetup.exe" -Color $colorBlue -Help "Instalador do bot de auto-atendimento"
 Add-Btn "XTag Client 2.0" "" "https://aws.netcontroll.com.br/XTagClient2.0/setup.exe" "XTagSetup.exe" -Color $colorBlue -Help "Instalador Xtag"
-Add-Btn "Cardápio Tablet (ZIP)" "" "" "" $true "Tablet" -Help "Versões compactadas para Cardápio Digital em Tablets."
-Add-Btn "Totem Auto-Atendimento (ZIP)" "" "" "" $true "Totem" -Help "Versões compactadas para o sistema de Totem (Auto-atendimento)."
+Add-Btn "Cardápio Tablet (ZIP)" "" "" "" $true "Tablet" -Help "Versões compactadas para Cardápio Digital em Tablets. Na aba Versão 5.0: instalador, executável e APK do Cardápio Tablet 5.0, com copiar link e versão manual."
+Add-Btn "Totem Auto-Atendimento (ZIP)" "" "" "" $true "Totem" -Help "Versões compactadas para o sistema de Totem (Auto-atendimento). Nas abas Totem 5.0 e Pesável 5.0 (Totem Pesável, com balança): instalador, executável e APK, com copiar link e versão manual."
+Add-Btn "KDS Monitor (5.0)" "" "" "" $true "KDS" -Help "KDS Monitor 5.0 (monitor da cozinha): instalador, executável ou APK (Android), com copiar link e versão manual. O instalador e o executável abrem sozinhos; o APK só baixa e abre a pasta."
 
 Add-Title "EXTERNOS"
 
@@ -21176,6 +21402,8 @@ Add-Btn "Balança Teste" "" "https://github.com/VMazza10/Preparador-de-Ambiente-
 # Link do Drive no formato drive.usercontent: o "uc?export=download" devolve
 # a pagina de aviso de virus em HTML em vez do arquivo.
 Add-Btn "Driver Balança Serial PCI (ZIP)" "" "https://drive.usercontent.google.com/download?id=1P2CH59rEporytibv32tMRsdX6uXby2p3&export=download&confirm=t" "Driver_Multi_Serial_PCI.zip" -Help "Driver da placa multi serial PCI usada para ligar a balança na porta serial. Baixa do Google Drive (120 MB) e extrai a pasta automaticamente."
+# Instalador oficial da Gertec (assinado por GERTEC BRASIL LTDA), o mais novo do Download Center para os PIN Pads de mesa
+Add-Btn "Driver PIN Pad Gertec (3.0.0.4)" "" "https://www.gertec.com.br/wp-content/uploads/2025/01/Gertec-Full-Installer_3.0.0.4.zip" "Gertec_PinPad_Driver_3.0.0.4.zip" -Help "Driver oficial da Gertec (Full Installer 3.0.0.4) para os PIN Pads PPC910, PPC920, PPC930, PPC940, PPC950 e PPC960. Baixa do site da Gertec (1 MB), extrai e abre a pasta: é só rodar o Gertec-Full-Installer. Os PIN Pads móveis MP5 e MP15 usam outro instalador (2.2.2.0, no site da Gertec)."
 
 $colorDiag = [System.Drawing.Color]::FromArgb(30, 80, 30)
 $colorFix = [System.Drawing.Color]::FromArgb(100, 30, 30)
@@ -21391,20 +21619,34 @@ $Script:ToolTip.SetToolTip($bClock, "Liga o serviço de horário, aponta para o 
 $bClock.Add_Click({ Invoke-ClockSync })
 [void]$tbl.Controls.Add($bClock)
 
+$bNetStart = New-Object System.Windows.Forms.Button; $bNetStart.Height = 50; $bNetStart.Dock = 'Top'
+$bNetStart.Text = "Iniciar NetStart com o Windows"; $bNetStart.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
+$bNetStart.Cursor = 'Hand'
+Format-SupportBtn $bNetStart $colorGray
+$Script:ToolTip.SetToolTip($bNetStart, "Cria o NetStart.bat na pasta Inicializar do Windows (todos os usuários): o NetStart, que abre os programas da NetControll, passa a abrir sozinho quando o Windows inicia. Confere antes se o netstart.exe existe e se ele já inicia por outro caminho (para não abrir duas vezes).")
+$bNetStart.Add_Click({ Set-NetStartInicializacao $this })
+[void]$tbl.Controls.Add($bNetStart)
+
 # Mensagem de abertura: explica o programa para quem abre pela primeira vez
-Log-Message "INFO" "Preparador XMenu v5.57 - preparo e suporte de computadores com XMenu e NetPDV"
+Log-Message "INFO" "Preparador XMenu v5.58 - preparo e suporte de computadores com XMenu e NetPDV"
 foreach ($msgSenha in $Script:LogSenhaPendente) { Log-Message "INFO" $msgSenha }
 Log-Message "INFO" "Senha de abertura: acesso liberado"
 Log-Message "LOG" "==============================================================="
 Log-Message "LOG" "COMO USAR"
 Log-Message "LOG" "  PREPARAR AMBIENTE WINDOWS .. ajusta energia, UAC e desempenho do PC num clique"
 Log-Message "LOG" "  BANCO DE DADOS ............. instaladores do SQL Server"
-Log-Message "LOG" "  PROGRAMAS NETCONTROLL ...... NetPDV, Concentrador, Link XMenu, XBot, XTag, Tablet e Totem"
-Log-Message "LOG" "  EXTERNOS ................... acesso remoto, Chrome, TEF HUB, balança e ferramentas de rede"
+Log-Message "LOG" "  PROGRAMAS NETCONTROLL ...... NetPDV, Concentrador, Link XMenu, XBot, XTag, Tablet, Totem e KDS"
+Log-Message "LOG" "  EXTERNOS ................... acesso remoto, Chrome, TEF HUB, balança, PIN Pad e ferramentas de rede"
 Log-Message "LOG" "  SUPORTE E DIAGNÓSTICO ...... impressoras, rede, SQL, backup, XMLs e reparos do Windows"
 Log-Message "LOG" "  Passe o mouse sobre um botão para ver o que ele faz antes de clicar."
 Log-Message "LOG" "---------------------------------------------------------------"
-Log-Message "LOG" "NOVO NA v5.57"
+Log-Message "LOG" "NOVO NA v5.58"
+Log-Message "SUCESSO" "  Suporte: novo botão Iniciar NetStart com o Windows: cria o NetStart.bat na pasta Inicializar (todos os usuários), que abre o NetStart e os programas da NetControll quando o Windows inicia; avisa se o netstart.exe não existe ou se ele já inicia por outro caminho (para não abrir duas vezes)"
+Log-Message "SUCESSO" "  Programas NetControll: novo botão KDS Monitor (5.0), com instalador, executável e APK da 5.0.0.12, copiar link e versão manual"
+Log-Message "SUCESSO" "  Totem Auto-Atendimento: abas Totem 5.0 (5.0.0.11) e Pesável 5.0 (Totem Pesável, 5.0.0.7); Cardápio Tablet: aba Versão 5.0 (5.0.0.7); todas com instalador, executável, APK, copiar link e BAIXAR MANUAL, e o botão direito copia os links da 5.0"
+Log-Message "SUCESSO" "  PDV: NetPDV 5.0 atualizado para a 5.0.0.12 (aba Versão 5.0 do NetPDV (ZIP) e botão direito)"
+Log-Message "SUCESSO" "  Externos: novo botão Driver PIN Pad Gertec (3.0.0.4), o instalador oficial mais novo da Gertec para PPC910 a PPC960: baixa, extrai e abre a pasta"
+Log-Message "SUCESSO" "  Links úteis: novo Portal Shipay; botão direito num link copia o endereço em vez de abrir"
 Log-Message "SUCESSO" "  Senha para abrir: a senha dos técnicos agora é só de números (um X no teclado numérico); com o Num Lock desligado a janela da senha avisa para ligar"
 Log-Message "SUCESSO" "  Senha para abrir: o Preparador só abre com a senha dos técnicos (para o cliente não abrir e baixar algo sem querer); maiúscula e minúscula não importam, 3 tentativas erradas fecham o programa e tudo fica no Log"
 Log-Message "SUCESSO" "  XMLs: o ESPELHO FISCAL agora também imprime direto na impressora, sem passar por PDF (na bobina sai igual ao cupom, em folha A4 sai no meio); a janela pergunta IMPRIMIR ou SALVAR PDF e já vem marcada a impressora da última vez"
