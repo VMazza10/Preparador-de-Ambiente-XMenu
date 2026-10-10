@@ -1,6 +1,6 @@
 ﻿# =============================================================================
 # PREPARADOR XMENU - VERSAO REVENDA
-# Baseado na v5.61
+# Baseado na v5.62
 # Alteracoes Revenda:
 #   - Wallpaper: fundo_revenda.png
 #   - Removido: Atalhos de Suporte e Pasta Netcontroll
@@ -16500,12 +16500,55 @@ function New-ImpressoraCompartilhadaWindows {
     return @{ Caminho = $c; Impressora = $c }
 }
 
+function Find-CorrecoesLprPorMac {
+    # Conferencia ao abrir Impressoras: porta LPR com impressora que parou de responder e tem o MAC do PC guardado.
+    # Procura o PC pelo MAC e devolve Porta -> IP novo so das que respondem no LPD no IP novo (o que a janela LPR
+    # oferece corrigir). So consulta: nao mexe em porta nem impressora. Sem LPR parada, nem procura na rede.
+    $correcoes = @{}
+    $portaLpd = 515
+    if ($Script:LprPorta) { $portaLpd = [int]$Script:LprPorta }
+    try {
+        # Do mais barato para o mais caro (roda na abertura do Preparador): registro, arquivo dos MACs, teste do LPD
+        # (quem responde volta na hora) e so no fim a lista de impressoras do Windows, que e a parte lenta
+        $portas = @(@(Get-PortasLpr) + @(Get-PortasLprTcp))
+        if ($portas.Count -eq 0) { return $correcoes }
+        $macs = Get-LprMacs
+        $comMac = @($portas | Where-Object { "$($_.Servidor)" -ne "" -and $macs.ContainsKey($_.Porta) })
+        if ($comMac.Count -eq 0) { return $correcoes }
+        $noAr = @(Test-PortaVarios -Ips @($comMac | ForEach-Object { $_.Servidor } | Select-Object -Unique) -Porta $portaLpd -TimeoutMs 1200)
+        $semResposta = @($comMac | Where-Object { $noAr -notcontains $_.Servidor })
+        if ($semResposta.Count -eq 0) { return $correcoes }
+        # Porta sem impressora nao imprime nada: nao conta como parada
+        $impressorasPc = @()
+        try { $impressorasPc = @(Get-Printer -ErrorAction Stop) } catch {}
+        $paradas = @($semResposta | Where-Object { $pt = $_.Porta; @($impressorasPc | Where-Object { $_.PortName -eq $pt }).Count -gt 0 })
+        if ($paradas.Count -eq 0) { return $correcoes }
+        Log-Message "INFO" "Impressoras: $($paradas.Count) impressora(s) LPR parada(s) com o MAC do PC guardado; procurando o PC pelo MAC"
+        Invoke-AcordarRede -Subredes (Get-SubredesLocais)
+        $tabela = @(ConvertFrom-TabelaArp -Linhas (arp -a))
+        foreach ($pa in $paradas) {
+            $macPa = "$($macs[$pa.Porta])"
+            $candIp = @(Find-IpPorMac -Mac $macPa -Tabela $tabela | Where-Object { $_ -ne $pa.Servidor })
+            $respIp = @()
+            if ($candIp.Count -gt 0) { $respIp = @(Test-PortaVarios -Ips $candIp -Porta $portaLpd -TimeoutMs 1200) }
+            if ($respIp.Count -gt 0) {
+                $correcoes[$pa.Porta] = "$($respIp[0])"
+                Log-Message "INFO" "Impressoras: o PC da porta $($pa.Porta) (MAC $macPa) agora está no IP $($respIp[0]) e responde no LPD"
+            }
+            else { Log-Message "INFO" "Impressoras: não achei o PC da porta $($pa.Porta) (MAC $macPa) respondendo em outro IP" }
+        }
+    }
+    catch { Log-Message "ERRO" "Impressoras: falha ao conferir as LPR paradas - $($_.Exception.Message)" }
+    return $correcoes
+}
+
 function Show-PortasLpr {
     # Janela do PC de destino: lista as portas LPR, testa se o PC da impressora
     # responde e corrige a porta quando o IP dele mudou.
     # -AbrirNova: ja abre a tela de nova impressora (vindo do ATIVAR MONITOR LPR)
     # -SelecionarPorta: abre com essa porta selecionada (vindo da lista de impressoras locais)
-    param($Dono = $null, [switch]$AbrirNova, [string]$SelecionarPorta = "")
+    # -CorrecoesMac: Porta -> IP novo ja achado ao abrir Impressoras (o aviso aparece sem varrer a rede de novo)
+    param($Dono = $null, [switch]$AbrirNova, [string]$SelecionarPorta = "", [hashtable]$CorrecoesMac = $null)
     try {
         $Script:LprOcupado = $false
         $Script:LprRepetidas = @()
@@ -16880,25 +16923,34 @@ function Show-PortasLpr {
             $paradas = @($lvLpr.Items | Where-Object { -not $_.Tag.NoAr -and @($_.Tag.Impressoras).Count -gt 0 -and "$($_.Tag.Mac)" -ne "" } | ForEach-Object { $_.Tag })
             if ($paradas.Count -eq 0) { return }
             $correcoes = @()
-            & $travarLpr $true
-            try {
-                & $statusLpr "Impressora parada: procurando o PC dela na rede pelo MAC..." $Script:UiAmarelo
-                Log-Message "INFO" "LPR: ao abrir, $($paradas.Count) impressora(s) parada(s) com o MAC do PC guardado; procurando cada PC pelo MAC"
-                Invoke-AcordarRede -Subredes (Get-SubredesLocais)
-                $tabelaAuto = @(ConvertFrom-TabelaArp -Linhas (arp -a))
+            if ($null -ne $CorrecoesMac -and $CorrecoesMac.Count -gt 0) {
+                # Ja procurado ao abrir Impressoras: usa o que foi achado, sem varrer a rede de novo
                 foreach ($pa in $paradas) {
-                    $candAuto = @(Find-IpPorMac -Mac $pa.Mac -Tabela $tabelaAuto | Where-Object { $_ -ne $pa.Servidor })
-                    $respAuto = @()
-                    if ($candAuto.Count -gt 0) { $respAuto = @(Test-PortaVarios -Ips $candAuto -Porta $portaLpd -TimeoutMs 1200) }
-                    if ($respAuto.Count -gt 0) {
-                        $correcoes += [pscustomobject]@{ Sel = $pa; Ip = "$($respAuto[0])" }
-                        Log-Message "INFO" "LPR: o PC da porta $($pa.Porta) (MAC $($pa.Mac)) agora está no IP $($respAuto[0]) e responde no LPD"
-                    }
-                    else { Log-Message "INFO" "LPR: não achei o PC da porta $($pa.Porta) (MAC $($pa.Mac)) respondendo em outro IP" }
+                    if ($CorrecoesMac.ContainsKey($pa.Porta)) { $correcoes += [pscustomobject]@{ Sel = $pa; Ip = "$($CorrecoesMac[$pa.Porta])" } }
                 }
+                Log-Message "INFO" "LPR: aberta pela conferência de Impressoras, com $($correcoes.Count) porta(s) para corrigir pelo MAC"
             }
-            catch { Log-Message "ERRO" "LPR: falha ao procurar pelo MAC ao abrir - $($_.Exception.Message)" }
-            finally { & $travarLpr $false }
+            else {
+                & $travarLpr $true
+                try {
+                    & $statusLpr "Impressora parada: procurando o PC dela na rede pelo MAC..." $Script:UiAmarelo
+                    Log-Message "INFO" "LPR: ao abrir, $($paradas.Count) impressora(s) parada(s) com o MAC do PC guardado; procurando cada PC pelo MAC"
+                    Invoke-AcordarRede -Subredes (Get-SubredesLocais)
+                    $tabelaAuto = @(ConvertFrom-TabelaArp -Linhas (arp -a))
+                    foreach ($pa in $paradas) {
+                        $candAuto = @(Find-IpPorMac -Mac $pa.Mac -Tabela $tabelaAuto | Where-Object { $_ -ne $pa.Servidor })
+                        $respAuto = @()
+                        if ($candAuto.Count -gt 0) { $respAuto = @(Test-PortaVarios -Ips $candAuto -Porta $portaLpd -TimeoutMs 1200) }
+                        if ($respAuto.Count -gt 0) {
+                            $correcoes += [pscustomobject]@{ Sel = $pa; Ip = "$($respAuto[0])" }
+                            Log-Message "INFO" "LPR: o PC da porta $($pa.Porta) (MAC $($pa.Mac)) agora está no IP $($respAuto[0]) e responde no LPD"
+                        }
+                        else { Log-Message "INFO" "LPR: não achei o PC da porta $($pa.Porta) (MAC $($pa.Mac)) respondendo em outro IP" }
+                    }
+                }
+                catch { Log-Message "ERRO" "LPR: falha ao procurar pelo MAC ao abrir - $($_.Exception.Message)" }
+                finally { & $travarLpr $false }
+            }
             if ($correcoes.Count -eq 0) {
                 & $statusLpr "Impressora parada e não achei o PC dela pelo MAC em outro IP: confira se o PC está ligado e na rede, ou use PROCURAR NA REDE." $Script:UiVermelho
                 return
@@ -18675,7 +18727,28 @@ COLA RÁPIDA - INSTALAR VIA LPR
         [void]$pnlClientCard.Controls.Add($txtInstLpr)
 
         $Script:PrinterManagerForm.Add_FormClosing({ $Script:PrinterManagerForm = $null })
-        $Script:PrinterManagerForm.Add_Shown({ $this.ActiveControl = $null; try { Set-JanelaAdaptavel $this | Out-Null } catch {} })
+        $Script:PrinterManagerForm.Add_Shown({
+                $this.ActiveControl = $null; try { Set-JanelaAdaptavel $this | Out-Null } catch {}
+                # LPR parada que da para corrigir pelo MAC: o aviso (CORRIGIR AGORA) aparece ja ao abrir Impressoras, e nao
+                # so dentro de LPR COMPARTILHADA. Um instante depois de abrir, para a janela aparecer inteira antes.
+                $Script:PmConfereLpr = New-Object System.Windows.Forms.Timer
+                $Script:PmConfereLpr.Interval = 300
+                $Script:PmConfereLpr.Add_Tick({
+                        $this.Stop(); $this.Dispose()
+                        if ($null -eq $Script:PrinterManagerForm) { return }
+                        $Script:PrinterManagerForm.Cursor = [System.Windows.Forms.Cursors]::WaitCursor
+                        $corrLpr = @{}
+                        try { $corrLpr = Find-CorrecoesLprPorMac }
+                        finally { if ($null -ne $Script:PrinterManagerForm) { $Script:PrinterManagerForm.Cursor = [System.Windows.Forms.Cursors]::Default } }
+                        if ($corrLpr.Count -gt 0 -and $null -ne $Script:PrinterManagerForm) {
+                            Log-Message "INFO" "Impressoras: abrindo a LPR Compartilhada para corrigir $($corrLpr.Count) porta(s) pelo MAC"
+                            Show-PortasLpr -Dono $Script:PrinterManagerForm -CorrecoesMac $corrLpr
+                            # A troca de IP pode renomear a porta
+                            & $LoadPrinters
+                        }
+                    })
+                $Script:PmConfereLpr.Start()
+            })
         $Script:PrinterManagerForm.ShowDialog($Script:MainForm)
     }
     catch {
@@ -20960,7 +21033,7 @@ $formWidth = if ($screen.Width -lt 1000) { 900 } else { 1000 }
 $formHeight = if ($screen.Height -lt 800) { 700 } else { 800 }
 
 $form = New-Object System.Windows.Forms.Form
-$form.Text = "Preparador XMenu – Suporte Técnico v5.61 - REVENDA"
+$form.Text = "Preparador XMenu – Suporte Técnico v5.62 - REVENDA"
 $form.Size = New-Object System.Drawing.Size($formWidth, $formHeight)
 $form.StartPosition = "CenterScreen"
 $form.BackColor = [System.Drawing.Color]::FromArgb(25, 25, 30); $form.ForeColor = 'White'
@@ -21873,7 +21946,7 @@ $bNetStart.Add_Click({ Set-NetStartInicializacao $this })
 [void]$tbl.Controls.Add($bNetStart)
 
 # Mensagem de abertura: explica o programa para quem abre pela primeira vez
-Log-Message "INFO" "Preparador XMenu v5.61 - REVENDA - preparo e suporte de computadores com XMenu e NetPDV"
+Log-Message "INFO" "Preparador XMenu v5.62 - REVENDA - preparo e suporte de computadores com XMenu e NetPDV"
 foreach ($msgSenha in $Script:LogSenhaPendente) { Log-Message "INFO" $msgSenha }
 Log-Message "INFO" "Senha de abertura: acesso liberado"
 Log-Message "LOG" "==============================================================="
@@ -21885,7 +21958,8 @@ Log-Message "LOG" "  EXTERNOS ................... acesso remoto, Chrome, TEF HUB
 Log-Message "LOG" "  SUPORTE E DIAGNÓSTICO ...... impressoras, rede, SQL, backup, XMLs e reparos do Windows"
 Log-Message "LOG" "  Passe o mouse sobre um botão para ver o que ele faz antes de clicar."
 Log-Message "LOG" "---------------------------------------------------------------"
-Log-Message "LOG" "NOVO NA v5.61"
+Log-Message "LOG" "NOVO NA v5.62"
+Log-Message "SUCESSO" "  LPR: impressora LPR parada com o PC achado pelo MAC (o PC mudou de IP) agora mostra o aviso CORRIGIR AGORA já na tela inicial do Preparador e ao abrir Impressoras, sem precisar entrar em LPR COMPARTILHADA (a conferência é leve: sem LPR parada leva milissegundos)"
 Log-Message "SUCESSO" "  Programas NetControll: KDS Monitor na versão 5.0.0.16 (todos os apps 5.0 agora na 5.0.0.16)"
 Log-Message "SUCESSO" "  XMLs: o ESPELHO FISCAL em impressora com o driver Generic / Text Only (Genérico / Somente Texto) agora sai no padrão da térmica: o Preparador manda o cupom nos comandos da própria impressora (ESC/POS), com QR Code, negrito, tarja e corte; a opção Modo texto ESC/POS liga sozinha nessas filas e fica guardada por impressora"
 Log-Message "SUCESSO" "  Preparar ambiente: a confirmação tem a opção Trocar o plano de fundo pelo padrão XMenu (já vem marcada); desmarcada, o Preparar faz todo o resto e mantém o fundo atual"
@@ -22013,6 +22087,27 @@ $form.Add_Shown({
         try { Enable-SelecionarTudo $this } catch {}
         try { & $preencheHardware } catch {}
         try { & $ajustarJanelaAoCabecalho } catch {}
+        # Impressora LPR parada com o PC achado pelo MAC (o PC mudou de IP): e urgente (a loja fica sem imprimir), entao o
+        # aviso CORRIGIR AGORA aparece ja na tela inicial. Num PC sem LPR a conferencia e instantanea; so procura na rede
+        # quando ha LPR parada com o MAC guardado. Com outra janela aberta ou download andando, fica para a tela Impressoras.
+        $tLprInicio = New-Object System.Windows.Forms.Timer
+        $tLprInicio.Interval = 2000
+        $tLprInicio.Add_Tick({
+                $this.Stop(); $this.Dispose()
+                if (@([System.Windows.Forms.Application]::OpenForms).Count -gt 1 -or $Script:IsDownloading) { return }
+                $form.Cursor = [System.Windows.Forms.Cursors]::WaitCursor
+                $corrInicio = @{}
+                try { $corrInicio = Find-CorrecoesLprPorMac }
+                finally { $form.Cursor = [System.Windows.Forms.Cursors]::Default }
+                if ($corrInicio.Count -eq 0) { return }
+                if (@([System.Windows.Forms.Application]::OpenForms).Count -gt 1 -or $Script:IsDownloading) {
+                    Log-Message "INFO" "LPR: impressora parada com o PC achado pelo MAC, mas outra janela já estava aberta; o aviso aparece em Impressoras"
+                    return
+                }
+                Log-Message "INFO" "LPR: na abertura do Preparador, $($corrInicio.Count) impressora(s) LPR parada(s) com o PC achado pelo MAC; abrindo o aviso"
+                Show-PortasLpr -Dono $form -CorrecoesMac $corrInicio
+            })
+        $tLprInicio.Start()
     })
 # Tela pequena: encolhe o miolo antes de mostrar a janela
 try { & $ajustarEscalaPrincipal } catch {}
