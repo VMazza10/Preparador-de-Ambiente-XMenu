@@ -1,5 +1,5 @@
 ﻿# =============================================================================
-# PREPARADOR XMENU v5.65
+# PREPARADOR XMENU v5.66
 # Visual: Dashboard Moderno
 # Correcoes:
 #   - CRITICO: Removido DoEvents do loop de evento de download (causava crash).
@@ -12180,6 +12180,7 @@ function Initialize-MemoriaApi {
     $codigoMemoria = @'
 using System;
 using System.Runtime.InteropServices;
+using System.Threading.Tasks;
 
 namespace XMenuTools
 {
@@ -12237,6 +12238,24 @@ namespace XMenuTools
         {
             int c = comando;
             return NtSetSystemInformation(80, ref c, 4);
+        }
+
+        // Versoes em segundo plano: esvaziar o cache de muitos GB leva segundos e, na thread da janela,
+        // o Windows a trocava pelo "Nao esta respondendo" (parecia que ela tinha fechado).
+        // EsvaziarProcessosAsync devolve { esvaziados, sem acesso }.
+        public static Task<int[]> EsvaziarProcessosAsync(int[] pids)
+        {
+            return Task.Run(() =>
+            {
+                int ok = 0, falha = 0;
+                foreach (int pid in pids) { if (EsvaziarProcesso(pid) == 0) { ok++; } else { falha++; } }
+                return new int[] { ok, falha };
+            });
+        }
+
+        public static Task<int> ComandoListaMemoriaAsync(int comando)
+        {
+            return Task.Run(() => ComandoListaMemoria(comando));
         }
     }
 }
@@ -12310,21 +12329,35 @@ function Get-ProcessosMemoria {
 function Invoke-LimparMemoria {
     # O "Empty Working Sets" + "Empty Standby List" do RAMMap, sem mexer no Windows nem no sistema:
     # esvazia so programas do cliente e processos do Windows que podem ser encerrados. Nao fecha nada.
+    # O trabalho pesado roda em segundo plano (a janela continua respondendo); -AoAvisar { param($Texto) }
+    # recebe o andamento para mostrar ao tecnico.
     # Devolve hashtable: Antes / Depois (Get-MemoriaDetalhe) / Esvaziados / Pulados / Falhas / CacheOk / CacheErro
+    param([scriptblock]$AoAvisar)
     Initialize-MemoriaApi
     $res = @{ Antes = (Get-MemoriaDetalhe); Depois = $null; Esvaziados = 0; Pulados = 0; Falhas = 0; CacheOk = $false; CacheErro = "" }
     Log-Message "INFO" "Memória RAM: limpando (antes: $($res.Antes.EmUsoMb) MB em uso de $($res.Antes.TotalMb) MB, cache $($res.Antes.CacheMb) MB, livre $($res.Antes.LivreMb) MB)"
+    $pidsLimpar = New-Object System.Collections.Generic.List[int]
+    $contaProc = 0
     foreach ($p in @(Get-Process -ErrorAction SilentlyContinue)) {
+        $contaProc++
+        if ($contaProc % 25 -eq 0) { [System.Windows.Forms.Application]::DoEvents() }
         if ([int]$p.Id -le 4) { continue }
         $tipo = (Get-ClasseProcessoMemoria $p).Tipo
         if ($tipo -ne 'cliente' -and $tipo -ne 'encerravel') { $res.Pulados++; continue }
-        if ([XMenuTools.Memoria]::EsvaziarProcesso([int]$p.Id) -eq 0) { $res.Esvaziados++ } else { $res.Falhas++ }
+        $pidsLimpar.Add([int]$p.Id)
     }
+    if ($null -ne $AoAvisar) { $null = & $AoAvisar "Liberando a memória parada de $($pidsLimpar.Count) programa(s)... (nenhum é fechado)" }
+    $tarefa = [XMenuTools.Memoria]::EsvaziarProcessosAsync($pidsLimpar.ToArray())
+    Wait-SqlTarefa $tarefa
+    $res.Esvaziados = $tarefa.Result[0]; $res.Falhas = $tarefa.Result[1]
     Log-Message "INFO" "Memória RAM: $($res.Esvaziados) processo(s) esvaziado(s); $($res.Pulados) do Windows, do sistema ou do acesso remoto ficaram como estavam; $($res.Falhas) sem acesso"
     $erroPriv = [XMenuTools.Memoria]::LigarPrivilegio("SeProfileSingleProcessPrivilege")
     if ($erroPriv -ne 0) { $res.CacheErro = "sem permissão para esvaziar o cache (erro $erroPriv)" }
     else {
-        $status = [XMenuTools.Memoria]::ComandoListaMemoria(4)
+        if ($null -ne $AoAvisar) { $null = & $AoAvisar "Esvaziando o cache do Windows... (pode levar alguns segundos)" }
+        $tarefaCache = [XMenuTools.Memoria]::ComandoListaMemoriaAsync(4)
+        Wait-SqlTarefa $tarefaCache
+        $status = $tarefaCache.Result
         if ($status -eq 0) { $res.CacheOk = $true }
         else { $res.CacheErro = "o Windows recusou esvaziar o cache (0x{0:X8})" -f $status }
     }
@@ -12509,7 +12542,7 @@ function Show-LiberarMemoria {
             & $travarMem $true
             & $statusMem "Limpando a memória... (nenhum programa é fechado)" $Script:UiAmarelo
             try {
-                $r = Invoke-LimparMemoria
+                $r = Invoke-LimparMemoria -AoAvisar { param($Texto) & $statusMem $Texto $Script:UiAmarelo }
                 if ($r.Antes.Lido -and $r.Depois.Lido) {
                     $liberou = [long][math]::Max(0, $r.Antes.EmUsoMb - $r.Depois.EmUsoMb)
                     $textoFim = "Pronto: em uso de {0} para {1} (liberou {2}); cache de {3} para {4}." -f (Format-BytesTexto ($r.Antes.EmUsoMb * 1MB)), (Format-BytesTexto ($r.Depois.EmUsoMb * 1MB)), (Format-BytesTexto ($liberou * 1MB)), (Format-BytesTexto ($r.Antes.CacheMb * 1MB)), (Format-BytesTexto ($r.Depois.CacheMb * 1MB))
@@ -12554,6 +12587,14 @@ function Show-LiberarMemoria {
             finally { & $travarMem $false }
         })
 
+    # Enquanto limpa ou encerra, a janela nao fecha (o trabalho ainda esta terminando)
+    $f.Add_FormClosing({
+            param($s, $e)
+            if ($estadoMem.Ocupado) {
+                $e.Cancel = $true
+                & $statusMem "Aguarde terminar: a janela fecha quando a limpeza acabar." $Script:UiAmarelo
+            }
+        })
     $f.Add_Shown({ $f.Refresh(); & $carregarMem })
     [void]$f.ShowDialog()
     $f.Dispose()
@@ -21553,7 +21594,7 @@ $formWidth = if ($screen.Width -lt 1200) { $screen.Width - 50 } else { 1200 }
 $formHeight = if ($screen.Height -lt 900) { $screen.Height - 50 } else { 900 }
 
 $form = New-Object System.Windows.Forms.Form
-$form.Text = "Preparador XMenu – Suporte Técnico v5.65"
+$form.Text = "Preparador XMenu – Suporte Técnico v5.66"
 $form.Size = New-Object System.Drawing.Size($formWidth, $formHeight)
 $form.StartPosition = "CenterScreen"
 $form.BackColor = [System.Drawing.Color]::FromArgb(25, 25, 30); $form.ForeColor = 'White'
@@ -22477,7 +22518,7 @@ $bRam.Add_Click({ Show-LiberarMemoria })
 [void]$tbl.Controls.Add($bRam)
 
 # Mensagem de abertura: explica o programa para quem abre pela primeira vez
-Log-Message "INFO" "Preparador XMenu v5.65 - preparo e suporte de computadores com XMenu e NetPDV"
+Log-Message "INFO" "Preparador XMenu v5.66 - preparo e suporte de computadores com XMenu e NetPDV"
 foreach ($msgSenha in $Script:LogSenhaPendente) { Log-Message "INFO" $msgSenha }
 Log-Message "INFO" "Senha de abertura: acesso liberado"
 Log-Message "LOG" "==============================================================="
@@ -22489,7 +22530,8 @@ Log-Message "LOG" "  EXTERNOS ................... acesso remoto, Chrome, TEF HUB
 Log-Message "LOG" "  SUPORTE E DIAGNÓSTICO ...... impressoras, rede, SQL, backup, XMLs e reparos do Windows"
 Log-Message "LOG" "  Passe o mouse sobre um botão para ver o que ele faz antes de clicar."
 Log-Message "LOG" "---------------------------------------------------------------"
-Log-Message "LOG" "NOVO NA v5.65"
+Log-Message "LOG" "NOVO NA v5.66"
+Log-Message "SUCESSO" "  Suporte: o LIMPAR MEMÓRIA não faz mais a janela sumir: a limpeza roda em segundo plano (esvaziar muitos GB de cache leva alguns segundos e o Windows mostrava a janela como Não está respondendo), mostra o andamento e não deixa fechar a janela no meio"
 Log-Message "SUCESSO" "  Suporte: no Liberar Memória RAM os processos do Windows que podem ser encerrados aparecem no topo da lista e já marcados: é só clicar em ENCERRAR MARCADOS (o que for desmarcado continua desmarcado ao atualizar); os demais ficam abaixo só para consulta"
 Log-Message "SUCESSO" "  Suporte: novo botão Liberar Memória RAM: libera a RAM sem fechar nenhum programa (esvazia a memória parada dos programas abertos e o cache do Windows) e mostra o consumo de memória por programa"
 Log-Message "SUCESSO" "  Suporte: no Liberar Memória RAM só podem ser encerrados processos do Windows que ele mesmo reabre (Pesquisa, Widgets, Vincular ao Celular, Xbox Game Bar...); programas do cliente nunca são fechados, e o Windows essencial, o acesso remoto e o sistema NetControll / SQL Server ficam de fora até da limpeza"
