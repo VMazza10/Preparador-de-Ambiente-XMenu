@@ -1,5 +1,5 @@
 ﻿# =============================================================================
-# PREPARADOR XMENU v5.64
+# PREPARADOR XMENU v5.65
 # Visual: Dashboard Moderno
 # Correcoes:
 #   - CRITICO: Removido DoEvents do loop de evento de download (causava crash).
@@ -12379,8 +12379,8 @@ function Show-LiberarMemoria {
     $btnLimpar = New-ToolButton $f "LIMPAR MEMÓRIA" 594 150 150 34 $Script:UiVerde $null "Libera a memória parada dos programas abertos e esvazia o cache do Windows (Standby), sem fechar nenhum programa"
     $btnLimpar.Anchor = 'Top,Right'
 
-    New-ToolLabel $f "2  CONSUMO DE MEMÓRIA POR PROGRAMA" 20 204 10 -Negrito | Out-Null
-    $lblListaDesc = New-ToolLabel $f "Somente processos do Windows que ele mesmo reabre quando necessário (Pesquisa, Widgets, Vincular ao Celular...) podem ser encerrados. Programas do cliente, o Windows essencial, o acesso remoto e o sistema NetControll ficam protegidos." 20 228 9 -Cor $Script:UiSuave -W 724
+    New-ToolLabel $f "2  ENCERRAR PROCESSOS DO WINDOWS" 20 204 10 -Negrito | Out-Null
+    $lblListaDesc = New-ToolLabel $f "Os processos do Windows no topo, já marcados, podem ser encerrados com segurança: o Windows os abre de novo quando precisar. O restante é só para consulta (programas do cliente, Windows essencial, acesso remoto e NetControll ficam protegidos)." 20 228 9 -Cor $Script:UiSuave -W 724
     $lblListaDesc.Height = 40
     $lblListaDesc.Anchor = 'Top,Left,Right'
 
@@ -12415,8 +12415,9 @@ function Show-LiberarMemoria {
     $btnFecharMem.Anchor = 'Top,Right'
     $f.CancelButton = $btnFecharMem
 
-    # Estado numa hashtable: os eventos rodam em outro escopo e precisam enxergar a mesma variavel
-    $estadoMem = @{ Ocupado = $false }
+    # Estado numa hashtable: os eventos rodam em outro escopo e precisam enxergar a mesma variavel.
+    # Desmarcados: o que o tecnico desmarcou continua desmarcado quando a lista e lida de novo.
+    $estadoMem = @{ Ocupado = $false; Carregando = $false; Desmarcados = (New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)) }
     $statusMem = {
         param([string]$Texto, $Cor)
         $lblStatusMem.Text = $Texto
@@ -12445,20 +12446,28 @@ function Show-LiberarMemoria {
     }
     $mostrarProcessos = {
         $grupos = @(Get-ProcessosMemoria)
-        # Os 40 que mais usam e, mesmo abaixo deles, todo processo do Windows que pode ser encerrado
-        $exibir = @($grupos | Select-Object -First 40) + @($grupos | Select-Object -Skip 40 | Where-Object { $_.Tipo -eq 'encerravel' })
+        # No topo, ja marcados, os processos do Windows que podem ser encerrados; embaixo, para consulta,
+        # os 40 que mais usam memoria
+        $exibir = @($grupos | Where-Object { $_.Tipo -eq 'encerravel' }) + @($grupos | Where-Object { $_.Tipo -ne 'encerravel' } | Select-Object -First 40)
+        $estadoMem.Carregando = $true
         $lvMem.BeginUpdate()
-        $lvMem.Items.Clear()
-        foreach ($g in $exibir) {
-            $it = New-Object System.Windows.Forms.ListViewItem($g.Nome)
-            [void]$it.SubItems.Add((Format-BytesTexto $g.Bytes))
-            [void]$it.SubItems.Add("$($g.Pids.Count)")
-            [void]$it.SubItems.Add($g.Situacao)
-            $it.Tag = $g
-            $it.ForeColor = $(if ($g.Tipo -eq 'encerravel') { $Script:UiVerde } else { $Script:UiSuave })
-            [void]$lvMem.Items.Add($it)
+        try {
+            $lvMem.Items.Clear()
+            foreach ($g in $exibir) {
+                $it = New-Object System.Windows.Forms.ListViewItem($g.Nome)
+                [void]$it.SubItems.Add((Format-BytesTexto $g.Bytes))
+                [void]$it.SubItems.Add("$($g.Pids.Count)")
+                [void]$it.SubItems.Add($g.Situacao)
+                $it.Tag = $g
+                $it.ForeColor = $(if ($g.Tipo -eq 'encerravel') { $Script:UiVerde } else { $Script:UiSuave })
+                [void]$lvMem.Items.Add($it)
+                if ($g.Tipo -eq 'encerravel' -and -not $estadoMem.Desmarcados.Contains($g.Nome)) { $it.Checked = $true }
+            }
         }
-        $lvMem.EndUpdate()
+        finally {
+            $lvMem.EndUpdate()
+            $estadoMem.Carregando = $false
+        }
         $maiores = (@($grupos | Select-Object -First 5 | ForEach-Object { "$($_.Nome) $(Format-BytesTexto $_.Bytes)" })) -join ", "
         Log-Message "INFO" "Memória RAM: quem mais usa: $maiores"
         return $grupos
@@ -12467,12 +12476,17 @@ function Show-LiberarMemoria {
         & $travarMem $true
         & $statusMem "Lendo a memória e os processos..." $Script:UiAmarelo
         $m = & $mostrarMemoria
-        $grupos = @(& $mostrarProcessos)
-        $nEnc = @($grupos | Where-Object { $_.Tipo -eq 'encerravel' }).Count
+        [void](& $mostrarProcessos)
         if ($m.Lido) { Log-Message "INFO" "Memória RAM: $($m.EmUsoMb) MB em uso de $($m.TotalMb) MB ($($m.PctEmUso)%), cache $($m.CacheMb) MB, livre $($m.LivreMb) MB" }
-        if ($nEnc -gt 0) { & $statusMem "$nEnc processo(s) do Windows pode(m) ser encerrado(s): marque e clique em ENCERRAR MARCADOS." $Script:UiSuave }
-        else { & $statusMem "Nenhum processo do Windows para encerrar agora. Use LIMPAR MEMÓRIA para liberar a RAM sem fechar nada." $Script:UiSuave }
+        & $statusMem (& $textoMarcadosMem) $Script:UiSuave
         & $travarMem $false
+    }
+    $textoMarcadosMem = {
+        $nMarcados = $lvMem.CheckedItems.Count
+        $nEnc = @($lvMem.Items | Where-Object { $null -ne $_.Tag -and $_.Tag.Tipo -eq 'encerravel' }).Count
+        if ($nEnc -eq 0) { return "Nenhum processo do Windows para encerrar agora. Use LIMPAR MEMÓRIA para liberar a RAM sem fechar nada." }
+        if ($nMarcados -eq 0) { return "Nenhum processo marcado. Marque os do topo da lista para encerrar." }
+        return "$nMarcados processo(s) do Windows marcado(s). Clique em ENCERRAR MARCADOS ou desmarque o que quiser manter."
     }
 
     # Só processos do Windows que podem ser encerrados aceitam a marca
@@ -12481,7 +12495,13 @@ function Show-LiberarMemoria {
             $g = $s.Items[$e.Index].Tag
             if ($null -eq $g -or $g.Tipo -ne 'encerravel') { $e.NewValue = $e.CurrentValue }
         })
-    $lvMem.Add_ItemChecked({ & $atualizarBotoesMem })
+    $lvMem.Add_ItemChecked({
+            param($s, $e)
+            & $atualizarBotoesMem
+            if ($estadoMem.Carregando -or $estadoMem.Ocupado -or $null -eq $e.Item.Tag) { return }
+            if ($e.Item.Checked) { [void]$estadoMem.Desmarcados.Remove($e.Item.Tag.Nome) } else { [void]$estadoMem.Desmarcados.Add($e.Item.Tag.Nome) }
+            & $statusMem (& $textoMarcadosMem) $Script:UiSuave
+        })
 
     $btnAtualizarMem.Add_Click({ & $carregarMem })
 
@@ -21533,7 +21553,7 @@ $formWidth = if ($screen.Width -lt 1200) { $screen.Width - 50 } else { 1200 }
 $formHeight = if ($screen.Height -lt 900) { $screen.Height - 50 } else { 900 }
 
 $form = New-Object System.Windows.Forms.Form
-$form.Text = "Preparador XMenu – Suporte Técnico v5.64"
+$form.Text = "Preparador XMenu – Suporte Técnico v5.65"
 $form.Size = New-Object System.Drawing.Size($formWidth, $formHeight)
 $form.StartPosition = "CenterScreen"
 $form.BackColor = [System.Drawing.Color]::FromArgb(25, 25, 30); $form.ForeColor = 'White'
@@ -22457,7 +22477,7 @@ $bRam.Add_Click({ Show-LiberarMemoria })
 [void]$tbl.Controls.Add($bRam)
 
 # Mensagem de abertura: explica o programa para quem abre pela primeira vez
-Log-Message "INFO" "Preparador XMenu v5.64 - preparo e suporte de computadores com XMenu e NetPDV"
+Log-Message "INFO" "Preparador XMenu v5.65 - preparo e suporte de computadores com XMenu e NetPDV"
 foreach ($msgSenha in $Script:LogSenhaPendente) { Log-Message "INFO" $msgSenha }
 Log-Message "INFO" "Senha de abertura: acesso liberado"
 Log-Message "LOG" "==============================================================="
@@ -22469,7 +22489,8 @@ Log-Message "LOG" "  EXTERNOS ................... acesso remoto, Chrome, TEF HUB
 Log-Message "LOG" "  SUPORTE E DIAGNÓSTICO ...... impressoras, rede, SQL, backup, XMLs e reparos do Windows"
 Log-Message "LOG" "  Passe o mouse sobre um botão para ver o que ele faz antes de clicar."
 Log-Message "LOG" "---------------------------------------------------------------"
-Log-Message "LOG" "NOVO NA v5.64"
+Log-Message "LOG" "NOVO NA v5.65"
+Log-Message "SUCESSO" "  Suporte: no Liberar Memória RAM os processos do Windows que podem ser encerrados aparecem no topo da lista e já marcados: é só clicar em ENCERRAR MARCADOS (o que for desmarcado continua desmarcado ao atualizar); os demais ficam abaixo só para consulta"
 Log-Message "SUCESSO" "  Suporte: novo botão Liberar Memória RAM: libera a RAM sem fechar nenhum programa (esvazia a memória parada dos programas abertos e o cache do Windows) e mostra o consumo de memória por programa"
 Log-Message "SUCESSO" "  Suporte: no Liberar Memória RAM só podem ser encerrados processos do Windows que ele mesmo reabre (Pesquisa, Widgets, Vincular ao Celular, Xbox Game Bar...); programas do cliente nunca são fechados, e o Windows essencial, o acesso remoto e o sistema NetControll / SQL Server ficam de fora até da limpeza"
 Log-Message "SUCESSO" "  Drivers: conferidos com os sites oficiais os drivers de todas as marcas (menos Elgin); atualizados Star (StarPRNT Intelligence 3.8.1, Star Windows Software 3.11.0 para mC-Print / mPOP / TSP100IV e futurePRNT 7.70 para TSP100 / TSP143), Argox 12.5.0, Gainscha / Gprinter 11.10.0, Gertec G250 Utility 1.1.1.0, Tanca TP-620 / TP-620+ pelo instalador oficial e Feasso F-IMTER-02 / 03 e Dimep D-PRINT DUAL pelos pacotes oficiais"
