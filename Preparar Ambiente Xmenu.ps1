@@ -1,5 +1,5 @@
 ﻿# =============================================================================
-# PREPARADOR XMENU v5.60
+# PREPARADOR XMENU v5.61
 # Visual: Dashboard Moderno
 # Correcoes:
 #   - CRITICO: Removido DoEvents do loop de evento de download (causava crash).
@@ -20125,7 +20125,7 @@ function Get-VersoesSelector {
 }
 
 # Apps da linha 5.0 no site da NetControll (Apps/<versao>/<pasta>/): cada um tem instalador, executavel e APK.
-# Cada app anda na sua versao (o KDS esta na 5.0.0.12; o NetPDV, o Totem, o Totem Pesavel e o Cardapio Tablet, na 5.0.0.16).
+# Cada app anda na sua versao (hoje todos na 5.0.0.16: NetPDV, KDS, Totem, Totem Pesavel e Cardapio Tablet).
 # Aba = nome da aba no seletor do botao (o Totem tem duas: Totem e Pesavel).
 function Get-Apps50 {
     param([string]$Type)
@@ -20138,7 +20138,7 @@ function Get-Apps50 {
             )
         }
         "Tablet" { return @(@{ Nome = "Cardápio Tablet"; Aba = "Versão 5.0"; Versao = "5.0.0.16"; Pasta = "xmenu-tablet-cardapio"; Base = "TabletCardapio" }) }
-        "KDS" { return @(@{ Nome = "KDS Monitor"; Aba = "Versão 5.0"; Versao = "5.0.0.12"; Pasta = "xmenu-app-monitor"; Base = "KDSMonitor" }) }
+        "KDS" { return @(@{ Nome = "KDS Monitor"; Aba = "Versão 5.0"; Versao = "5.0.0.16"; Pasta = "xmenu-app-monitor"; Base = "KDSMonitor" }) }
     }
     return @()
 }
@@ -21042,7 +21042,7 @@ $formWidth = if ($screen.Width -lt 1200) { $screen.Width - 50 } else { 1200 }
 $formHeight = if ($screen.Height -lt 900) { $screen.Height - 50 } else { 900 }
 
 $form = New-Object System.Windows.Forms.Form
-$form.Text = "Preparador XMenu – Suporte Técnico v5.60"
+$form.Text = "Preparador XMenu – Suporte Técnico v5.61"
 $form.Size = New-Object System.Drawing.Size($formWidth, $formHeight)
 $form.StartPosition = "CenterScreen"
 $form.BackColor = [System.Drawing.Color]::FromArgb(25, 25, 30); $form.ForeColor = 'White'
@@ -21958,7 +21958,7 @@ $bNetStart.Add_Click({ Set-NetStartInicializacao $this })
 [void]$tbl.Controls.Add($bNetStart)
 
 # Mensagem de abertura: explica o programa para quem abre pela primeira vez
-Log-Message "INFO" "Preparador XMenu v5.60 - preparo e suporte de computadores com XMenu e NetPDV"
+Log-Message "INFO" "Preparador XMenu v5.61 - preparo e suporte de computadores com XMenu e NetPDV"
 foreach ($msgSenha in $Script:LogSenhaPendente) { Log-Message "INFO" $msgSenha }
 Log-Message "INFO" "Senha de abertura: acesso liberado"
 Log-Message "LOG" "==============================================================="
@@ -21970,7 +21970,8 @@ Log-Message "LOG" "  EXTERNOS ................... acesso remoto, Chrome, TEF HUB
 Log-Message "LOG" "  SUPORTE E DIAGNÓSTICO ...... impressoras, rede, SQL, backup, XMLs e reparos do Windows"
 Log-Message "LOG" "  Passe o mouse sobre um botão para ver o que ele faz antes de clicar."
 Log-Message "LOG" "---------------------------------------------------------------"
-Log-Message "LOG" "NOVO NA v5.60"
+Log-Message "LOG" "NOVO NA v5.61"
+Log-Message "SUCESSO" "  Programas NetControll: KDS Monitor na versão 5.0.0.16 (todos os apps 5.0 agora na 5.0.0.16)"
 Log-Message "SUCESSO" "  XMLs: o ESPELHO FISCAL em impressora com o driver Generic / Text Only (Genérico / Somente Texto) agora sai no padrão da térmica: o Preparador manda o cupom nos comandos da própria impressora (ESC/POS), com QR Code, negrito, tarja e corte; a opção Modo texto ESC/POS liga sozinha nessas filas e fica guardada por impressora"
 Log-Message "SUCESSO" "  Preparar ambiente: a confirmação tem a opção Trocar o plano de fundo pelo padrão XMenu (já vem marcada); desmarcada, o Preparar faz todo o resto e mantém o fundo atual"
 Log-Message "SUCESSO" "  Suporte: o Iniciar NetStart com o Windows tira da pasta shell:startup o NetStart que já estava lá (fica guardado em Arquivos Xmenu\Inicializar antigo) e coloca o do Preparador"
