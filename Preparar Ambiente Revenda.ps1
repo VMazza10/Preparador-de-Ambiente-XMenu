@@ -1,6 +1,6 @@
 ﻿# =============================================================================
 # PREPARADOR XMENU - VERSAO REVENDA
-# Baseado na v5.59
+# Baseado na v5.60
 # Alteracoes Revenda:
 #   - Wallpaper: fundo_revenda.png
 #   - Removido: Atalhos de Suporte e Pasta Netcontroll
@@ -2573,6 +2573,8 @@ function New-DanfeNfceBlocos {
             $matriz = [XMenuTools.QrCodigo]::Gerar($Dados.QrCode)
             $blocoQr = @{ K = 'qr'; Mm = 32 }
             $blocoQr.Mat = $matriz
+            # O texto tambem vai junto: no modo texto (ESC/POS) a propria impressora desenha o QR
+            $blocoQr.Texto = $Dados.QrCode
             $b.Add($blocoQr)
         }
         catch { & $txt "O QR Code não pôde ser desenhado neste PC. Consulte pela chave de acesso acima." }
@@ -2931,16 +2933,222 @@ function Send-CupomImpressora {
 
 function Send-DanfeNfceImpressora {
     # XML da NFC-e -> espelho impresso. Devolve quantas paginas sairam; lanca excecao com o motivo quando nao da.
-    param([string]$Xml, [string]$Impressora, [switch]$Cancelada, $DataCancelamento = $null)
+    # -Texto: impressora com driver Generico / Somente Texto (manda o cupom em ESC/POS, sem desenho do Windows)
+    param([string]$Xml, [string]$Impressora, [switch]$Cancelada, $DataCancelamento = $null, [switch]$Texto)
     $dados = Get-DanfeNfceDados -Xml $Xml
     $blocos = New-DanfeNfceBlocos -Dados $dados -Cancelada:$Cancelada -DataCancelamento $DataCancelamento
-    return Send-CupomImpressora -Blocos $blocos -Impressora $Impressora -Titulo ("Espelho NFC-e " + $dados.Numero + " Serie " + $dados.Serie)
+    $titulo = "Espelho NFC-e " + $dados.Numero + " Serie " + $dados.Serie
+    if ($Texto) {
+        Send-RawImpressora -Impressora $Impressora -Dados (New-CupomEscPos -Blocos $blocos) -Documento $titulo
+        return 1
+    }
+    return Send-CupomImpressora -Blocos $blocos -Impressora $Impressora -Titulo $titulo
+}
+
+# -----------------------------------------------------------------------------
+# ESPELHO EM MODO TEXTO (ESC/POS)
+# Na fila com driver Generic / Text Only o Windows nao desenha nada: so passa as letras adiante, e o espelho saia
+# sem tracejado, sem QR Code, com as linhas quebradas e os acentos trocados. Nessa fila o espelho vai como o PDV
+# manda o cupom: em comandos da propria impressora termica (ESC/POS), direto para o spooler.
+# -----------------------------------------------------------------------------
+function Get-DriversImpressoras {
+    # Nome da impressora -> nome do driver (consulta so)
+    $mapa = @{}
+    try { foreach ($impCim in @(Get-CimInstance Win32_Printer -ErrorAction Stop)) { $mapa["$($impCim.Name)"] = "$($impCim.DriverName)" } } catch {}
+    return $mapa
+}
+
+function Test-DriverSomenteTexto {
+    param([string]$Driver)
+    return ("$Driver" -match '(?i)generic\s*/\s*text|text\s*only|gen[eé]rico\s*/\s*somente\s*texto')
+}
+
+function ConvertTo-TextoCupom {
+    # Texto so com letras comuns (sem acento): cada marca de termica usa uma tabela de caracteres diferente,
+    # e acento na tabela errada vira outro simbolo ("Crédito" saia "Cr0dito")
+    param([string]$Texto)
+    $t = "$Texto".Replace('º', 'o').Replace('ª', 'a').Replace('°', 'o').Replace([string][char]0x2013, '-').Replace([string][char]0x2014, '-')
+    $t = $t.Replace([string][char]0x201C, '"').Replace([string][char]0x201D, '"').Replace([string][char]0x2018, "'").Replace([string][char]0x2019, "'")
+    $sb = New-Object System.Text.StringBuilder
+    foreach ($ch in $t.Normalize([System.Text.NormalizationForm]::FormD).ToCharArray()) {
+        if ([System.Globalization.CharUnicodeInfo]::GetUnicodeCategory($ch) -eq [System.Globalization.UnicodeCategory]::NonSpacingMark) { continue }
+        if ([int]$ch -ge 32 -and [int]$ch -lt 127) { [void]$sb.Append($ch) }
+        elseif ($ch -eq "`n") { [void]$sb.Append($ch) }
+        elseif ([int]$ch -ge 127) { [void]$sb.Append('?') }
+    }
+    return $sb.ToString()
+}
+
+function New-CupomEscPos {
+    # Os mesmos blocos do espelho (New-DanfeNfceBlocos) em ESC/POS para termica de 80 mm: letra A com 48 colunas
+    # (totais e textos curtos) e letra B, miuda, com 64 (tabela de itens e textos compridos, que foram montados para
+    # 54 colunas). Negrito, tarja em fundo preto, QR Code feito pela impressora (GS ( k), avanco e corte no fim.
+    param($Blocos, [int]$ColA = 48, [int]$ColB = 64)
+    $ms = New-Object System.IO.MemoryStream
+    $cmd = { param([int[]]$Bytes) foreach ($bt in $Bytes) { $ms.WriteByte([byte]$bt) } }
+    $escreve = { param([string]$Linha) $bytes = [System.Text.Encoding]::ASCII.GetBytes((ConvertTo-TextoCupom $Linha)); $ms.Write($bytes, 0, $bytes.Length); $ms.WriteByte(10) }
+    $fonte = { param([bool]$Miuda, [bool]$Negrito, [int]$Alinha) & $cmd @(0x1B, 0x4D, $(if ($Miuda) { 1 } else { 0 })); & $cmd @(0x1B, 0x45, $(if ($Negrito) { 1 } else { 0 })); & $cmd @(0x1B, 0x61, $Alinha) }
+    $alinhamento = @{ 'E' = 0; 'C' = 1; 'D' = 2 }
+
+    & $cmd @(0x1B, 0x40)
+    foreach ($bl in @($Blocos)) {
+        switch ($bl.K) {
+            'sep' {
+                & $fonte $false $false 0
+                & $escreve ('-' * $ColA)
+            }
+            'txt' {
+                $miuda = ($bl.Col -ge 54)
+                $col = if ($miuda) { $ColB } else { $ColA }
+                $al = $alinhamento["$($bl.Al)"]; if ($null -eq $al) { $al = 1 }
+                & $fonte $miuda ([bool]$bl.Neg) $al
+                foreach ($l in (Split-DanfeTexto (ConvertTo-TextoCupom $bl.Txt) $col)) { & $escreve $l }
+            }
+            'lin' {
+                & $fonte $true ([bool]$bl.Neg) 0
+                $l = ConvertTo-TextoCupom $bl.Txt
+                if ($l.Length -gt $ColB) { $l = $l.Substring(0, $ColB) }
+                & $escreve $l
+            }
+            'par' {
+                $miuda = ($bl.Col -ge 54)
+                $col = if ($miuda) { $ColB } else { $ColA }
+                $dir = ConvertTo-TextoCupom $bl.Dir
+                $esq = ConvertTo-TextoCupom $bl.Esq
+                $cabe = [Math]::Max(0, $col - $dir.Length - 1)
+                if ($esq.Length -gt $cabe) { $esq = $esq.Substring(0, $cabe) }
+                & $fonte $miuda ([bool]$bl.Neg) 0
+                & $escreve ($esq.PadRight([Math]::Max(0, $col - $dir.Length)) + $dir)
+            }
+            'faixa' {
+                # Tarja: letra branca em fundo preto (GS B), dobrada quando cabe; o texto e completado com espacos
+                # para o fundo preto ocupar a largura toda
+                $linhasF = @($bl.Linhas | ForEach-Object { ConvertTo-TextoCupom $_ })
+                $maiorF = 0; foreach ($lf in $linhasF) { $maiorF = [Math]::Max($maiorF, $lf.Length) }
+                $dobra = ($maiorF * 2 -le $ColA)
+                $largF = if ($dobra) { [int]($ColA / 2) } else { $ColA }
+                & $fonte $false $true 0
+                & $cmd @(0x1D, 0x42, 1)
+                if ($dobra) { & $cmd @(0x1D, 0x21, 0x11) }
+                foreach ($lf in $linhasF) {
+                    $esqF = [int][Math]::Floor(($largF - $lf.Length) / 2)
+                    & $escreve (((' ' * [Math]::Max(0, $esqF)) + $lf).PadRight($largF))
+                }
+                & $cmd @(0x1D, 0x21, 0x00)
+                & $cmd @(0x1D, 0x42, 0)
+            }
+            'qr' {
+                $dadosQr = [System.Text.Encoding]::ASCII.GetBytes((ConvertTo-TextoCupom "$($bl.Texto)"))
+                if ($dadosQr.Length -eq 0) { continue }
+                & $fonte $false $false 1
+                & $cmd @(0x1D, 0x28, 0x6B, 4, 0, 0x31, 0x41, 0x32, 0)                          # modelo 2
+                & $cmd @(0x1D, 0x28, 0x6B, 3, 0, 0x31, 0x43, 5)                                # modulo de 5 pontos
+                & $cmd @(0x1D, 0x28, 0x6B, 3, 0, 0x31, 0x45, 0x31)                             # correcao nivel M
+                $tamQr = $dadosQr.Length + 3
+                & $cmd @(0x1D, 0x28, 0x6B, ($tamQr % 256), [int][Math]::Floor($tamQr / 256), 0x31, 0x50, 0x30)
+                $ms.Write($dadosQr, 0, $dadosQr.Length)
+                & $cmd @(0x1D, 0x28, 0x6B, 3, 0, 0x31, 0x51, 0x30)                             # imprime o QR
+                $ms.WriteByte(10)
+            }
+        }
+    }
+    & $fonte $false $false 0
+    & $cmd @(0x1B, 0x64, 4)          # avanca 4 linhas
+    & $cmd @(0x1D, 0x56, 0x42, 0)    # corte parcial (quem nao tem guilhotina ignora)
+    $bytes = $ms.ToArray()
+    $ms.Dispose()
+    return , $bytes
+}
+
+function Initialize-ImpressoraRaw {
+    # Envio direto para o spooler, sem passar pelo desenho do Windows (tipo de dado RAW). Compilado na primeira vez.
+    if ('XMenuTools.ImpressoraRaw' -as [type]) { return }
+    $codigoRaw = @'
+using System;
+using System.Runtime.InteropServices;
+
+namespace XMenuTools
+{
+    public static class ImpressoraRaw
+    {
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+        private class DOCINFOW
+        {
+            [MarshalAs(UnmanagedType.LPWStr)] public string pDocName;
+            [MarshalAs(UnmanagedType.LPWStr)] public string pOutputFile;
+            [MarshalAs(UnmanagedType.LPWStr)] public string pDatatype;
+        }
+
+        [DllImport("winspool.drv", EntryPoint = "OpenPrinterW", SetLastError = true, CharSet = CharSet.Unicode)]
+        private static extern bool OpenPrinter(string nome, out IntPtr h, IntPtr padrao);
+        [DllImport("winspool.drv", SetLastError = true)]
+        private static extern bool ClosePrinter(IntPtr h);
+        [DllImport("winspool.drv", EntryPoint = "StartDocPrinterW", SetLastError = true, CharSet = CharSet.Unicode)]
+        private static extern int StartDocPrinter(IntPtr h, int nivel, [In, MarshalAs(UnmanagedType.LPStruct)] DOCINFOW doc);
+        [DllImport("winspool.drv", SetLastError = true)]
+        private static extern bool EndDocPrinter(IntPtr h);
+        [DllImport("winspool.drv", SetLastError = true)]
+        private static extern bool StartPagePrinter(IntPtr h);
+        [DllImport("winspool.drv", SetLastError = true)]
+        private static extern bool EndPagePrinter(IntPtr h);
+        [DllImport("winspool.drv", SetLastError = true)]
+        private static extern bool WritePrinter(IntPtr h, byte[] dados, int qtd, out int escritos);
+
+        // "" quando deu certo; senao "etapa:codigo" (abrir, iniciar, pagina, enviar)
+        public static string Enviar(string impressora, string documento, byte[] dados, string arquivoSaida)
+        {
+            IntPtr h;
+            if (!OpenPrinter(impressora, out h, IntPtr.Zero)) return "abrir:" + Marshal.GetLastWin32Error();
+            try
+            {
+                DOCINFOW doc = new DOCINFOW();
+                doc.pDocName = documento;
+                doc.pDatatype = "RAW";
+                doc.pOutputFile = string.IsNullOrEmpty(arquivoSaida) ? null : arquivoSaida;
+                if (StartDocPrinter(h, 1, doc) == 0) return "iniciar:" + Marshal.GetLastWin32Error();
+                try
+                {
+                    if (!StartPagePrinter(h)) return "pagina:" + Marshal.GetLastWin32Error();
+                    int escritos;
+                    bool ok = WritePrinter(h, dados, dados.Length, out escritos);
+                    int erro = Marshal.GetLastWin32Error();
+                    EndPagePrinter(h);
+                    if (!ok || escritos != dados.Length) return "enviar:" + erro + ":" + escritos + "/" + dados.Length;
+                }
+                finally { EndDocPrinter(h); }
+            }
+            finally { ClosePrinter(h); }
+            return "";
+        }
+    }
+}
+'@
+    Add-Type -TypeDefinition $codigoRaw -Language CSharp
+}
+
+function Send-RawImpressora {
+    # Manda os bytes como estao para a fila (RAW). Lanca excecao com o motivo em portugues quando nao da.
+    # -ArquivoSaida: o spooler grava o trabalho num arquivo em vez da porta (so para teste)
+    param([string]$Impressora, [byte[]]$Dados, [string]$Documento = "Preparador XMenu", [string]$ArquivoSaida = "")
+    Initialize-ImpressoraRaw
+    $res = [XMenuTools.ImpressoraRaw]::Enviar($Impressora, $Documento, $Dados, $ArquivoSaida)
+    if ($res -eq "") { return }
+    $partes = $res -split ':'
+    $codigo = [int]$partes[1]
+    $motivo = (New-Object System.ComponentModel.Win32Exception($codigo)).Message
+    switch ($partes[0]) {
+        'abrir' { throw "a impressora ""$Impressora"" não abriu ($motivo)" }
+        'iniciar' { throw "o spooler não aceitou o trabalho na ""$Impressora"" ($motivo)" }
+        'pagina' { throw "o spooler não aceitou a página na ""$Impressora"" ($motivo)" }
+        default { throw "a impressora ""$Impressora"" não recebeu tudo ($($partes[2]) bytes; $motivo)" }
+    }
 }
 
 function Show-EscolhaEspelho {
-    # Espelho fiscal: imprimir direto ou salvar em PDF. Devolve @{ Modo = 'Imprimir' ou 'Pdf';
-    # Impressora } ou $null quando o tecnico cancela. Vem marcada a impressora usada da ultima
-    # vez no espelho; sem ela, a padrao do Windows.
+    # Espelho fiscal: imprimir direto ou salvar em PDF. Devolve @{ Modo = 'Imprimir' ou 'Pdf'; Impressora; Texto }
+    # ou $null quando o tecnico cancela. Vem marcada a impressora usada da ultima vez no espelho; sem ela, a padrao
+    # do Windows. Texto (modo ESC/POS) liga sozinho quando o driver da impressora e o Generic / Text Only; a escolha
+    # do tecnico fica guardada por impressora (espelho_modo.txt, linhas "texto|Nome" ou "grafico|Nome").
     param([int]$Quantidade, [string]$Notas = "")
     $impressoras = @()
     try { $impressoras = @([System.Drawing.Printing.PrinterSettings]::InstalledPrinters | ForEach-Object { "$_" } | Sort-Object) } catch {}
@@ -2949,6 +3157,18 @@ function Show-EscolhaEspelho {
     $arqUltima = Join-Path $Script:DownloadFolder "espelho_impressora.txt"
     $ultima = ""
     try { if (Test-Path -LiteralPath $arqUltima) { $ultima = "$([System.IO.File]::ReadAllText($arqUltima, [System.Text.Encoding]::UTF8))".Trim() } } catch {}
+    $arqModo = Join-Path $Script:DownloadFolder "espelho_modo.txt"
+    $modos = @{}
+    try {
+        if (Test-Path -LiteralPath $arqModo) {
+            foreach ($linhaModo in [System.IO.File]::ReadAllLines($arqModo, [System.Text.Encoding]::UTF8)) {
+                if ($linhaModo -match '^(texto|grafico)\|(.+)$') { $modos[$matches[2]] = $matches[1] }
+            }
+        }
+    }
+    catch {}
+    $drivers = @{}
+    if ($impressoras.Count -gt 0) { $drivers = Get-DriversImpressoras }
 
     $dlg = New-ToolForm "Espelho fiscal" 480 236
     $dlg.FormBorderStyle = 'FixedDialog'
@@ -2969,11 +3189,32 @@ function Show-EscolhaEspelho {
     $cmbImp.DropDownStyle = 'DropDownList'
     foreach ($nome in $impressoras) { [void]$cmbImp.Items.Add($nome) }
     [void]$dlg.Controls.Add($cmbImp)
+    $chkTexto = New-Object System.Windows.Forms.CheckBox
+    $chkTexto.Text = "Modo texto ESC/POS (driver Genérico / Somente Texto)"
+    $chkTexto.Location = New-Object System.Drawing.Point(20, 113)
+    $chkTexto.Size = New-Object System.Drawing.Size(430, 24)
+    $chkTexto.ForeColor = $Script:UiTexto
+    $chkTexto.BackColor = [System.Drawing.Color]::Transparent
+    $chkTexto.Cursor = 'Hand'
+    [void]$dlg.Controls.Add($chkTexto)
+    # Ao trocar de impressora: o que o tecnico escolheu da ultima vez nela; sem isso, pelo driver
+    $cmbImp.Tag = @{ Drivers = $drivers; Modos = $modos; Chk = $chkTexto }
+    $cmbImp.Add_SelectedIndexChanged({
+            $st = $this.Tag
+            $nomeSel = "$($this.SelectedItem)"
+            $drv = "$($st.Drivers[$nomeSel])"
+            if ($st.Modos.ContainsKey($nomeSel)) { $st.Chk.Checked = ($st.Modos[$nomeSel] -eq 'texto') }
+            else { $st.Chk.Checked = (Test-DriverSomenteTexto $drv) }
+            if ($Script:ToolTip) {
+                $Script:ToolTip.SetToolTip($st.Chk, "Driver desta impressora: $(if ($drv -ne '') { $drv } else { '(não achei)' }).`r`nLigado: o espelho vai em comandos da própria impressora térmica, como o PDV manda o cupom (para filas com o driver Generic / Text Only, que não desenham nada).`r`nDesligado: o Windows desenha o espelho (driver da marca, folha A4 ou PDF).")
+            }
+        })
     if ($impressoras -contains $ultima) { $cmbImp.SelectedItem = $ultima }
     elseif ($impressoras -contains $padrao) { $cmbImp.SelectedItem = $padrao }
     elseif ($cmbImp.Items.Count -gt 0) { $cmbImp.SelectedIndex = 0 }
     $lblAviso = New-ToolLabel $dlg "" 20 116 9 -Cor $Script:UiAmarelo -W 430
-    if ($impressoras.Count -eq 0) { $lblAviso.Text = "Nenhuma impressora instalada neste PC: dá para salvar em PDF." }
+    $lblAviso.Visible = ($impressoras.Count -eq 0)
+    if ($impressoras.Count -eq 0) { $lblAviso.Text = "Nenhuma impressora instalada neste PC: dá para salvar em PDF."; $chkTexto.Visible = $false }
     # A escolha volta pelo DialogResult de cada botao (o Tag desses botoes e do desenho do mouse)
     $btnImp = New-ToolButton $dlg "IMPRIMIR" 20 146 136 34 $Script:UiVerde $null "Imprime o espelho direto na impressora escolhida: na bobina sai igual ao cupom, em folha A4 sai no meio"
     $btnSalvarPdf = New-ToolButton $dlg "SALVAR PDF" 166 146 136 34 $Script:UiAzul $null "Gera o espelho em PDF: uma nota abre sozinha, várias vão para a pasta do lote"
@@ -2986,10 +3227,13 @@ function Show-EscolhaEspelho {
     $dlg.CancelButton = $btnCancelarEsp
     $res = $dlg.ShowDialog()
     $escolhida = "$($cmbImp.SelectedItem)"
+    $emTexto = [bool]$chkTexto.Checked
     $dlg.Dispose()
     if ($res -eq [System.Windows.Forms.DialogResult]::Yes -and $escolhida -ne "") {
         try { [System.IO.File]::WriteAllText($arqUltima, $escolhida, (New-Object System.Text.UTF8Encoding($false))) } catch {}
-        return @{ Modo = 'Imprimir'; Impressora = $escolhida }
+        $modos[$escolhida] = $(if ($emTexto) { 'texto' } else { 'grafico' })
+        try { [System.IO.File]::WriteAllLines($arqModo, [string[]]@($modos.Keys | ForEach-Object { "$($modos[$_])|$_" }), (New-Object System.Text.UTF8Encoding($false))) } catch {}
+        return @{ Modo = 'Imprimir'; Impressora = $escolhida; Texto = $emTexto }
     }
     if ($res -eq [System.Windows.Forms.DialogResult]::No) { return @{ Modo = 'Pdf'; Impressora = "" } }
     return $null
@@ -5319,7 +5563,7 @@ function Show-XmlDownloader {
                 $interrompido = $false
                 try {
                     & $setStatus "Imprimindo o espelho fiscal em $impressora..." $Script:UiAmarelo
-                    Log-Message "INFO" "Espelho impresso: $($podem.Count) nota(s) para '$impressora'"
+                    Log-Message "INFO" "Espelho impresso: $($podem.Count) nota(s) para '$impressora' ($(if ($escolha.Texto) { 'modo texto ESC/POS' } else { 'desenho do Windows' }))"
                     $i = 0
                     foreach ($it in $podem) {
                         $i++
@@ -5332,7 +5576,7 @@ function Show-XmlDownloader {
                         $pb.Value = $i
                         [System.Windows.Forms.Application]::DoEvents()
                         try {
-                            $paginas = Send-DanfeNfceImpressora -Xml $it.Conteudo -Impressora $impressora -Cancelada:([bool]$it.Cancelada) -DataCancelamento $it.DataCancelamento
+                            $paginas = Send-DanfeNfceImpressora -Xml $it.Conteudo -Impressora $impressora -Cancelada:([bool]$it.Cancelada) -DataCancelamento $it.DataCancelamento -Texto:([bool]$escolha.Texto)
                             $impressos++
                             Log-Message "INFO" "Espelho impresso: série $($it.Serie) nota $($it.Nota) ($paginas página(s))"
                         }
@@ -11812,8 +12056,9 @@ function Get-PastaInicializarUsuario {
 
 function Set-NetStartInicializacao {
     # Cria o NetStart.bat (start do netstart.exe) na pasta Inicializar do usuario logado (shell:startup). Confere antes
-    # se o netstart.exe existe e se o NetStart ja inicia por outro caminho (inclusive pelo Inicializar de todos os
-    # usuarios); pergunta antes de gravar e confere o arquivo.
+    # se o netstart.exe existe. O que ja abria o NetStart nessa pasta sai dela (vai para Arquivos Xmenu\Inicializar
+    # antigo); o que abre por outro caminho (Inicializar de todos os usuarios, registro) so gera aviso. Pergunta antes
+    # de gravar e confere o arquivo.
     # Os parametros so servem para o teste (pastas e chaves trocadas); no uso normal ficam os padroes.
     param($Botao, [string]$NetStart = "", [string]$PastaInicializar = "", [string[]]$OutrasPastas = $null, [string[]]$ChavesRun = $null)
     $titulo = "NetStart com o Windows"
@@ -11844,14 +12089,10 @@ function Set-NetStartInicializacao {
     $bat = Join-Path $PastaInicializar "NetStart.bat"
     $conteudo = "@echo off`r`nstart """" ""$NetStart""`r`nexit`r`n"
 
-    $outros = @(Find-InicializacoesNetStart -Pastas (@($PastaInicializar) + @($OutrasPastas)) -ChavesRun $ChavesRun -Ignorar $bat)
-    if ($outros.Count -gt 0) {
-        Log-Message "INFO" "NetStart com o Windows: ele já inicia por $($outros -join '; ')"
-        $resp = [System.Windows.Forms.MessageBox]::Show("O NetStart já abre sozinho com o Windows por:`r`n`r`n$($outros -join "`r`n")`r`n`r`nCriar o NetStart.bat também faria o NetStart abrir duas vezes.`r`n`r`nCriar mesmo assim?", $titulo, "YesNo", "Warning", "Button2")
-        if ($resp -ne [System.Windows.Forms.DialogResult]::Yes) { Log-Message "CANCEL" "NetStart com o Windows: deixou como estava (já inicia por outro caminho)"; return }
-    }
-
-    if (Test-Path -LiteralPath $bat) {
+    # O que ja abre o NetStart na propria pasta (NetStart.bat antigo, outro .bat, atalho) sai dela e da lugar ao
+    # NetStart.bat no padrao do Preparador
+    $naPasta = @(Find-InicializacoesNetStart -Pastas @($PastaInicializar) -ChavesRun @())
+    if ($naPasta.Count -eq 1 -and $naPasta[0] -ieq $bat) {
         $atual = ""
         try { $atual = [System.IO.File]::ReadAllText($bat) } catch {}
         if ($atual -eq $conteudo) {
@@ -11860,16 +12101,36 @@ function Set-NetStartInicializacao {
             [System.Windows.Forms.MessageBox]::Show("Já está pronto: o NetStart.bat já está na pasta Inicializar e abre o NetStart quando o Windows inicia.`r`n`r`n$bat", $titulo, "OK", "Information") | Out-Null
             return
         }
-        $resp = [System.Windows.Forms.MessageBox]::Show("Já existe um NetStart.bat na pasta Inicializar, com outro conteúdo:`r`n`r`n$($atual.Trim())`r`n`r`nTrocar pelo do Preparador (abre $NetStart)?", $titulo, "YesNo", "Question", "Button2")
-        if ($resp -ne [System.Windows.Forms.DialogResult]::Yes) { Log-Message "CANCEL" "NetStart com o Windows: manteve o NetStart.bat que já existia"; return }
     }
-    else {
-        $resp = [System.Windows.Forms.MessageBox]::Show("Criar o NetStart.bat na pasta Inicializar do usuário (shell:startup)?`r`n`r`nToda vez que o Windows iniciar, ele abre o NetStart, que abre os programas da NetControll.`r`n`r`n$bat", $titulo, "YesNo", "Question")
-        if ($resp -ne [System.Windows.Forms.DialogResult]::Yes) { Log-Message "CANCEL" "NetStart com o Windows: não criado"; return }
+
+    # Fora dessa pasta (Inicializar de todos os usuarios, registro) nao mexe: so avisa que abriria duas vezes
+    $outrasPastasNs = @($OutrasPastas | Where-Object { "$_".Trim() -ne "" -and "$_" -ine $PastaInicializar })
+    $outros = @(Find-InicializacoesNetStart -Pastas $outrasPastasNs -ChavesRun $ChavesRun)
+    if ($outros.Count -gt 0) {
+        Log-Message "INFO" "NetStart com o Windows: ele já inicia por $($outros -join '; ')"
+        $resp = [System.Windows.Forms.MessageBox]::Show("O NetStart já abre sozinho com o Windows por:`r`n`r`n$($outros -join "`r`n")`r`n`r`nCriar o NetStart.bat também faria o NetStart abrir duas vezes.`r`n`r`nCriar mesmo assim?", $titulo, "YesNo", "Warning", "Button2")
+        if ($resp -ne [System.Windows.Forms.DialogResult]::Yes) { Log-Message "CANCEL" "NetStart com o Windows: deixou como estava (já inicia por outro caminho)"; return }
     }
+
+    $textoTroca = ""
+    if ($naPasta.Count -gt 0) {
+        $textoTroca = "`r`n`r`nO que já está nessa pasta e abre o NetStart sai dela (fica guardado em Arquivos Xmenu\Inicializar antigo):`r`n" + ((@($naPasta | ForEach-Object { "  - " + (Split-Path $_ -Leaf) })) -join "`r`n")
+    }
+    $resp = [System.Windows.Forms.MessageBox]::Show("Criar o NetStart.bat na pasta Inicializar do usuário (shell:startup)?`r`n`r`nToda vez que o Windows iniciar, ele abre o NetStart, que abre os programas da NetControll.$textoTroca`r`n`r`n$bat", $titulo, "YesNo", "Question")
+    if ($resp -ne [System.Windows.Forms.DialogResult]::Yes) { Log-Message "CANCEL" "NetStart com o Windows: não criado"; return }
 
     try {
         if (-not (Test-Path -LiteralPath $PastaInicializar)) { New-Item -ItemType Directory -Path $PastaInicializar -Force | Out-Null }
+        # O que estava na pasta vai para o backup em vez de ser apagado: da para voltar se precisar
+        $guarda = ""
+        if ($naPasta.Count -gt 0) {
+            $guarda = Join-Path $Script:DownloadFolder ("Inicializar antigo\" + (Get-Date).ToString("yyyy-MM-dd HH'h'mm'm'ss"))
+            New-Item -ItemType Directory -Path $guarda -Force | Out-Null
+            foreach ($velho in $naPasta) {
+                Move-Item -LiteralPath $velho -Destination (Join-Path $guarda (Split-Path $velho -Leaf)) -Force -ErrorAction Stop
+                Log-Message "INFO" "NetStart com o Windows: $(Split-Path $velho -Leaf) saiu da pasta Inicializar (guardado em $guarda)"
+            }
+        }
         # Sem BOM (o cmd leria o BOM como lixo na primeira linha); caminho com acento vai na pagina de codigo do prompt
         $codBat = [System.Text.Encoding]::ASCII
         if ($NetStart -match '[^\x00-\x7F]') { $codBat = [System.Text.Encoding]::GetEncoding([System.Globalization.CultureInfo]::CurrentCulture.TextInfo.OEMCodePage) }
@@ -11877,7 +12138,9 @@ function Set-NetStartInicializacao {
         if ([System.IO.File]::ReadAllText($bat, $codBat) -ne $conteudo) { throw "o arquivo gravado não ficou igual" }
         Log-Message "SUCESSO" "NetStart com o Windows: NetStart.bat criado em $bat (abre $NetStart)"
         if ($null -ne $Botao) { Set-ButtonDone -Button $Botao -Label "CRIADO" }
-        [System.Windows.Forms.MessageBox]::Show("Pronto: o NetStart vai abrir sozinho quando o Windows iniciar.`r`n`r`nArquivo: $bat`r`nAbre: $NetStart", $titulo, "OK", "Information") | Out-Null
+        $textoGuarda = ""
+        if ($guarda -ne "") { $textoGuarda = "`r`n`r`nO que estava na pasta foi guardado em:`r`n$guarda" }
+        [System.Windows.Forms.MessageBox]::Show("Pronto: o NetStart vai abrir sozinho quando o Windows iniciar.`r`n`r`nArquivo: $bat`r`nAbre: $NetStart$textoGuarda", $titulo, "OK", "Information") | Out-Null
     }
     catch {
         Log-Message "ERRO" "NetStart com o Windows: não consegui criar o $bat - $($_.Exception.Message)"
@@ -14724,6 +14987,9 @@ function Get-CatalogoDrivers {
 
     $secao = "BEMATECH"; $corSecao = & $rgb 80 200 120
     & $baixar "  [DRIVER] Bematech MP-4200 TH / MP-2500 / MP-4000  (Spooler x64 v4.4.0.3)" "$baseUrl/Bematech/BematechSpoolerDrivers_x64_v4.4.0.3.exe" "BematechSpoolerDrivers_x64_v4.4.0.3.exe" $colorBema
+    # Spooler mais novo da Bematech (assinado por Bematech Hardware Ltda): so para os modelos novos
+    & $baixar "  [DRIVER] Bematech MP-4200 TH ADV / PP-10  (Spooler x64 v6.0.1.0)" "$baseUrl/Bematech/BematechSpoolerDrivers_x64_v6.0.1.0.exe" "BematechSpoolerDrivers_x64_v6.0.1.0.exe" $colorBema
+    & $baixar "  [DRIVER] Bematech MP-5100 TH  (Spooler x64 v5.0.0.4)" "$baseUrl/Bematech/BematechSpoolerDrivers_x64_v5.0.0.4.exe" "BematechSpoolerDrivers_x64_v5.0.0.4.exe" $colorBema
     & $baixar "  [DRIVER] Bematech MP-4200 HS  (v1.7.7)" "$baseUrl/Bematech/Bematech%20MP-4200-HS_Driver_v1.7.7.exe" "Bematech_MP-4200-HS_Driver_v1.7.7.exe" $colorBema
     & $baixar "  [DRIVER] Bematech MP-2800 TH  (Spooler v1.3)" "$baseUrl/Bematech/Bematech_MP_2800_SpoolerDrivers_v1.3.exe" "Bematech_MP_2800_SpoolerDrivers_v1.3.exe" $colorBema
     & $baixar "  [UTILITÁRIO] Bematech Utility  (v2.10.04 x64)" "$baseUrl/Utilities/Bematech_Utility_v2.10.04_x64.exe" "Bematech_Utility_v2.10.04_x64.exe" $colorBemaUtil
@@ -19829,19 +20095,19 @@ function Get-VersoesSelector {
 }
 
 # Apps da linha 5.0 no site da NetControll (Apps/<versao>/<pasta>/): cada um tem instalador, executavel e APK.
-# Cada app anda na sua versao (o Totem 5.0 saiu na 5.0.0.11; o Totem Pesavel e o Cardapio Tablet, na 5.0.0.7).
+# Cada app anda na sua versao (o KDS esta na 5.0.0.12; o NetPDV, o Totem, o Totem Pesavel e o Cardapio Tablet, na 5.0.0.16).
 # Aba = nome da aba no seletor do botao (o Totem tem duas: Totem e Pesavel).
 function Get-Apps50 {
     param([string]$Type)
     switch ($Type) {
-        "PDV" { return @(@{ Nome = "NetPDV"; Aba = "Versão 5.0"; Versao = "5.0.0.12"; Pasta = "xmenu-pdv"; Base = "NetPDV" }) }
+        "PDV" { return @(@{ Nome = "NetPDV"; Aba = "Versão 5.0"; Versao = "5.0.0.16"; Pasta = "xmenu-pdv"; Base = "NetPDV" }) }
         "Totem" {
             return @(
-                @{ Nome = "Totem"; Aba = "Totem 5.0"; Versao = "5.0.0.11"; Pasta = "xmenu-autoatendimento"; Base = "Totem" },
-                @{ Nome = "Totem Pesável"; Aba = "Pesável 5.0"; Versao = "5.0.0.7"; Pasta = "xmenu-autoatendimentobalanca"; Base = "AutoAtendimentoBalanca" }
+                @{ Nome = "Totem"; Aba = "Totem 5.0"; Versao = "5.0.0.16"; Pasta = "xmenu-autoatendimento"; Base = "Totem" },
+                @{ Nome = "Totem Pesável"; Aba = "Pesável 5.0"; Versao = "5.0.0.16"; Pasta = "xmenu-autoatendimentobalanca"; Base = "AutoAtendimentoBalanca" }
             )
         }
-        "Tablet" { return @(@{ Nome = "Cardápio Tablet"; Aba = "Versão 5.0"; Versao = "5.0.0.7"; Pasta = "xmenu-tablet-cardapio"; Base = "TabletCardapio" }) }
+        "Tablet" { return @(@{ Nome = "Cardápio Tablet"; Aba = "Versão 5.0"; Versao = "5.0.0.16"; Pasta = "xmenu-tablet-cardapio"; Base = "TabletCardapio" }) }
         "KDS" { return @(@{ Nome = "KDS Monitor"; Aba = "Versão 5.0"; Versao = "5.0.0.12"; Pasta = "xmenu-app-monitor"; Base = "KDSMonitor" }) }
     }
     return @()
@@ -20243,8 +20509,42 @@ function Open-Selector {
 # -----------------------------------------------------------------------------
 # 5. CONFIGURACAO DO AMBIENTE (REGISTRY E OTIMIZACOES)
 # -----------------------------------------------------------------------------
+function Confirm-PrepararAmbiente {
+    # Confirmacao do PREPARAR AMBIENTE WINDOWS (clique sem querer acontece). CANCELAR vem como padrao: um Enter a toa
+    # nao dispara. A troca do plano de fundo e opcional (ja vem marcada). Devolve @{ TrocarFundo } ou $null.
+    $dlgCfg = New-ToolForm "Preparar ambiente" 470 226
+    $dlgCfg.FormBorderStyle = 'FixedDialog'
+    $dlgCfg.MaximizeBox = $false
+    $dlgCfg.MinimizeBox = $false
+    New-ToolLabel $dlgCfg "Preparar o ambiente Windows deste PC agora?" 20 16 11 -Negrito | Out-Null
+    $lblCfg = New-ToolLabel $dlgCfg "Ajusta UAC, energia, desempenho, rede, limpeza e personalização padrão XMenu." 20 46 9.5 -Cor $Script:UiSuave -W 420
+    $lblCfg.Height = 40
+    $chkFundo = New-Object System.Windows.Forms.CheckBox
+    $chkFundo.Text = "Trocar o plano de fundo pelo padrão XMenu"
+    $chkFundo.Location = New-Object System.Drawing.Point(20, 92)
+    $chkFundo.Size = New-Object System.Drawing.Size(420, 24)
+    $chkFundo.ForeColor = $Script:UiTexto
+    $chkFundo.BackColor = [System.Drawing.Color]::Transparent
+    $chkFundo.Cursor = 'Hand'
+    $chkFundo.Checked = $true
+    [void]$dlgCfg.Controls.Add($chkFundo)
+    $btnPreparar = New-ToolButton $dlgCfg "PREPARAR" 20 136 205 34 $Script:UiVerde $null ""
+    $btnCancelarCfg = New-ToolButton $dlgCfg "CANCELAR" 235 136 205 34 $Script:UiCinza $null ""
+    $btnPreparar.DialogResult = [System.Windows.Forms.DialogResult]::Yes
+    $btnCancelarCfg.DialogResult = [System.Windows.Forms.DialogResult]::Cancel
+    $dlgCfg.AcceptButton = $btnCancelarCfg
+    $dlgCfg.CancelButton = $btnCancelarCfg
+    $dlgCfg.ActiveControl = $btnCancelarCfg
+    $resCfg = $dlgCfg.ShowDialog()
+    $trocar = [bool]$chkFundo.Checked
+    $dlgCfg.Dispose()
+    if ($resCfg -ne [System.Windows.Forms.DialogResult]::Yes) { return $null }
+    return @{ TrocarFundo = $trocar }
+}
+
 function Run-Config {
-    param($Btn)
+    # -TrocarFundo: aplica o papel de parede padrao XMenu (desmarcavel na confirmacao)
+    param($Btn, [bool]$TrocarFundo = $true)
     $Btn.Enabled = $false; $Btn.Text = "AGUARDE... CONFIGURANDO"; $Btn.BackColor = [System.Drawing.Color]::Gray
     $Script:ProgressBar.Value = 0
     
@@ -20442,25 +20742,30 @@ function Run-Config {
     [System.Windows.Forms.Application]::DoEvents()
     
     Log-Message "LOG" "6. PERSONALIZACAO REVENDA:"
-    Log-Message "LOG" "     Baixando e Definindo Wallpaper..."
     $tempDir = Join-Path $env:TEMP "XmenuResources"
     if (!(Test-Path $tempDir)) { New-Item $tempDir -ItemType Directory -Force | Out-Null }
-    
+
     # --- MODIFICACAO REVENDA: NOME DO ARQUIVO ALTERADO PARA 'fundo_revenda.png' ---
     $wallPath = Join-Path $tempDir "fundo_revenda.png"
-    
-    try {
-        $wc = New-Object System.Net.WebClient
-        $wc.DownloadFile("$Script:RepoBase/fundo_revenda.png", $wallPath)
-        Set-ItemProperty -Path "HKCU:\Control Panel\Desktop" -Name "WallpaperStyle" -Value "10" -Force
-        Set-ItemProperty -Path "HKCU:\Control Panel\Desktop" -Name "TileWallPaper" -Value "0" -Force
-        Set-ItemProperty -Path "HKCU:\Control Panel\Desktop" -Name "WallPaper" -Value $wallPath -Force
-        if (-not ('XMenuTools.WinAPI' -as [type])) {
-            Add-Type -MemberDefinition '[DllImport("user32.dll", CharSet=CharSet.Auto)] public static extern int SystemParametersInfo (UInt32 uiAction, UInt32 uiParam, string pvParam, UInt32 fWinIni);' -Name "WinAPI" -Namespace "XMenuTools"
-        }
-        [XMenuTools.WinAPI]::SystemParametersInfo(0x0014, 0, $wallPath, 3) | Out-Null
+
+    if (-not $TrocarFundo) {
+        Log-Message "INFO" "     Papel de parede: mantido o atual (desmarcado na confirmação)"
     }
-    catch { Log-Message "ERRO" "Falha no Wallpaper: $($_.Exception.Message)" }
+    else {
+        Log-Message "LOG" "     Baixando e Definindo Wallpaper..."
+        try {
+            $wc = New-Object System.Net.WebClient
+            $wc.DownloadFile("$Script:RepoBase/fundo_revenda.png", $wallPath)
+            Set-ItemProperty -Path "HKCU:\Control Panel\Desktop" -Name "WallpaperStyle" -Value "10" -Force
+            Set-ItemProperty -Path "HKCU:\Control Panel\Desktop" -Name "TileWallPaper" -Value "0" -Force
+            Set-ItemProperty -Path "HKCU:\Control Panel\Desktop" -Name "WallPaper" -Value $wallPath -Force
+            if (-not ('XMenuTools.WinAPI' -as [type])) {
+                Add-Type -MemberDefinition '[DllImport("user32.dll", CharSet=CharSet.Auto)] public static extern int SystemParametersInfo (UInt32 uiAction, UInt32 uiParam, string pvParam, UInt32 fWinIni);' -Name "WinAPI" -Namespace "XMenuTools"
+            }
+            [XMenuTools.WinAPI]::SystemParametersInfo(0x0014, 0, $wallPath, 3) | Out-Null
+        }
+        catch { Log-Message "ERRO" "Falha no Wallpaper: $($_.Exception.Message)" }
+    }
     
     # --- MODIFICACAO REVENDA: BLOCO DE CRIACAO DE ATALHO SUPORTE REMOVIDO ---
     
@@ -20655,7 +20960,7 @@ $formWidth = if ($screen.Width -lt 1000) { 900 } else { 1000 }
 $formHeight = if ($screen.Height -lt 800) { 700 } else { 800 }
 
 $form = New-Object System.Windows.Forms.Form
-$form.Text = "Preparador XMenu – Suporte Técnico v5.59 - REVENDA"
+$form.Text = "Preparador XMenu – Suporte Técnico v5.60 - REVENDA"
 $form.Size = New-Object System.Drawing.Size($formWidth, $formHeight)
 $form.StartPosition = "CenterScreen"
 $form.BackColor = [System.Drawing.Color]::FromArgb(25, 25, 30); $form.ForeColor = 'White'
@@ -21078,9 +21383,10 @@ $Script:ToolTip.SetToolTip($bCfg, "Ajusta UAC, Energia, Performance, Rede, Limpe
 # Clique sem querer acontece: confirma antes de mexer no Windows (o "Não" vem marcado, um Enter a toa não dispara)
 $bCfg.Add_Click({
         $botaoCfg = $this
-        $rCfg = [System.Windows.Forms.MessageBox]::Show($Script:MainForm, "Preparar o ambiente Windows deste PC agora?`r`n`r`nAjusta UAC, energia, desempenho, rede, limpeza e personalização padrão XMenu.", "Preparar ambiente", [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Question, [System.Windows.Forms.MessageBoxDefaultButton]::Button2)
-        if ($rCfg -ne [System.Windows.Forms.DialogResult]::Yes) { Log-Message "CANCEL" "Preparar ambiente: cancelado na confirmação"; return }
-        Run-Config $botaoCfg
+        $rCfg = Confirm-PrepararAmbiente
+        if ($null -eq $rCfg) { Log-Message "CANCEL" "Preparar ambiente: cancelado na confirmação"; return }
+        Log-Message "INFO" "Preparar ambiente: confirmado ($(if ($rCfg.TrocarFundo) { 'trocando' } else { 'sem trocar' }) o plano de fundo)"
+        Run-Config $botaoCfg -TrocarFundo $rCfg.TrocarFundo
     })
 [void]$layout.Controls.Add($bCfg, 0, 1)
 
@@ -21562,12 +21868,12 @@ $bNetStart = New-Object System.Windows.Forms.Button; $bNetStart.Height = 50; $bN
 $bNetStart.Text = "Iniciar NetStart com o Windows"; $bNetStart.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
 $bNetStart.Cursor = 'Hand'
 Format-SupportBtn $bNetStart $colorGray
-$Script:ToolTip.SetToolTip($bNetStart, "Cria o NetStart.bat na pasta Inicializar do usuário (shell:startup): o NetStart, que abre os programas da NetControll, passa a abrir sozinho quando o Windows inicia. Confere antes se o netstart.exe existe e se ele já inicia por outro caminho (para não abrir duas vezes).")
+$Script:ToolTip.SetToolTip($bNetStart, "Cria o NetStart.bat na pasta Inicializar do usuário (shell:startup): o NetStart, que abre os programas da NetControll, passa a abrir sozinho quando o Windows inicia. Se já houver um NetStart nessa pasta, ele sai (fica guardado em Arquivos Xmenu\Inicializar antigo) e entra o do Preparador. Confere antes se o netstart.exe existe e avisa se ele também inicia por outro caminho (para não abrir duas vezes).")
 $bNetStart.Add_Click({ Set-NetStartInicializacao $this })
 [void]$tbl.Controls.Add($bNetStart)
 
 # Mensagem de abertura: explica o programa para quem abre pela primeira vez
-Log-Message "INFO" "Preparador XMenu v5.59 - REVENDA - preparo e suporte de computadores com XMenu e NetPDV"
+Log-Message "INFO" "Preparador XMenu v5.60 - REVENDA - preparo e suporte de computadores com XMenu e NetPDV"
 foreach ($msgSenha in $Script:LogSenhaPendente) { Log-Message "INFO" $msgSenha }
 Log-Message "INFO" "Senha de abertura: acesso liberado"
 Log-Message "LOG" "==============================================================="
@@ -21579,7 +21885,12 @@ Log-Message "LOG" "  EXTERNOS ................... acesso remoto, Chrome, TEF HUB
 Log-Message "LOG" "  SUPORTE E DIAGNÓSTICO ...... impressoras, rede, SQL, backup, XMLs e reparos do Windows"
 Log-Message "LOG" "  Passe o mouse sobre um botão para ver o que ele faz antes de clicar."
 Log-Message "LOG" "---------------------------------------------------------------"
-Log-Message "LOG" "NOVO NA v5.59"
+Log-Message "LOG" "NOVO NA v5.60"
+Log-Message "SUCESSO" "  XMLs: o ESPELHO FISCAL em impressora com o driver Generic / Text Only (Genérico / Somente Texto) agora sai no padrão da térmica: o Preparador manda o cupom nos comandos da própria impressora (ESC/POS), com QR Code, negrito, tarja e corte; a opção Modo texto ESC/POS liga sozinha nessas filas e fica guardada por impressora"
+Log-Message "SUCESSO" "  Preparar ambiente: a confirmação tem a opção Trocar o plano de fundo pelo padrão XMenu (já vem marcada); desmarcada, o Preparar faz todo o resto e mantém o fundo atual"
+Log-Message "SUCESSO" "  Suporte: o Iniciar NetStart com o Windows tira da pasta shell:startup o NetStart que já estava lá (fica guardado em Arquivos Xmenu\Inicializar antigo) e coloca o do Preparador"
+Log-Message "SUCESSO" "  Programas NetControll: NetPDV, Totem, Totem Pesável e Cardápio Tablet na versão 5.0.0.16 (a 5.0 antiga saiu)"
+Log-Message "SUCESSO" "  Drivers: Bematech MP-4200 TH ADV / PP-10 (spooler 6.0.1.0) e MP-5100 TH (spooler 5.0.0.4); os outros drivers Bematech já estavam na versão mais nova"
 Log-Message "SUCESSO" "  Suporte: o Iniciar NetStart com o Windows agora grava o NetStart.bat na pasta Inicializar do usuário (shell:startup, a mesma do Executar > shell:startup); se o Preparador foi aberto com outro usuário administrador, usa a de quem está logado no PC"
 Log-Message "SUCESSO" "  Suporte: novo botão Iniciar NetStart com o Windows: cria o NetStart.bat na pasta Inicializar (todos os usuários), que abre o NetStart e os programas da NetControll quando o Windows inicia; avisa se o netstart.exe não existe ou se ele já inicia por outro caminho (para não abrir duas vezes)"
 Log-Message "SUCESSO" "  Programas NetControll: novo botão KDS Monitor (5.0), com instalador, executável e APK da 5.0.0.12, copiar link e versão manual"
