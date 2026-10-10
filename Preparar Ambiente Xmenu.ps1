@@ -1,5 +1,5 @@
 ﻿# =============================================================================
-# PREPARADOR XMENU v5.62
+# PREPARADOR XMENU v5.63
 # Visual: Dashboard Moderno
 # Correcoes:
 #   - CRITICO: Removido DoEvents do loop de evento de download (causava crash).
@@ -15027,10 +15027,18 @@ function Get-CatalogoDrivers {
     & $baixar "  [DRIVER] Epson TM-T20X  (APD v6.1.0.0)" "$baseUrl/Epson/Epson_TM-T20X_v6.1.0.0.exe" "Epson_TM-T20X_v6.1.0.0.exe" $colorEpson
     & $baixar "  [DRIVER] Epson TM-T20X II  (APD v6.9.1.0)" "$baseUrl/Epson/Epson_TM-20X-II_Driver_v6.9.1.0.exe" "Epson_TM-20X-II_Driver_v6.9.1.0.exe" $colorEpson
     & $baixar "  [UTILITÁRIO] Epson NetConfig  (v4.9.5)" "$baseUrl/Utilities/Epson_NetConfig_v4_9_5.exe" "Epson_NetConfig_v4_9_5.exe" $colorEpsonUtil
+    # O Download Center da Epson recusa downloads fora do navegador (403): a versao mais nova abre no site
+    $epsonDc = "https://download-center.epson.com/softwares/?os=WIN1164&language=pt&region=BR&device_id="
+    & $site "  [SITE] Epson TM-T20 - driver mais recente  (site oficial Epson)" "${epsonDc}TM-T20" $colorEpsonUtil
+    & $site "  [SITE] Epson TM-T20X - driver mais recente  (site oficial Epson)" "${epsonDc}TM-T20X" $colorEpsonUtil
+    & $site "  [SITE] Epson TM-T20X II - driver mais recente  (site oficial Epson)" "${epsonDc}TM-T20X-II" $colorEpsonUtil
 
     $secao = "TANCA"; $corSecao = & $rgb 255 160 60
-    & $baixar "  [DRIVER] Tanca TP-620  (v6.1.0)" "$baseUrl/Tanca/Tanca_TP-620_Driver_v6.1.0.exe" "Tanca_TP-620_Driver_v6.1.0.exe" $colorTanca
+    $tancaUrl = "https://www.tanca.com.br/assets/conteudo/drivers"
+    & $baixar "  [DRIVER] Tanca TP-620 / TP-620+  (instalador oficial Tanca - ZIP)" "$tancaUrl/TP-620+/Driver_Windows.zip" "Tanca_TP-620_Driver_Windows.zip" $colorTanca
     & $baixar "  [DRIVER] Tanca TP-650  (v2.11)" "$baseUrl/Tanca/Tanca_TP-650_DriverInstall_v2.11.exe" "Tanca_TP-650_DriverInstall_v2.11.exe" $colorTanca
+    & $baixar "  [DRIVER] Tanca TP-650 - cabo USB-Serial  (Prolific oficial Tanca - ZIP)" "$tancaUrl/TP-650/Driver_USB_Serial_TP650.zip" "Tanca_TP-650_USB_Serial.zip" $colorTanca
+    & $baixar "  [DRIVER] Tanca TMP-500  (v2.61T)" "$baseUrl/Tanca/Tanca_TMP-500_v2.61T.exe" "Tanca_TMP-500_v2.61T.exe" $colorTanca
     & $baixar "  [UTILITÁRIO] Tanca TP-620 Utility  (v3.2.0.1)" "$baseUrl/Utilities/Tanca_TP-620_Utility_v3.2.0.1.exe" "Tanca_TP-620_Utility_v3.2.0.1.exe" $colorTancaUtil
     & $baixar "  [UTILITÁRIO] Tanca TP-650 Printer Tool  (v1.48E)" "$baseUrl/Utilities/Tanca_TP-650_PrinterTool_1.48E.exe" "Tanca_TP-650_PrinterTool_1.48E.exe" $colorTancaUtil
 
@@ -15038,9 +15046,15 @@ function Get-CatalogoDrivers {
     $secao = "DARUMA / SWEDA / CONTROL ID"; $corSecao = & $rgb 220 220 220
     & $baixar "  [DRIVER] Daruma DR800  (Spooler v2.0.1.7)" "$baseUrl/Daruma/Daruma_800_Spooler_Driver_v2.0.1.7.exe" "Daruma_800_Spooler_Driver_v2.0.1.7.exe" $colorDaruma
     & $baixar "  [DRIVER] Sweda SI-300 / SI-300E / SI-300W  (v1.2.0)" "$baseUrl/Sweda/Sweda_SI-300_SI-300E_SI-300W_v1.2.0.exe" "Sweda_SI-300_SI-300E_SI-300W_v1.2.0.exe" $colorSweda
+    # Linha atual da Sweda, direto do site oficial (a SI-300X e uma Epson TM-T20X II com a marca Sweda)
+    $swedaUrl = "https://sweda.com.br/downloads/site"
+    & $baixar "  [DRIVER] Sweda SI-300S (SIX)  (V7.17 oficial Sweda - ZIP)" "$swedaUrl/SI-300SIX/drivers/driver-SI300SIX-Windows.zip" "Sweda_SI-300S_SIX_Driver_V7.17.zip" $colorSweda
+    & $baixar "  [DRIVER] Sweda SI-300X  (USB oficial Sweda - ZIP; base Epson TM-T20X II)" "$swedaUrl/SI-300X/drivers/driver-SI-300X-Windows10.zip" "Sweda_SI-300X_Driver_USB.zip" $colorSweda
+    & $baixar "  [DRIVER] Sweda SI-600  (v4.70 oficial Sweda - ZIP)" "$swedaUrl/SI600/drivers/driver-SI600-Windows.zip" "Sweda_SI-600_Driver_v4.70.zip" $colorSweda
     & $baixar "  [DRIVER] Control iD Print iD / Print iD Touch  (v1.1.10.2)" "$baseUrl/PrintID/Print_iD_%26_Print_iD_Touch_v1.1.10.2.exe" "Print_iD_v1.1.10.2.exe" $colorCtrlID
     & $baixar "  [UTILITÁRIO] Daruma Utility  (v2.20.9)" "$baseUrl/Utilities/Daruma_Utility_v2.20.9.exe" "Daruma_Utility_v2.20.9.exe" $colorDaruma
     & $baixar "  [UTILITÁRIO] Sweda Utility  (v2.03)" "$baseUrl/Utilities/Sweda_Utility_v2.03.exe" "Sweda_Utility_v2.03.exe" $colorSweda
+    & $baixar "  [UTILITÁRIO] Sweda SI-300S (SIX) Configuration Utility  (v1.2.3.12 - ZIP)" "$swedaUrl/SI-300SIX/softwares/app-SI300SIX-tool.zip" "Sweda_SIX_Configuration_Utility.zip" $colorSweda
     & $baixar "  [UTILITÁRIO] Control iD Utility  (v1.0)" "$baseUrl/Utilities/PrintID_Utility_v1.0.exe" "PrintID_Utility_v1.0.exe" $colorCtrlID
 
     # Tomate MDK, Knup, Kmex, Evadin e a maioria das 80mm chinesas usam
@@ -15057,8 +15071,9 @@ function Get-CatalogoDrivers {
     $colorFeasso = & $rgb 120 60 130; $colorJetway = & $rgb 35 95 105
     $secao = "FEASSO / JETWAY"; $corSecao = & $rgb 200 150 255
     & $baixar "  [DRIVER] Feasso F-IMTER-01  (v1.7)" "$baseUrl/Feasso/Feasso_F-IMTER-01_Driver_v1.7.exe" "Feasso_F-IMTER-01_Driver_v1.7.exe" $colorFeasso
-    & $baixar "  [DRIVER] Feasso F-IMTER-02  (v2.0)" "$baseUrl/Feasso/Feasso_F-IMTER-02_Driver_v2.0.exe" "Feasso_F-IMTER-02_Driver_v2.0.exe" $colorFeasso
-    & $baixar "  [DRIVER] Feasso F-IMTER-03  (v1.5)" "$baseUrl/Feasso/Feasso_F-IMTER-03_Driver_v1.5.exe" "Feasso_F-IMTER-03_Driver_v1.5.exe" $colorFeasso
+    $feassoUrl = "https://feasso.com.br/index.php?route=extension/module/product_support/download&file_id="
+    & $baixar "  [DRIVER] Feasso F-IMTER-02  (pacote oficial Feasso - ZIP)" "${feassoUrl}4" "Feasso_F-IMTER-02_Driver.zip" $colorFeasso
+    & $baixar "  [DRIVER] Feasso F-IMTER-03  (pacote oficial Feasso, com guia - ZIP)" "${feassoUrl}6" "Feasso_F-IMTER-03_Driver.zip" $colorFeasso
     & $baixar "  [DRIVER] Jetway JP-500  (v7.17)" "$baseUrl/Jetway/Jetway_JP-500_Printer_Driver_v7.17.exe" "Jetway_JP-500_Printer_Driver_v7.17.exe" $colorJetway
     & $baixar "  [DRIVER] Jetway JP-800  (v2.38E)" "$baseUrl/Jetway/Jetway_JP-800_PrinterDriver_v2.38E.exe" "Jetway_JP-800_PrinterDriver_v2.38E.exe" $colorJetway
     & $baixar "  [DRIVER] Jetway JMP-100  (v2.61J)" "$baseUrl/Jetway/Jetway_JMP-100_Driver_v2.61J.exe" "Jetway_JMP-100_Driver_v2.61J.exe" $colorJetway
@@ -15066,15 +15081,20 @@ function Get-CatalogoDrivers {
     $colorGertec = & $rgb 150 100 20; $colorDiebold = & $rgb 45 70 130; $colorPerto = & $rgb 90 45 60
     $secao = "GERTEC / DIEBOLD / DIMEP / PERTO"; $corSecao = & $rgb 255 200 90
     & $baixar "  [DRIVER] Gertec G250  (v1.0)" "$baseUrl/Gertec/Gertec_G250_Driver_v1.0.exe" "Gertec_G250_Driver_v1.0.exe" $colorGertec
-    & $baixar "  [UTILITÁRIO] Gertec G250 Utility  (v2.57)" "$baseUrl/Utilities/Gertec_G250_Utility_v2.57.exe" "Gertec_G250_Utility_v2.57.exe" $colorGertec
+    & $baixar "  [UTILITÁRIO] Gertec G250 / G250W Utility  (v1.1.1.0 oficial - ZIP, ~76 MB)" "https://www.gertec.com.br/wp-content/uploads/2026/06/Instalador_G250_Utility_1.1.1.0.zip" "Gertec_G250_Utility_1.1.1.0.zip" $colorGertec
     & $baixar "  [DRIVER] Diebold Mecaf / Perfecta  (v1.34 drv 1.9)" "$baseUrl/Diebold/Diebold_Printers_v1.34_drv_1.9.exe" "Diebold_Printers_v1.34_drv_1.9.exe" $colorDiebold
     & $baixar "  [DRIVER] Diebold IM113ID  (v1.2.0.10 x64)" "$baseUrl/Diebold/Diebold_IM113ID_v1.2.0.10_x64.exe" "Diebold_IM113ID_v1.2.0.10_x64.exe" $colorDiebold
-    & $baixar "  [DRIVER] Dimep D-PRINT DUAL  (v2.1.4.4)" "$baseUrl/Dimep/Dimep_D-PRINT_DUAL_v2.1.4.4.exe" "Dimep_D-PRINT_DUAL_v2.1.4.4.exe" $colorPerto
+    & $baixar "  [DRIVER] Dimep D-PRINT DUAL  (pacote oficial Dimep, com VirtualCOM - ZIP, ~52 MB)" "https://www.dimep.com.br/wp-content/uploads/2025/12/D_PrintDual_Windows.zip" "Dimep_D-PRINT_DUAL_Windows.zip" $colorPerto
     & $baixar "  [DRIVER] Perto PertoPrinter  (v2.5)" "$baseUrl/PertoPrinter/PertoPrinter_Driver_2.5.exe" "PertoPrinter_Driver_2.5.exe" $colorPerto
 
     $colorStar = & $rgb 25 70 95; $colorWaytec = & $rgb 70 90 40; $colorMenno = & $rgb 100 55 25
     $secao = "STAR / WAYTEC / MENNO / DASCOM"; $corSecao = & $rgb 140 210 255
-    & $baixar "  [DRIVER] Star (todos os modelos)  (x64 v3.7.2)" "$baseUrl/Star/Star_PrinterDrivers_x64_v3.7.2.exe" "Star_PrinterDrivers_x64_v3.7.2.exe" $colorStar
+    # Instaladores oficiais da Star (o link ?wpdmdl redireciona para o arquivo atual)
+    $starUrl = "https://starmicronics.com/support/download"
+    & $baixar "  [DRIVER] Star TSP650II / TSP700II / TSP800II / SP700  (v3.8.1, ~192 MB)" "$starUrl/starprnt-intelligence-software-setup-exe-file/?wpdmdl=2105" "Star_StarPRNT_Intelligence_v3.8.1.exe" $colorStar
+    & $baixar "  [DRIVER] Star mC-Print / mPOP / TSP100IV  (v3.11.0, ~242 MB)" "$starUrl/star-windows-software-setup-exe-file/?wpdmdl=2491" "Star_Windows_Software_v3.11.0.exe" $colorStar
+    & $baixar "  [DRIVER] Star TSP100 / TSP143III  (futurePRNT v7.70, ~235 MB)" "$starUrl/tsp100-futureprnt-software-lite/?wpdmdl=2114" "Star_TSP100_futurePRNT_v7.70.exe" $colorStar
+    & $baixar "  [DRIVER] Star TSP650II / TSP700II / TSP800II - leve  (x64 v3.7.2, ~11 MB)" "$baseUrl/Star/Star_PrinterDrivers_x64_v3.7.2.exe" "Star_PrinterDrivers_x64_v3.7.2.exe" $colorStar
     & $baixar "  [DRIVER] Waytec WP-100  (v7.17)" "$baseUrl/Waytec/Waytec_WP-100_Driver_v7.17.exe" "Waytec_WP-100_Driver_v7.17.exe" $colorWaytec
     & $baixar "  [DRIVER] Waytec WP-50  (v7.17.50)" "$baseUrl/Waytec/WayTec_WP-50_Driver_v7.17.50.exe" "WayTec_WP-50_Driver_v7.17.50.exe" $colorWaytec
     & $baixar "  [UTILITÁRIO] Waytec Utility  (v3.2.0.1)" "$baseUrl/Utilities/Waytec_Utility_v3.2.0.1.exe" "Waytec_Utility_v3.2.0.1.exe" $colorWaytec
@@ -15088,11 +15108,14 @@ function Get-CatalogoDrivers {
     & $baixar "  [DRIVER] Elgin L42 PRO FULL  (v2022.1)" "$xtagBaseUrl/Elgin/L42PRO%20FULL/Drivers/L42PRO%20FULL_Windows_driver_2022.1.exe" "Elgin_L42PRO_FULL_Windows_driver_2022.1.exe" $colorXtag
     & $baixar "  [DRIVER] Elgin L42 DT  (v7.4.3)" "$xtagBaseUrl/Elgin/L42DT/Drivers/Windows_DriverL42DT_7.4.3_M-5.exe" "Elgin_L42DT_Windows_driver_7.4.3.exe" $colorXtag
     & $baixar "  [DRIVER] Zebra ZD220 / ZD230  (ZIP - contem instalador)" "https://www.zebra.com/content/dam/support-dam/en/driver/unrestricted/0002/zddriver-v1062628275-certified.zip" "Zebra_ZD220_ZD230_Driver.zip" $colorXtag
-    & $baixar "  [DRIVER] Argox  (Todos os modelos, v2022.1)" "$baseUrl/Argox/Argox_PrinterDrivers_v2022.1.exe" "Argox_PrinterDrivers_v2022.1.exe" $colorXtag
-    & $baixar "  [DRIVER] Gainscha  (Todos os modelos, v2020.1)" "$baseUrl/Gainscha/Gainscha_GPrinterDrivers_v2020.1.exe" "Gainscha_GPrinterDrivers_v2020.1.exe" $colorXtag
+    & $baixar "  [DRIVER] Argox  (Todos os modelos, v12.5.0 oficial Argox)" "https://www.argox.com/docfile/drivers/Argox_12.5.0.exe" "Argox_Seagull_Driver_12.5.0.exe" $colorXtag
+    & $baixar "  [DRIVER] Gainscha / Gprinter  (Todos os modelos, v11.10.0 oficial - RAR, ~76 MB)" "https://www.gainscha.com/upload/20251118/c857acc75ad27545a7e7179b1957cfd9.rar" "Gainscha_Gprinter_Driver_11.10.0.rar" $colorXtag
+    & $baixar "  [DRIVER] Gainscha  (Todos os modelos, v2020.1 - EXE, se o PC não abrir RAR)" "$baseUrl/Gainscha/Gainscha_GPrinterDrivers_v2020.1.exe" "Gainscha_GPrinterDrivers_v2020.1.exe" $colorXtag
+    & $baixar "  [DRIVER] Tanca TLP-300 / TLP-300+  (driver oficial Tanca - ZIP, ~41 MB)" "$tancaUrl/TLP-300/Driver_Windows_TLP300.zip" "Tanca_TLP-300_Driver_Windows.zip" $colorXtag
     & $baixar "  [DRIVER] Zetex Z60XT  (ZIP - Drive, ~225 MB)" "https://drive.usercontent.google.com/download?id=1wWLiTWrtHCBRP9L0P9GG2eRKGEgfo2HJ&export=download&confirm=t" "Zetex_Z60XT_Driver.zip" $colorXtag
     & $baixar "  [UTILITÁRIO] Gerenciador Elgin L42 PRO FULL  (v1.5.1)" "$xtagBaseUrl/Elgin/L42PRO%20FULL/Utilit%C3%A1rios/GerenciadorL42PRO_Full_1.5.1.exe" "GerenciadorL42PRO_Full_1.5.1.exe" $colorXtagUtil
     & $baixar "  [UTILITÁRIO] Gerenciador Elgin L42 DT  (v1.5.6)" "$xtagBaseUrl/Elgin/L42DT/Utilit%C3%A1rios/GerenciadorL42DT_Full_1.5.6.exe" "GerenciadorL42DT_Full_1.5.6.exe" $colorXtagUtil
+    & $baixar "  [UTILITÁRIO] Argox Printer Utility  (v4.37 oficial Argox)" "https://www.argox.com/docfile/software/Printer_Utility_V437.exe" "Argox_Printer_Utility_V437.exe" $colorXtagUtil
 
     return $lista.ToArray()
 }
@@ -15118,6 +15141,11 @@ function Invoke-BaixarDriver {
     $wc.Add_DownloadProgressChanged({
             param($s, $e)
             if ($null -eq $Script:DrvProgresso) { return }
+            if ($e.TotalBytesToReceive -le 0) {
+                # Servidor que nao manda o tamanho (resposta em chunks): mostra so o que ja chegou
+                $Script:DrvProgresso.Text = "$($Script:DrvPrefixo)  Baixando...   ($([Math]::Round($e.BytesReceived / 1MB, 1)) MB)"
+                return
+            }
             $pct = $e.ProgressPercentage
             $barSize = 14
             $filled = [Math]::Floor($pct / (100 / $barSize))
@@ -21115,7 +21143,7 @@ $formWidth = if ($screen.Width -lt 1200) { $screen.Width - 50 } else { 1200 }
 $formHeight = if ($screen.Height -lt 900) { $screen.Height - 50 } else { 900 }
 
 $form = New-Object System.Windows.Forms.Form
-$form.Text = "Preparador XMenu – Suporte Técnico v5.62"
+$form.Text = "Preparador XMenu – Suporte Técnico v5.63"
 $form.Size = New-Object System.Drawing.Size($formWidth, $formHeight)
 $form.StartPosition = "CenterScreen"
 $form.BackColor = [System.Drawing.Color]::FromArgb(25, 25, 30); $form.ForeColor = 'White'
@@ -22031,7 +22059,7 @@ $bNetStart.Add_Click({ Set-NetStartInicializacao $this })
 [void]$tbl.Controls.Add($bNetStart)
 
 # Mensagem de abertura: explica o programa para quem abre pela primeira vez
-Log-Message "INFO" "Preparador XMenu v5.62 - preparo e suporte de computadores com XMenu e NetPDV"
+Log-Message "INFO" "Preparador XMenu v5.63 - preparo e suporte de computadores com XMenu e NetPDV"
 foreach ($msgSenha in $Script:LogSenhaPendente) { Log-Message "INFO" $msgSenha }
 Log-Message "INFO" "Senha de abertura: acesso liberado"
 Log-Message "LOG" "==============================================================="
@@ -22043,7 +22071,11 @@ Log-Message "LOG" "  EXTERNOS ................... acesso remoto, Chrome, TEF HUB
 Log-Message "LOG" "  SUPORTE E DIAGNÓSTICO ...... impressoras, rede, SQL, backup, XMLs e reparos do Windows"
 Log-Message "LOG" "  Passe o mouse sobre um botão para ver o que ele faz antes de clicar."
 Log-Message "LOG" "---------------------------------------------------------------"
-Log-Message "LOG" "NOVO NA v5.62"
+Log-Message "LOG" "NOVO NA v5.63"
+Log-Message "SUCESSO" "  Drivers: conferidos com os sites oficiais os drivers de todas as marcas (menos Elgin); atualizados Star (StarPRNT Intelligence 3.8.1, Star Windows Software 3.11.0 para mC-Print / mPOP / TSP100IV e futurePRNT 7.70 para TSP100 / TSP143), Argox 12.5.0, Gainscha / Gprinter 11.10.0, Gertec G250 Utility 1.1.1.0, Tanca TP-620 / TP-620+ pelo instalador oficial e Feasso F-IMTER-02 / 03 e Dimep D-PRINT DUAL pelos pacotes oficiais"
+Log-Message "SUCESSO" "  Drivers: novos Sweda SI-300S (SIX), SI-300X e SI-600 (com o utilitário da SIX), Tanca TMP-500, Tanca TLP-300 / TLP-300+ (etiqueta), driver do cabo USB-Serial da Tanca TP-650 e Argox Printer Utility"
+Log-Message "SUCESSO" "  Drivers: a Epson só libera o driver mais recente (APD 6.12) pelo navegador; os botões [SITE] abrem a página oficial da TM-T20, TM-T20X e TM-T20X II (os downloads diretos continuam)"
+Log-Message "SUCESSO" "  Drivers: download de servidor que não informa o tamanho mostra os MB já baixados em vez de ficar em 0%"
 Log-Message "SUCESSO" "  LPR: impressora LPR parada com o PC achado pelo MAC (o PC mudou de IP) agora mostra o aviso CORRIGIR AGORA já na tela inicial do Preparador e ao abrir Impressoras, sem precisar entrar em LPR COMPARTILHADA (a conferência é leve: sem LPR parada leva milissegundos)"
 Log-Message "SUCESSO" "  Programas NetControll: KDS Monitor na versão 5.0.0.16 (todos os apps 5.0 agora na 5.0.0.16)"
 Log-Message "SUCESSO" "  XMLs: o ESPELHO FISCAL em impressora com o driver Generic / Text Only (Genérico / Somente Texto) agora sai no padrão da térmica: o Preparador manda o cupom nos comandos da própria impressora (ESC/POS), com QR Code, negrito, tarja e corte; a opção Modo texto ESC/POS liga sozinha nessas filas e fica guardada por impressora"
