@@ -1,5 +1,5 @@
 ﻿# =============================================================================
-# PREPARADOR XMENU v5.63
+# PREPARADOR XMENU v5.64
 # Visual: Dashboard Moderno
 # Correcoes:
 #   - CRITICO: Removido DoEvents do loop de evento de download (causava crash).
@@ -12150,6 +12150,396 @@ function Set-NetStartInicializacao {
 }
 
 # -----------------------------------------------------------------------------
+# LIBERAR MEMORIA RAM (no estilo do RAMMap da Sysinternals)
+# Nada aqui mexe no Windows essencial nem no sistema (NetControll e SQL Server):
+#  1) Limpar: tira da RAM as paginas paradas dos programas abertos (o "Empty Working Sets" do
+#     RAMMap, processo por processo) e esvazia o cache Standby ("Empty Standby List").
+#     Nao fecha nada: o programa traz de volta o que voltar a usar.
+#  2) Encerrar: so processos do Windows que ele mesmo abre de novo quando precisa (Pesquisa,
+#     Widgets, Vincular ao Celular...). Programa do cliente aparece na lista so para consulta.
+# -----------------------------------------------------------------------------
+# Sistema NetControll e banco: nunca encerrados nem esvaziados (o PDV ficaria lento no meio da venda)
+$Script:MemProtegidosSistema = @("Concentrador", "NetStart", "NetServidor", "NetTerminal", "NetPrint", "NetPDV", "LinkXMenu", "XMenu",
+    "AutoAtendimento", "AutoAtendimentoBalanca", "TabletCardapio", "KDSMonitor", "sqlservr", "sqlwriter", "sqlagent", "sqlbrowser")
+# Acesso remoto: encerrar derrubaria o tecnico no meio do suporte
+$Script:MemProtegidosRemoto = @("AnyDesk", "TeamViewer", "TeamViewer_Service", "tv_w32", "tv_x64", "RustDesk", "Supremo", "SupremoService",
+    "AeroAdmin", "remoting_host", "ScreenConnect.ClientService", "ScreenConnect.WindowsClient", "LogMeIn", "LMIGuardianSvc", "AA_v3")
+# Processos do Windows que podem ser encerrados sem prejuizo: o Windows abre de novo sozinho quando precisa
+$Script:MemWindowsEncerravel = @{
+    "SearchHost" = "Pesquisa do Windows"; "SearchApp" = "Pesquisa do Windows"; "SearchUI" = "Pesquisa do Windows"; "Cortana" = "Cortana"
+    "Widgets" = "Widgets do Windows"; "WidgetService" = "Widgets do Windows"
+    "PhoneExperienceHost" = "Vincular ao Celular"; "YourPhone" = "Vincular ao Celular"; "YourPhoneServer" = "Vincular ao Celular"
+    "CrossDeviceResume" = "Continuar entre dispositivos"; "CrossDeviceService" = "Continuar entre dispositivos"
+    "GameBar" = "Xbox Game Bar"; "GameBarFTServer" = "Xbox Game Bar"; "GameBarPresenceWriter" = "Xbox Game Bar"
+    "HxTsr" = "Sincronização do Email e Calendário"; "SystemSettings" = "Configurações do Windows"; "Copilot" = "Copilot"
+}
+
+function Initialize-MemoriaApi {
+    # EmptyWorkingSet e a lista Standby do Windows, os mesmos que o RAMMap usa. Compilado na primeira vez.
+    if ('XMenuTools.Memoria' -as [type]) { return }
+    $codigoMemoria = @'
+using System;
+using System.Runtime.InteropServices;
+
+namespace XMenuTools
+{
+    public static class Memoria
+    {
+        [StructLayout(LayoutKind.Sequential, Pack = 4)]
+        private struct TokenPrivilegio { public int Quantidade; public long Luid; public int Atributos; }
+
+        [DllImport("advapi32.dll", SetLastError = true)]
+        private static extern bool OpenProcessToken(IntPtr processo, int acesso, out IntPtr token);
+        [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+        private static extern bool LookupPrivilegeValue(string sistema, string nome, out long luid);
+        [DllImport("advapi32.dll", SetLastError = true)]
+        private static extern bool AdjustTokenPrivileges(IntPtr token, bool desligarTodos, ref TokenPrivilegio novo, int tamanho, IntPtr anterior, IntPtr tamanhoAnterior);
+        [DllImport("kernel32.dll")]
+        private static extern IntPtr GetCurrentProcess();
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern IntPtr OpenProcess(int acesso, bool herdar, int pid);
+        [DllImport("kernel32.dll")]
+        private static extern bool CloseHandle(IntPtr h);
+        [DllImport("psapi.dll", SetLastError = true)]
+        private static extern bool EmptyWorkingSet(IntPtr processo);
+        [DllImport("ntdll.dll")]
+        private static extern int NtSetSystemInformation(int classe, ref int comando, int tamanho);
+
+        // Liga um privilegio do administrador no proprio Preparador. Devolve 0 ou o erro do Windows
+        // (1300 = o usuario nao tem esse privilegio).
+        public static int LigarPrivilegio(string nome)
+        {
+            IntPtr token;
+            if (!OpenProcessToken(GetCurrentProcess(), 0x28, out token)) { return Marshal.GetLastWin32Error(); }
+            try
+            {
+                long luid;
+                if (!LookupPrivilegeValue(null, nome, out luid)) { return Marshal.GetLastWin32Error(); }
+                TokenPrivilegio tp = new TokenPrivilegio();
+                tp.Quantidade = 1; tp.Luid = luid; tp.Atributos = 2;
+                if (!AdjustTokenPrivileges(token, false, ref tp, Marshal.SizeOf(tp), IntPtr.Zero, IntPtr.Zero)) { return Marshal.GetLastWin32Error(); }
+                return Marshal.GetLastWin32Error();
+            }
+            finally { CloseHandle(token); }
+        }
+
+        // Tira da RAM as paginas que este processo nao esta usando agora. Devolve 0 ou o erro do Windows.
+        public static int EsvaziarProcesso(int pid)
+        {
+            IntPtr h = OpenProcess(0x1000 | 0x0100, false, pid);
+            if (h == IntPtr.Zero) { return Marshal.GetLastWin32Error(); }
+            try { return EmptyWorkingSet(h) ? 0 : Marshal.GetLastWin32Error(); }
+            finally { CloseHandle(h); }
+        }
+
+        // SystemMemoryListInformation (80); comando 4 = esvaziar a lista Standby. Devolve o NTSTATUS (0 = ok).
+        public static int ComandoListaMemoria(int comando)
+        {
+            int c = comando;
+            return NtSetSystemInformation(80, ref c, 4);
+        }
+    }
+}
+'@
+    Add-Type -TypeDefinition $codigoMemoria -Language CSharp
+}
+
+function Get-MemoriaDetalhe {
+    # RAM total, em uso, cache (Standby) e livre, em MB. Lido = $false quando nao deu para ler.
+    $r = @{ Lido = $false; TotalMb = [long]0; EmUsoMb = [long]0; PctEmUso = 0; DisponivelMb = [long]0; CacheMb = [long]0; LivreMb = [long]0 }
+    try {
+        $so = Get-CimInstance -ClassName Win32_OperatingSystem -Property TotalVisibleMemorySize -ErrorAction Stop
+        $pm = Get-CimInstance -ClassName Win32_PerfRawData_PerfOS_Memory -ErrorAction Stop
+        $r.TotalMb = [long][math]::Round([double]$so.TotalVisibleMemorySize / 1024)
+        $r.DisponivelMb = [long][math]::Round([double]$pm.AvailableBytes / 1MB)
+        $r.CacheMb = [long][math]::Round(([double]$pm.StandbyCacheCoreBytes + [double]$pm.StandbyCacheNormalPriorityBytes + [double]$pm.StandbyCacheReserveBytes) / 1MB)
+        $r.LivreMb = [long][math]::Round([double]$pm.FreeAndZeroPageListBytes / 1MB)
+        $r.EmUsoMb = [long][math]::Max(0, $r.TotalMb - $r.DisponivelMb)
+        if ($r.TotalMb -gt 0) { $r.PctEmUso = [int][math]::Round(100.0 * $r.EmUsoMb / $r.TotalMb) }
+        $r.Lido = $true
+    }
+    catch { Log-Message "ERRO" "Memória RAM: não consegui ler a memória ($($_.Exception.Message))" }
+    return $r
+}
+
+function Get-ClasseProcessoMemoria {
+    # O que o Preparador pode fazer com o processo. Tipo: preparador / sistema / remoto / windows / encerravel / cliente
+    # So 'encerravel' pode ser encerrado; 'cliente' e 'encerravel' podem ter a memoria esvaziada.
+    param($Processo)
+    $nome = "$($Processo.ProcessName)"
+    if ([int]$Processo.Id -eq $PID) { return @{ Tipo = 'preparador'; Situacao = "Preparador XMenu (protegido)" } }
+    $caminho = ""
+    try { $caminho = "$($Processo.Path)" } catch {}
+    if ($Script:MemProtegidosSistema -contains $nome -or $caminho -like "$env:SystemDrive\netcontroll\*") { return @{ Tipo = 'sistema'; Situacao = "Sistema NetControll / banco (protegido)" } }
+    if ($Script:MemProtegidosRemoto -contains $nome) { return @{ Tipo = 'remoto'; Situacao = "Acesso remoto (protegido)" } }
+    if ([int]$Processo.SessionId -eq 0) { return @{ Tipo = 'windows'; Situacao = "Serviço do Windows (protegido)" } }
+    # So vale o nome da lista se o arquivo for mesmo do Windows (um Widgets.exe de outro programa nao entra)
+    if ($Script:MemWindowsEncerravel.ContainsKey($nome) -and ($caminho -like "$env:SystemRoot\*" -or $caminho -like "*\WindowsApps\*")) {
+        return @{ Tipo = 'encerravel'; Situacao = "Pode encerrar: $($Script:MemWindowsEncerravel[$nome])" }
+    }
+    if ($caminho -eq "" -or $caminho -like "$env:SystemRoot\*") { return @{ Tipo = 'windows'; Situacao = "Parte do Windows (protegido)" } }
+    return @{ Tipo = 'cliente'; Situacao = "Programa do cliente (não é encerrado)" }
+}
+
+function Get-ProcessosMemoria {
+    # Processos agrupados pelo nome, do que mais usa RAM para o que menos usa. A memoria e a privada
+    # (a mesma coluna Memória do Gerenciador de Tarefas); sem o contador, usa o total do processo.
+    $privado = @{}
+    try {
+        foreach ($c in @(Get-CimInstance -ClassName Win32_PerfFormattedData_PerfProc_Process -Property IDProcess, WorkingSetPrivate -ErrorAction Stop)) {
+            if ([int]$c.IDProcess -gt 0) { $privado[[int]$c.IDProcess] = [long]$c.WorkingSetPrivate }
+        }
+    }
+    catch { Log-Message "INFO" "Memória RAM: sem o contador da memória privada, usando o total de cada processo ($($_.Exception.Message))" }
+    $grupos = @{}
+    foreach ($p in @(Get-Process -ErrorAction SilentlyContinue)) {
+        if ([int]$p.Id -le 4) { continue }
+        $classe = Get-ClasseProcessoMemoria $p
+        $bytes = [long]$p.WorkingSet64
+        if ($privado.ContainsKey([int]$p.Id)) { $bytes = $privado[[int]$p.Id] }
+        $chave = "$($p.ProcessName)|$($classe.Tipo)"
+        if (-not $grupos.ContainsKey($chave)) {
+            $grupos[$chave] = [PSCustomObject]@{ Nome = "$($p.ProcessName)"; Tipo = $classe.Tipo; Situacao = $classe.Situacao; Bytes = [long]0; Pids = (New-Object System.Collections.Generic.List[int]) }
+        }
+        $grupos[$chave].Bytes += $bytes
+        $grupos[$chave].Pids.Add([int]$p.Id)
+    }
+    return @($grupos.Values | Sort-Object Bytes -Descending)
+}
+
+function Invoke-LimparMemoria {
+    # O "Empty Working Sets" + "Empty Standby List" do RAMMap, sem mexer no Windows nem no sistema:
+    # esvazia so programas do cliente e processos do Windows que podem ser encerrados. Nao fecha nada.
+    # Devolve hashtable: Antes / Depois (Get-MemoriaDetalhe) / Esvaziados / Pulados / Falhas / CacheOk / CacheErro
+    Initialize-MemoriaApi
+    $res = @{ Antes = (Get-MemoriaDetalhe); Depois = $null; Esvaziados = 0; Pulados = 0; Falhas = 0; CacheOk = $false; CacheErro = "" }
+    Log-Message "INFO" "Memória RAM: limpando (antes: $($res.Antes.EmUsoMb) MB em uso de $($res.Antes.TotalMb) MB, cache $($res.Antes.CacheMb) MB, livre $($res.Antes.LivreMb) MB)"
+    foreach ($p in @(Get-Process -ErrorAction SilentlyContinue)) {
+        if ([int]$p.Id -le 4) { continue }
+        $tipo = (Get-ClasseProcessoMemoria $p).Tipo
+        if ($tipo -ne 'cliente' -and $tipo -ne 'encerravel') { $res.Pulados++; continue }
+        if ([XMenuTools.Memoria]::EsvaziarProcesso([int]$p.Id) -eq 0) { $res.Esvaziados++ } else { $res.Falhas++ }
+    }
+    Log-Message "INFO" "Memória RAM: $($res.Esvaziados) processo(s) esvaziado(s); $($res.Pulados) do Windows, do sistema ou do acesso remoto ficaram como estavam; $($res.Falhas) sem acesso"
+    $erroPriv = [XMenuTools.Memoria]::LigarPrivilegio("SeProfileSingleProcessPrivilege")
+    if ($erroPriv -ne 0) { $res.CacheErro = "sem permissão para esvaziar o cache (erro $erroPriv)" }
+    else {
+        $status = [XMenuTools.Memoria]::ComandoListaMemoria(4)
+        if ($status -eq 0) { $res.CacheOk = $true }
+        else { $res.CacheErro = "o Windows recusou esvaziar o cache (0x{0:X8})" -f $status }
+    }
+    if ($res.CacheOk) { Log-Message "SUCESSO" "Memória RAM: cache (Standby) esvaziado" }
+    else { Log-Message "ERRO" "Memória RAM: $($res.CacheErro)" }
+    Start-Sleep -Milliseconds 300
+    $res.Depois = Get-MemoriaDetalhe
+    Log-Message "SUCESSO" "Memória RAM: depois da limpeza $($res.Depois.EmUsoMb) MB em uso, cache $($res.Depois.CacheMb) MB, livre $($res.Depois.LivreMb) MB"
+    return $res
+}
+
+function Stop-ProcessosWindowsMemoria {
+    # Encerra os grupos escolhidos conferindo cada processo de novo na hora (o numero do processo pode ter
+    # passado para outro programa): so fecha o que ainda for um processo do Windows que pode ser encerrado.
+    # Devolve hashtable: Encerrados / Falhas / LiberadoBytes
+    param($Grupos)
+    $res = @{ Encerrados = 0; Falhas = 0; LiberadoBytes = [long]0 }
+    foreach ($g in @($Grupos)) {
+        foreach ($pidG in @($g.Pids)) {
+            $p = Get-Process -Id $pidG -ErrorAction SilentlyContinue
+            if ($null -eq $p -or "$($p.ProcessName)" -ne "$($g.Nome)") { continue }
+            if ((Get-ClasseProcessoMemoria $p).Tipo -ne 'encerravel') {
+                Log-Message "INFO" "Memória RAM: $($g.Nome) (PID $pidG) não foi encerrado: não é mais um processo do Windows que pode ser fechado"
+                continue
+            }
+            $bytes = [long]$p.WorkingSet64
+            try {
+                Stop-Process -Id $pidG -Force -ErrorAction Stop
+                $res.Encerrados++; $res.LiberadoBytes += $bytes
+                Log-Message "SUCESSO" "Memória RAM: encerrado $($g.Nome) (PID $pidG, $(Format-BytesTexto $bytes))"
+            }
+            catch {
+                $res.Falhas++
+                Log-Message "ERRO" "Memória RAM: não consegui encerrar $($g.Nome) (PID $pidG) - $($_.Exception.Message)"
+            }
+        }
+    }
+    return $res
+}
+
+function Show-LiberarMemoria {
+    Log-Message "INFO" "Memória RAM: janela Liberar Memória RAM aberta"
+    $f = New-ToolForm "Liberar Memória RAM" 780 620
+    $f.MinimumSize = New-Object System.Drawing.Size(700, 560)
+    $gMem = New-Gauge $f "MEMÓRIA RAM" 20 16 724 92
+    $gMem.Anchor = 'Top,Left,Right'
+
+    New-ToolLabel $f "1  LIMPAR A MEMÓRIA" 20 124 10 -Negrito | Out-Null
+    $lblLimpaDesc = New-ToolLabel $f "Libera a memória parada dos programas abertos e esvazia o cache do Windows (Standby). Nenhum programa é fechado; o Windows, o SQL Server e a NetControll não são alterados." 20 148 9 -Cor $Script:UiSuave -W 560
+    $lblLimpaDesc.Height = 40
+    $lblLimpaDesc.Anchor = 'Top,Left,Right'
+    $btnLimpar = New-ToolButton $f "LIMPAR MEMÓRIA" 594 150 150 34 $Script:UiVerde $null "Libera a memória parada dos programas abertos e esvazia o cache do Windows (Standby), sem fechar nenhum programa"
+    $btnLimpar.Anchor = 'Top,Right'
+
+    New-ToolLabel $f "2  CONSUMO DE MEMÓRIA POR PROGRAMA" 20 204 10 -Negrito | Out-Null
+    $lblListaDesc = New-ToolLabel $f "Somente processos do Windows que ele mesmo reabre quando necessário (Pesquisa, Widgets, Vincular ao Celular...) podem ser encerrados. Programas do cliente, o Windows essencial, o acesso remoto e o sistema NetControll ficam protegidos." 20 228 9 -Cor $Script:UiSuave -W 724
+    $lblListaDesc.Height = 40
+    $lblListaDesc.Anchor = 'Top,Left,Right'
+
+    $lvMem = New-Object System.Windows.Forms.ListView
+    $lvMem.Location = New-Object System.Drawing.Point(20, 274)
+    $lvMem.Size = New-Object System.Drawing.Size(724, 228)
+    $lvMem.Anchor = 'Top,Left,Right,Bottom'
+    $lvMem.CheckBoxes = $true
+    $lvMem.MultiSelect = $false
+    $lvMem.HeaderStyle = 'Nonclickable'
+    [void]$lvMem.Columns.Add("Programa", 210)
+    [void]$lvMem.Columns.Add("Memória", 90)
+    [void]$lvMem.Columns.Add("Abertos", 86)
+    [void]$lvMem.Columns.Add("Situação", 290)
+    [void]$f.Controls.Add($lvMem)
+    Set-ListaModerna $lvMem -ColunasStatus @(3) -ColunasDireita @(1, 2) -MinUltima 200
+
+    $pnlAcoesMem = New-Object System.Windows.Forms.Panel
+    $pnlAcoesMem.Location = New-Object System.Drawing.Point(20, 512)
+    $pnlAcoesMem.Size = New-Object System.Drawing.Size(724, 64)
+    $pnlAcoesMem.Anchor = 'Bottom,Left,Right'
+    $pnlAcoesMem.BackColor = $Script:UiFundo
+    [void]$f.Controls.Add($pnlAcoesMem)
+    $lblStatusMem = New-ToolLabel $pnlAcoesMem "Lendo a memória..." 0 0 9 -Cor $Script:UiSuave -W 724
+    $lblStatusMem.Height = 22
+    $lblStatusMem.AutoEllipsis = $true
+    $lblStatusMem.Anchor = 'Top,Left,Right'
+    $btnAtualizarMem = New-ToolButton $pnlAcoesMem "ATUALIZAR" 0 28 170 34 $Script:UiAzul $null "Lê de novo a memória e a lista de processos"
+    $btnEncerrarMem = New-ToolButton $pnlAcoesMem "ENCERRAR MARCADOS" 178 28 170 34 $Script:UiVermelho $null "Encerra os processos do Windows marcados (o Windows abre de novo quando precisar)"
+    $btnEncerrarMem.Enabled = $false
+    $btnFecharMem = New-ToolButton $pnlAcoesMem "FECHAR" 554 28 170 34 $Script:UiCinza { $f.Close() }
+    $btnFecharMem.Anchor = 'Top,Right'
+    $f.CancelButton = $btnFecharMem
+
+    # Estado numa hashtable: os eventos rodam em outro escopo e precisam enxergar a mesma variavel
+    $estadoMem = @{ Ocupado = $false }
+    $statusMem = {
+        param([string]$Texto, $Cor)
+        $lblStatusMem.Text = $Texto
+        $lblStatusMem.ForeColor = $(if ($Cor) { $Cor } else { $Script:UiSuave })
+    }
+    $atualizarBotoesMem = {
+        $btnEncerrarMem.Enabled = (-not $estadoMem.Ocupado) -and ($lvMem.CheckedItems.Count -gt 0)
+    }
+    $travarMem = {
+        param([bool]$Ocupado)
+        $estadoMem.Ocupado = $Ocupado
+        $btnLimpar.Enabled = -not $Ocupado
+        $btnAtualizarMem.Enabled = -not $Ocupado
+        $lvMem.Enabled = -not $Ocupado
+        $f.Cursor = $(if ($Ocupado) { [System.Windows.Forms.Cursors]::WaitCursor } else { [System.Windows.Forms.Cursors]::Default })
+        & $atualizarBotoesMem
+        [System.Windows.Forms.Application]::DoEvents()
+    }
+    $mostrarMemoria = {
+        $m = Get-MemoriaDetalhe
+        if (-not $m.Lido) { Update-Gauge $gMem 0 "não consegui ler" ""; return $m }
+        $textoMem = "{0} de {1} em uso ({2}%)" -f (Format-BytesTexto ($m.EmUsoMb * 1MB)), (Format-BytesTexto ($m.TotalMb * 1MB)), $m.PctEmUso
+        $legendaMem = "Cache (Standby): {0}     Livre: {1}" -f (Format-BytesTexto ($m.CacheMb * 1MB)), (Format-BytesTexto ($m.LivreMb * 1MB))
+        Update-Gauge $gMem $m.PctEmUso $textoMem $legendaMem (Get-CorPorUso $m.PctEmUso)
+        return $m
+    }
+    $mostrarProcessos = {
+        $grupos = @(Get-ProcessosMemoria)
+        # Os 40 que mais usam e, mesmo abaixo deles, todo processo do Windows que pode ser encerrado
+        $exibir = @($grupos | Select-Object -First 40) + @($grupos | Select-Object -Skip 40 | Where-Object { $_.Tipo -eq 'encerravel' })
+        $lvMem.BeginUpdate()
+        $lvMem.Items.Clear()
+        foreach ($g in $exibir) {
+            $it = New-Object System.Windows.Forms.ListViewItem($g.Nome)
+            [void]$it.SubItems.Add((Format-BytesTexto $g.Bytes))
+            [void]$it.SubItems.Add("$($g.Pids.Count)")
+            [void]$it.SubItems.Add($g.Situacao)
+            $it.Tag = $g
+            $it.ForeColor = $(if ($g.Tipo -eq 'encerravel') { $Script:UiVerde } else { $Script:UiSuave })
+            [void]$lvMem.Items.Add($it)
+        }
+        $lvMem.EndUpdate()
+        $maiores = (@($grupos | Select-Object -First 5 | ForEach-Object { "$($_.Nome) $(Format-BytesTexto $_.Bytes)" })) -join ", "
+        Log-Message "INFO" "Memória RAM: quem mais usa: $maiores"
+        return $grupos
+    }
+    $carregarMem = {
+        & $travarMem $true
+        & $statusMem "Lendo a memória e os processos..." $Script:UiAmarelo
+        $m = & $mostrarMemoria
+        $grupos = @(& $mostrarProcessos)
+        $nEnc = @($grupos | Where-Object { $_.Tipo -eq 'encerravel' }).Count
+        if ($m.Lido) { Log-Message "INFO" "Memória RAM: $($m.EmUsoMb) MB em uso de $($m.TotalMb) MB ($($m.PctEmUso)%), cache $($m.CacheMb) MB, livre $($m.LivreMb) MB" }
+        if ($nEnc -gt 0) { & $statusMem "$nEnc processo(s) do Windows pode(m) ser encerrado(s): marque e clique em ENCERRAR MARCADOS." $Script:UiSuave }
+        else { & $statusMem "Nenhum processo do Windows para encerrar agora. Use LIMPAR MEMÓRIA para liberar a RAM sem fechar nada." $Script:UiSuave }
+        & $travarMem $false
+    }
+
+    # Só processos do Windows que podem ser encerrados aceitam a marca
+    $lvMem.Add_ItemCheck({
+            param($s, $e)
+            $g = $s.Items[$e.Index].Tag
+            if ($null -eq $g -or $g.Tipo -ne 'encerravel') { $e.NewValue = $e.CurrentValue }
+        })
+    $lvMem.Add_ItemChecked({ & $atualizarBotoesMem })
+
+    $btnAtualizarMem.Add_Click({ & $carregarMem })
+
+    $btnLimpar.Add_Click({
+            & $travarMem $true
+            & $statusMem "Limpando a memória... (nenhum programa é fechado)" $Script:UiAmarelo
+            try {
+                $r = Invoke-LimparMemoria
+                if ($r.Antes.Lido -and $r.Depois.Lido) {
+                    $liberou = [long][math]::Max(0, $r.Antes.EmUsoMb - $r.Depois.EmUsoMb)
+                    $textoFim = "Pronto: em uso de {0} para {1} (liberou {2}); cache de {3} para {4}." -f (Format-BytesTexto ($r.Antes.EmUsoMb * 1MB)), (Format-BytesTexto ($r.Depois.EmUsoMb * 1MB)), (Format-BytesTexto ($liberou * 1MB)), (Format-BytesTexto ($r.Antes.CacheMb * 1MB)), (Format-BytesTexto ($r.Depois.CacheMb * 1MB))
+                }
+                else { $textoFim = "Pronto: memória dos programas esvaziada." }
+                if (-not $r.CacheOk) { $textoFim += " Cache não esvaziado: $($r.CacheErro)." }
+                [void](& $mostrarMemoria)
+                [void](& $mostrarProcessos)
+                & $statusMem $textoFim $(if ($r.CacheOk) { $Script:UiVerde } else { $Script:UiAmarelo })
+            }
+            catch {
+                Log-Message "ERRO" "Memória RAM: erro ao limpar - $($_.Exception.Message)"
+                & $statusMem "Erro ao limpar a memória: $($_.Exception.Message)" $Script:UiVermelho
+            }
+            finally { & $travarMem $false }
+        })
+
+    $btnEncerrarMem.Add_Click({
+            $marcados = @($lvMem.CheckedItems | ForEach-Object { $_.Tag } | Where-Object { $null -ne $_ -and $_.Tipo -eq 'encerravel' })
+            if ($marcados.Count -eq 0) { return }
+            $listaMarcados = (@($marcados | ForEach-Object { "  - $($Script:MemWindowsEncerravel[$_.Nome]) ($($_.Nome)): $(Format-BytesTexto $_.Bytes)" })) -join "`r`n"
+            $resp = [System.Windows.Forms.MessageBox]::Show($f, "Encerrar estes processos do Windows?`r`n`r`n$listaMarcados`r`n`r`nO Windows abre de novo quando precisar. Nenhum programa do cliente nem do sistema NetControll é fechado.", "Liberar Memória RAM", "YesNo", "Question")
+            if ($resp -ne [System.Windows.Forms.DialogResult]::Yes) {
+                Log-Message "CANCEL" "Memória RAM: encerrar processos cancelado"
+                return
+            }
+            & $travarMem $true
+            & $statusMem "Encerrando..." $Script:UiAmarelo
+            try {
+                $r = Stop-ProcessosWindowsMemoria -Grupos $marcados
+                Start-Sleep -Milliseconds 400
+                [void](& $mostrarMemoria)
+                [void](& $mostrarProcessos)
+                $textoFim = "$($r.Encerrados) processo(s) encerrado(s), cerca de $(Format-BytesTexto $r.LiberadoBytes) liberados."
+                if ($r.Falhas -gt 0) { $textoFim += " $($r.Falhas) não puderam ser encerrados (veja o log)." }
+                & $statusMem $textoFim $(if ($r.Falhas -gt 0) { $Script:UiAmarelo } else { $Script:UiVerde })
+            }
+            catch {
+                Log-Message "ERRO" "Memória RAM: erro ao encerrar - $($_.Exception.Message)"
+                & $statusMem "Erro ao encerrar: $($_.Exception.Message)" $Script:UiVermelho
+            }
+            finally { & $travarMem $false }
+        })
+
+    $f.Add_Shown({ $f.Refresh(); & $carregarMem })
+    [void]$f.ShowDialog()
+    $f.Dispose()
+}
+
+# -----------------------------------------------------------------------------
 # TEF HUB DA ELGIN - RESOLVE A VERSAO MAIS RECENTE SOZINHO
 # A Elgin publica os instaladores nesta pasta do GitHub e troca a versao sem
 # aviso. Em vez de deixar o link fixo (que envelhece), a gente pergunta a API
@@ -21143,7 +21533,7 @@ $formWidth = if ($screen.Width -lt 1200) { $screen.Width - 50 } else { 1200 }
 $formHeight = if ($screen.Height -lt 900) { $screen.Height - 50 } else { 900 }
 
 $form = New-Object System.Windows.Forms.Form
-$form.Text = "Preparador XMenu – Suporte Técnico v5.63"
+$form.Text = "Preparador XMenu – Suporte Técnico v5.64"
 $form.Size = New-Object System.Drawing.Size($formWidth, $formHeight)
 $form.StartPosition = "CenterScreen"
 $form.BackColor = [System.Drawing.Color]::FromArgb(25, 25, 30); $form.ForeColor = 'White'
@@ -22058,8 +22448,16 @@ $Script:ToolTip.SetToolTip($bNetStart, "Cria o NetStart.bat na pasta Inicializar
 $bNetStart.Add_Click({ Set-NetStartInicializacao $this })
 [void]$tbl.Controls.Add($bNetStart)
 
+$bRam = New-Object System.Windows.Forms.Button; $bRam.Height = 50; $bRam.Dock = 'Top'
+$bRam.Text = "Liberar Memória RAM"; $bRam.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
+$bRam.Cursor = 'Hand'
+Format-SupportBtn $bRam $colorGray
+$Script:ToolTip.SetToolTip($bRam, "Libera a memória RAM sem fechar nenhum programa (esvazia a memória parada dos programas e o cache do Windows) e mostra o consumo de memória por programa. Só encerra processos do Windows que ele mesmo reabre (Pesquisa, Widgets, Vincular ao Celular...); programas do cliente, o Windows essencial, o acesso remoto e o sistema NetControll / SQL Server ficam protegidos.")
+$bRam.Add_Click({ Show-LiberarMemoria })
+[void]$tbl.Controls.Add($bRam)
+
 # Mensagem de abertura: explica o programa para quem abre pela primeira vez
-Log-Message "INFO" "Preparador XMenu v5.63 - preparo e suporte de computadores com XMenu e NetPDV"
+Log-Message "INFO" "Preparador XMenu v5.64 - preparo e suporte de computadores com XMenu e NetPDV"
 foreach ($msgSenha in $Script:LogSenhaPendente) { Log-Message "INFO" $msgSenha }
 Log-Message "INFO" "Senha de abertura: acesso liberado"
 Log-Message "LOG" "==============================================================="
@@ -22071,7 +22469,9 @@ Log-Message "LOG" "  EXTERNOS ................... acesso remoto, Chrome, TEF HUB
 Log-Message "LOG" "  SUPORTE E DIAGNÓSTICO ...... impressoras, rede, SQL, backup, XMLs e reparos do Windows"
 Log-Message "LOG" "  Passe o mouse sobre um botão para ver o que ele faz antes de clicar."
 Log-Message "LOG" "---------------------------------------------------------------"
-Log-Message "LOG" "NOVO NA v5.63"
+Log-Message "LOG" "NOVO NA v5.64"
+Log-Message "SUCESSO" "  Suporte: novo botão Liberar Memória RAM: libera a RAM sem fechar nenhum programa (esvazia a memória parada dos programas abertos e o cache do Windows) e mostra o consumo de memória por programa"
+Log-Message "SUCESSO" "  Suporte: no Liberar Memória RAM só podem ser encerrados processos do Windows que ele mesmo reabre (Pesquisa, Widgets, Vincular ao Celular, Xbox Game Bar...); programas do cliente nunca são fechados, e o Windows essencial, o acesso remoto e o sistema NetControll / SQL Server ficam de fora até da limpeza"
 Log-Message "SUCESSO" "  Drivers: conferidos com os sites oficiais os drivers de todas as marcas (menos Elgin); atualizados Star (StarPRNT Intelligence 3.8.1, Star Windows Software 3.11.0 para mC-Print / mPOP / TSP100IV e futurePRNT 7.70 para TSP100 / TSP143), Argox 12.5.0, Gainscha / Gprinter 11.10.0, Gertec G250 Utility 1.1.1.0, Tanca TP-620 / TP-620+ pelo instalador oficial e Feasso F-IMTER-02 / 03 e Dimep D-PRINT DUAL pelos pacotes oficiais"
 Log-Message "SUCESSO" "  Drivers: novos Sweda SI-300S (SIX), SI-300X e SI-600 (com o utilitário da SIX), Tanca TMP-500, Tanca TLP-300 / TLP-300+ (etiqueta), driver do cabo USB-Serial da Tanca TP-650 e Argox Printer Utility"
 Log-Message "SUCESSO" "  Drivers: a Epson só libera o driver mais recente (APD 6.12) pelo navegador; os botões [SITE] abrem a página oficial da TM-T20, TM-T20X e TM-T20X II (os downloads diretos continuam)"
