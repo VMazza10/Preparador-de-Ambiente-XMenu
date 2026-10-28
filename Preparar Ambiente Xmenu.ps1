@@ -1,5 +1,5 @@
 ﻿# =============================================================================
-# PREPARADOR XMENU v5.66
+# PREPARADOR XMENU v5.67
 # Visual: Dashboard Moderno
 # Correcoes:
 #   - CRITICO: Removido DoEvents do loop de evento de download (causava crash).
@@ -21503,8 +21503,8 @@ function Run-Config {
 # SENHA PARA ABRIR
 # O cliente as vezes abre o Preparador e baixa algo sem querer: so abre com a senha dos tecnicos, pedida toda vez.
 # -----------------------------------------------------------------------------
-# Um X no teclado numerico: 7-5-3 e 1-5-9
-$Script:SenhaPreparador = "753159"
+# So o hash da senha: o codigo e publico no GitHub. shortcut: senha numerica curta, o hash so tira ela da vista; nao segura quem quiser forcar
+$Script:SenhaPreparadorHash = "594CD78DAF32565F1F17D3AAA6455F0A19A110496E8050655B4B23C4931BC23F"
 $Script:LogSenhaPendente = New-Object System.Collections.Generic.List[string]
 
 function Write-LogArquivoDireto {
@@ -21559,7 +21559,7 @@ function Request-SenhaPreparador {
     $btnEntrar = New-ToolButton $dlgS "ENTRAR" 170 146 120 34 $Script:UiVerde $null ""
     $btnSairSenha = New-ToolButton $dlgS "SAIR" 300 146 80 34 $Script:UiCinza $null ""
     $btnEntrar.Add_Click({
-            if ($txtSenhaAbrir.Text.Trim() -eq $Script:SenhaPreparador) { $dlgS.DialogResult = 'OK'; $dlgS.Close(); return }
+            if ((Get-HashSha256 ([System.Text.Encoding]::UTF8.GetBytes($txtSenhaAbrir.Text.Trim()))) -eq $Script:SenhaPreparadorHash) { $dlgS.DialogResult = 'OK'; $dlgS.Close(); return }
             $Script:SenhaTentativas++
             if ($Script:SenhaTentativas -ge 3) {
                 Write-LogArquivoDireto "ERRO" "Senha de abertura: 3 tentativas erradas, o Preparador foi fechado"
@@ -21594,7 +21594,7 @@ $formWidth = if ($screen.Width -lt 1200) { $screen.Width - 50 } else { 1200 }
 $formHeight = if ($screen.Height -lt 900) { $screen.Height - 50 } else { 900 }
 
 $form = New-Object System.Windows.Forms.Form
-$form.Text = "Preparador XMenu – Suporte Técnico v5.66"
+$form.Text = "Preparador XMenu – Suporte Técnico v5.67"
 $form.Size = New-Object System.Drawing.Size($formWidth, $formHeight)
 $form.StartPosition = "CenterScreen"
 $form.BackColor = [System.Drawing.Color]::FromArgb(25, 25, 30); $form.ForeColor = 'White'
@@ -22518,7 +22518,7 @@ $bRam.Add_Click({ Show-LiberarMemoria })
 [void]$tbl.Controls.Add($bRam)
 
 # Mensagem de abertura: explica o programa para quem abre pela primeira vez
-Log-Message "INFO" "Preparador XMenu v5.66 - preparo e suporte de computadores com XMenu e NetPDV"
+Log-Message "INFO" "Preparador XMenu v5.67 - preparo e suporte de computadores com o sistema XMenu"
 foreach ($msgSenha in $Script:LogSenhaPendente) { Log-Message "INFO" $msgSenha }
 Log-Message "INFO" "Senha de abertura: acesso liberado"
 Log-Message "LOG" "==============================================================="
@@ -22530,7 +22530,8 @@ Log-Message "LOG" "  EXTERNOS ................... acesso remoto, Chrome, TEF HUB
 Log-Message "LOG" "  SUPORTE E DIAGNÓSTICO ...... impressoras, rede, SQL, backup, XMLs e reparos do Windows"
 Log-Message "LOG" "  Passe o mouse sobre um botão para ver o que ele faz antes de clicar."
 Log-Message "LOG" "---------------------------------------------------------------"
-Log-Message "LOG" "NOVO NA v5.66"
+Log-Message "LOG" "NOVO NA v5.67"
+Log-Message "SUCESSO" "  Segurança: a senha de abertura não fica mais escrita no código, que é público no GitHub (o programa guarda só o hash dela); a senha continua a mesma"
 Log-Message "SUCESSO" "  Suporte: o LIMPAR MEMÓRIA não faz mais a janela sumir: a limpeza roda em segundo plano (esvaziar muitos GB de cache leva alguns segundos e o Windows mostrava a janela como Não está respondendo), mostra o andamento e não deixa fechar a janela no meio"
 Log-Message "SUCESSO" "  Suporte: no Liberar Memória RAM os processos do Windows que podem ser encerrados aparecem no topo da lista e já marcados: é só clicar em ENCERRAR MARCADOS (o que for desmarcado continua desmarcado ao atualizar); os demais ficam abaixo só para consulta"
 Log-Message "SUCESSO" "  Suporte: novo botão Liberar Memória RAM: libera a RAM sem fechar nenhum programa (esvazia a memória parada dos programas abertos e o cache do Windows) e mostra o consumo de memória por programa"

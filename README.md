@@ -1,10 +1,12 @@
 # Preparador XMenu — Suporte Técnico
 
-Ferramenta em **PowerShell + Windows Forms** que prepara e dá suporte aos computadores que rodam **XMenu** e **NetPDV**. O técnico abre um único executável e tem, numa janela só, o preparo do Windows, os instaladores, os diagnósticos e os reparos que antes eram feitos à mão, um por um.
+Ferramenta em **PowerShell + Windows Forms** que prepara e dá suporte aos computadores que rodam o **sistema XMenu**. O técnico abre um único executável e tem, numa janela só, o preparo do Windows, os instaladores, os diagnósticos e os reparos que antes eram feitos à mão, um por um.
 
 O executável não carrega o programa dentro dele: a cada abertura ele baixa a versão mais recente do script direto deste repositório. Uma correção publicada aqui chega a todos os técnicos na próxima vez que eles abrirem o programa, sem precisar reenviar arquivo.
 
 Desenvolvido por **Vinicius Mazaroski**.
+
+![Janela principal do Preparador XMenu](Recursos/tela-principal.png)
 
 ---
 
@@ -83,8 +85,7 @@ Os arquivos do próprio programa vêm por endereço fixo de `raw.githubuserconte
 │   ├── TESTAR ANTES DE SUBIR.BAT   abre o XMenu ou o Revenda local (para testar antes de publicar)
 │   ├── CLIQUE AQUI.BAT             abre o XMenu local
 │   └── GIT_PUSH.bat                publica as alterações no GitHub
-├── Recursos/                       wallpapers, tutorial antigo e atalho de exemplo
-└── BKP/                            cópia de segurança dos scripts
+└── Recursos/                       wallpapers, tutorial antigo, atalhos de exemplo e a tela do programa
 ```
 
 ### ⚠️ Arquivos que não podem mudar de nome nem de lugar
