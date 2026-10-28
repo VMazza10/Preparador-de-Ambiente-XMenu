@@ -1,5 +1,5 @@
 ﻿# =============================================================================
-# PREPARADOR XMENU v5.67
+# PREPARADOR XMENU v5.68
 # Visual: Dashboard Moderno
 # Correcoes:
 #   - CRITICO: Removido DoEvents do loop de evento de download (causava crash).
@@ -21594,7 +21594,7 @@ $formWidth = if ($screen.Width -lt 1200) { $screen.Width - 50 } else { 1200 }
 $formHeight = if ($screen.Height -lt 900) { $screen.Height - 50 } else { 900 }
 
 $form = New-Object System.Windows.Forms.Form
-$form.Text = "Preparador XMenu – Suporte Técnico v5.67"
+$form.Text = "Preparador XMenu – Suporte Técnico v5.68"
 $form.Size = New-Object System.Drawing.Size($formWidth, $formHeight)
 $form.StartPosition = "CenterScreen"
 $form.BackColor = [System.Drawing.Color]::FromArgb(25, 25, 30); $form.ForeColor = 'White'
@@ -22518,7 +22518,7 @@ $bRam.Add_Click({ Show-LiberarMemoria })
 [void]$tbl.Controls.Add($bRam)
 
 # Mensagem de abertura: explica o programa para quem abre pela primeira vez
-Log-Message "INFO" "Preparador XMenu v5.67 - preparo e suporte de computadores com o sistema XMenu"
+Log-Message "INFO" "Preparador XMenu v5.68 - preparo e suporte de computadores com o sistema XMenu"
 foreach ($msgSenha in $Script:LogSenhaPendente) { Log-Message "INFO" $msgSenha }
 Log-Message "INFO" "Senha de abertura: acesso liberado"
 Log-Message "LOG" "==============================================================="
@@ -22530,7 +22530,7 @@ Log-Message "LOG" "  EXTERNOS ................... acesso remoto, Chrome, TEF HUB
 Log-Message "LOG" "  SUPORTE E DIAGNÓSTICO ...... impressoras, rede, SQL, backup, XMLs e reparos do Windows"
 Log-Message "LOG" "  Passe o mouse sobre um botão para ver o que ele faz antes de clicar."
 Log-Message "LOG" "---------------------------------------------------------------"
-Log-Message "LOG" "NOVO NA v5.67"
+Log-Message "LOG" "NOVO NA v5.68"
 Log-Message "SUCESSO" "  Segurança: a senha de abertura não fica mais escrita no código, que é público no GitHub (o programa guarda só o hash dela); a senha continua a mesma"
 Log-Message "SUCESSO" "  Suporte: o LIMPAR MEMÓRIA não faz mais a janela sumir: a limpeza roda em segundo plano (esvaziar muitos GB de cache leva alguns segundos e o Windows mostrava a janela como Não está respondendo), mostra o andamento e não deixa fechar a janela no meio"
 Log-Message "SUCESSO" "  Suporte: no Liberar Memória RAM os processos do Windows que podem ser encerrados aparecem no topo da lista e já marcados: é só clicar em ENCERRAR MARCADOS (o que for desmarcado continua desmarcado ao atualizar); os demais ficam abaixo só para consulta"

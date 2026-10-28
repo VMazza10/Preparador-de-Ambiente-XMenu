@@ -1,2 +1,6 @@
 # Estado local de ferramentas de desenvolvimento (nao faz parte do programa)
 .claude-flow/
+
+# Arquivos pessoais na pasta: o GIT_PUSH.bat usa "git add ." e o repositorio e publico
+MEMORY.md
+Formulários de consentimento sobre a mesa.png
