@@ -1,5 +1,5 @@
 ﻿# =============================================================================
-# PREPARADOR XMENU v5.68
+# PREPARADOR XMENU v5.69
 # Visual: Dashboard Moderno
 # Correcoes:
 #   - CRITICO: Removido DoEvents do loop de evento de download (causava crash).
@@ -19583,10 +19583,12 @@ Tempo:     minimo $mn ms | medio $([Math]::Round($med, 1)) ms | maximo $mx ms
 # 3.45 FECHAR CONCENTRADOR E NETSTART (usado antes de instalar o TecnoSpeed)
 # -----------------------------------------------------------------------------
 function Close-NetControllSystem {
-    Log-Message "INFO" "Fechando Concentrador e NetStart..."
+    Log-Message "INFO" "Fechando todos os programas NetControll..."
     $closed = @()
 
-    foreach ($name in @("Concentrador", "NetStart")) {
+    # XBot*/XTag*: nome do processo varia conforme a versao do instalador (Get-Process aceita curinga)
+    foreach ($name in @("Concentrador", "NetStart", "NetServidor", "NetTerminal", "NetPrint", "NetPDV", "LinkXMenu", "XMenu",
+            "AutoAtendimento", "AutoAtendimentoBalanca", "TabletCardapio", "KDSMonitor", "XBot*", "XTag*")) {
         Get-Process -Name $name -ErrorAction SilentlyContinue | ForEach-Object {
             try {
                 Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue
@@ -19601,7 +19603,7 @@ function Close-NetControllSystem {
         Log-Message "SUCESSO" "Programas fechados: $($closed -join ', ')"
     }
     else {
-        Log-Message "INFO" "Concentrador/NetStart nao estavam abertos."
+        Log-Message "INFO" "Nenhum programa NetControll estava aberto."
     }
     Wait-UI 0.5
 }
@@ -21594,7 +21596,7 @@ $formWidth = if ($screen.Width -lt 1200) { $screen.Width - 50 } else { 1200 }
 $formHeight = if ($screen.Height -lt 900) { $screen.Height - 50 } else { 900 }
 
 $form = New-Object System.Windows.Forms.Form
-$form.Text = "Preparador XMenu – Suporte Técnico v5.68"
+$form.Text = "Preparador XMenu – Suporte Técnico v5.69"
 $form.Size = New-Object System.Drawing.Size($formWidth, $formHeight)
 $form.StartPosition = "CenterScreen"
 $form.BackColor = [System.Drawing.Color]::FromArgb(25, 25, 30); $form.ForeColor = 'White'
@@ -22518,7 +22520,7 @@ $bRam.Add_Click({ Show-LiberarMemoria })
 [void]$tbl.Controls.Add($bRam)
 
 # Mensagem de abertura: explica o programa para quem abre pela primeira vez
-Log-Message "INFO" "Preparador XMenu v5.68 - preparo e suporte de computadores com o sistema XMenu"
+Log-Message "INFO" "Preparador XMenu v5.69 - preparo e suporte de computadores com o sistema XMenu"
 foreach ($msgSenha in $Script:LogSenhaPendente) { Log-Message "INFO" $msgSenha }
 Log-Message "INFO" "Senha de abertura: acesso liberado"
 Log-Message "LOG" "==============================================================="
@@ -22530,7 +22532,8 @@ Log-Message "LOG" "  EXTERNOS ................... acesso remoto, Chrome, TEF HUB
 Log-Message "LOG" "  SUPORTE E DIAGNÓSTICO ...... impressoras, rede, SQL, backup, XMLs e reparos do Windows"
 Log-Message "LOG" "  Passe o mouse sobre um botão para ver o que ele faz antes de clicar."
 Log-Message "LOG" "---------------------------------------------------------------"
-Log-Message "LOG" "NOVO NA v5.68"
+Log-Message "LOG" "NOVO NA v5.69"
+Log-Message "SUCESSO" "  Programas NetControll: o botão TecnoSpeed NFCe agora fecha todos os programas NetControll antes de instalar (antes fechava só o Concentrador e o NetStart)"
 Log-Message "SUCESSO" "  Segurança: a senha de abertura não fica mais escrita no código, que é público no GitHub (o programa guarda só o hash dela); a senha continua a mesma"
 Log-Message "SUCESSO" "  Suporte: o LIMPAR MEMÓRIA não faz mais a janela sumir: a limpeza roda em segundo plano (esvaziar muitos GB de cache leva alguns segundos e o Windows mostrava a janela como Não está respondendo), mostra o andamento e não deixa fechar a janela no meio"
 Log-Message "SUCESSO" "  Suporte: no Liberar Memória RAM os processos do Windows que podem ser encerrados aparecem no topo da lista e já marcados: é só clicar em ENCERRAR MARCADOS (o que for desmarcado continua desmarcado ao atualizar); os demais ficam abaixo só para consulta"
