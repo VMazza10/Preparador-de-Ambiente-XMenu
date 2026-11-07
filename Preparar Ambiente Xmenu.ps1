@@ -1,5 +1,5 @@
 ﻿# =============================================================================
-# PREPARADOR XMENU v5.71
+# PREPARADOR XMENU v5.72
 # Visual: Dashboard Moderno
 # Correcoes:
 #   - CRITICO: Removido DoEvents do loop de evento de download (causava crash).
@@ -21596,7 +21596,7 @@ $formWidth = if ($screen.Width -lt 1200) { $screen.Width - 50 } else { 1200 }
 $formHeight = if ($screen.Height -lt 900) { $screen.Height - 50 } else { 900 }
 
 $form = New-Object System.Windows.Forms.Form
-$form.Text = "Preparador XMenu – Suporte Técnico v5.71"
+$form.Text = "Preparador XMenu – Suporte Técnico v5.72"
 $form.Size = New-Object System.Drawing.Size($formWidth, $formHeight)
 $form.StartPosition = "CenterScreen"
 $form.BackColor = [System.Drawing.Color]::FromArgb(25, 25, 30); $form.ForeColor = 'White'
@@ -22206,17 +22206,58 @@ function Add-Btn {
     elseif ($U -eq "PDV-EDGE-SHORTCUT") {
         $b.Add_Click({ Install-PdvEdgeShortcut $this })
     }
+    elseif ($U -eq "VIDEOS-TUTORIAIS") {
+        $b.Add_Click({ Open-VideosTutoriais $this })
+    }
     else {
-        # Video (.mp4): so salva e abre a pasta com o arquivo selecionado (nao executa nada)
-        $b.Tag = "$U|$F"; $b.Add_Click({
-                $d = $this.Tag.Split('|')
-                $Script:DownloadSomenteSalvar = $d[1].EndsWith('.mp4')
-                try { Start-Download $d[0] $d[1] $this } finally { $Script:DownloadSomenteSalvar = $false }
-            })
+        $b.Tag = "$U|$F"; $b.Add_Click({ $d = $this.Tag.Split('|'); Start-Download $d[0] $d[1] $this })
         Add-CopiarLinkAoBotao $b $U $T
     }
     [void]$tbl.Controls.Add($b)
     $null = $b
+}
+
+# Videos passo a passo para enviar ao cliente: ficam na pasta Videos-Tutoriais do repositorio.
+# Video novo: colocar o arquivo na pasta e acrescentar uma linha em $videos (a janela cresce sozinha).
+function Open-VideosTutoriais {
+    param($Button)
+    $base = "https://raw.githubusercontent.com/VMazza10/Preparador-de-Ambiente-XMenu/main/Videos-Tutoriais"
+    $videos = @(
+        @{ Name = "Como alterar o preço de um produto"; Url = "$base/como-alterar-preco-de-produto.mp4"; File = "Como alterar o preço de um produto - XMenu.mp4" },
+        @{ Name = "Como ativar NFC-e OFF (contingência)"; Url = "$base/como-ativar-nfce-off-contingencia.mp4"; File = "Como ativar NFC-e OFF contingência.mp4" },
+        @{ Name = "Arquivos fiscais - passo a passo"; Url = "$base/arquivos-fiscais-passo-a-passo.mp4"; File = "Arquivos fiscais passo a passo.mp4" }
+    )
+
+    $fVid = New-Object System.Windows.Forms.Form
+    $fVid.Text = "Vídeos Tutoriais"; $fVid.ClientSize = "384,$(60 + 44 * $videos.Count)"; $fVid.StartPosition = 'CenterParent'
+    $fVid.BackColor = [System.Drawing.Color]::FromArgb(30, 30, 30); $fVid.ForeColor = 'White'
+    $fVid.FormBorderStyle = 'FixedDialog'; $fVid.MaximizeBox = $false
+    $fVid.Add_Activated({ Invoke-VoltarJanelaMinimizada $this })
+
+    $lbl = New-Object System.Windows.Forms.Label; $lbl.Text = "Escolha o vídeo para baixar e enviar ao cliente:"; $lbl.Location = '20,18'; $lbl.AutoSize = $true
+    [void]$fVid.Controls.Add($lbl)
+
+    $y = 46
+    foreach ($v in $videos) {
+        $bV = New-Object System.Windows.Forms.Button
+        $bV.Text = $v.Name; $bV.Tag = $v; $bV.Location = "20,$y"; $bV.Size = '344,36'
+        $bV.BackColor = [System.Drawing.Color]::FromArgb(14, 88, 62); $bV.ForeColor = 'White'; $bV.FlatStyle = 'Flat'; $bV.FlatAppearance.BorderSize = 0
+        $bV.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold); $bV.Cursor = 'Hand'
+        $bV.Add_Click({ $fVid.Tag = $this.Tag; $fVid.DialogResult = 'OK'; $fVid.Close() })
+        [void]$fVid.Controls.Add($bV)
+        $y += 44
+    }
+
+    $fVid.Add_Shown({ try { Set-JanelaAdaptavel $this | Out-Null } catch {} })
+    [void]$fVid.ShowDialog()
+    if ($fVid.DialogResult -eq 'OK' -and $fVid.Tag) {
+        # O mesmo botao baixa varios videos: limpa o resultado do anterior (senao o texto acumula "✔ ✔")
+        Clear-ButtonDone -Button $Button
+        $Button.Text = "Vídeos Tutoriais"
+        $Script:DownloadSomenteSalvar = $true
+        try { Start-Download $fVid.Tag.Url $fVid.Tag.File $Button }
+        finally { $Script:DownloadSomenteSalvar = $false }
+    }
 }
 
 $colorBlue = [System.Drawing.Color]::FromArgb(22, 52, 41)
@@ -22293,12 +22334,8 @@ Add-Btn "Balança Teste" "" "https://github.com/VMazza10/Preparador-de-Ambiente-
 Add-Btn "Driver Balança Serial PCI (ZIP)" "" "https://drive.usercontent.google.com/download?id=1P2CH59rEporytibv32tMRsdX6uXby2p3&export=download&confirm=t" "Driver_Multi_Serial_PCI.zip" -Help "Driver da placa multi serial PCI usada para ligar a balança na porta serial. Baixa do Google Drive (120 MB) e extrai a pasta automaticamente."
 # Instalador oficial da Gertec (assinado por GERTEC BRASIL LTDA), o mais novo do Download Center para os PIN Pads de mesa
 Add-Btn "Driver PIN Pad Gertec (3.0.0.4)" "" "https://www.gertec.com.br/wp-content/uploads/2025/01/Gertec-Full-Installer_3.0.0.4.zip" "Gertec_PinPad_Driver_3.0.0.4.zip" -Help "Driver oficial da Gertec (Full Installer 3.0.0.4) para os PIN Pads PPC910, PPC920, PPC930, PPC940, PPC950 e PPC960. Baixa do site da Gertec (1 MB), extrai e abre a pasta: é só rodar o Gertec-Full-Installer. Os PIN Pads móveis MP5 e MP15 usam outro instalador (2.2.2.0, no site da Gertec)."
-
-Add-Title "VÍDEOS TUTORIAIS"
-$urlVideos = "https://raw.githubusercontent.com/VMazza10/Preparador-de-Ambiente-XMenu/main/Videos-Tutoriais"
-Add-Btn "Como alterar o preço de um produto" "" "$urlVideos/como-alterar-preco-de-produto.mp4" "Como alterar o preço de um produto - XMenu.mp4" -Color $colorBlue -Help "Vídeo passo a passo para o cliente. Baixa e abre a pasta com o vídeo selecionado, pronto para enviar."
-Add-Btn "Como ativar NFC-e OFF (contingência)" "" "$urlVideos/como-ativar-nfce-off-contingencia.mp4" "Como ativar NFC-e OFF contingência.mp4" -Color $colorBlue -Help "Vídeo passo a passo para o cliente. Baixa e abre a pasta com o vídeo selecionado, pronto para enviar."
-Add-Btn "Arquivos fiscais - passo a passo" "" "$urlVideos/arquivos-fiscais-passo-a-passo.mp4" "Arquivos fiscais passo a passo.mp4" -Color $colorBlue -Help "Vídeo passo a passo para o cliente. Baixa e abre a pasta com o vídeo selecionado, pronto para enviar."
+# Cor propria: nao e instalador, e material para enviar ao cliente
+Add-Btn "Vídeos Tutoriais" "" "VIDEOS-TUTORIAIS" "" -Color ([System.Drawing.Color]::FromArgb(62, 56, 130)) -Help "Mostra os vídeos passo a passo para enviar ao cliente. Escolha um: ele é baixado e a pasta abre com o vídeo selecionado."
 
 $colorDiag = [System.Drawing.Color]::FromArgb(30, 80, 30)
 $colorFix = [System.Drawing.Color]::FromArgb(100, 30, 30)
@@ -22531,7 +22568,7 @@ $bRam.Add_Click({ Show-LiberarMemoria })
 [void]$tbl.Controls.Add($bRam)
 
 # Mensagem de abertura: explica o programa para quem abre pela primeira vez
-Log-Message "INFO" "Preparador XMenu v5.71 - preparo e suporte de computadores com o sistema XMenu"
+Log-Message "INFO" "Preparador XMenu v5.72 - preparo e suporte de computadores com o sistema XMenu"
 foreach ($msgSenha in $Script:LogSenhaPendente) { Log-Message "INFO" $msgSenha }
 Log-Message "INFO" "Senha de abertura: acesso liberado"
 Log-Message "LOG" "==============================================================="
@@ -22543,9 +22580,8 @@ Log-Message "LOG" "  EXTERNOS ................... acesso remoto, Chrome, TEF HUB
 Log-Message "LOG" "  SUPORTE E DIAGNÓSTICO ...... impressoras, rede, SQL, backup, XMLs e reparos do Windows"
 Log-Message "LOG" "  Passe o mouse sobre um botão para ver o que ele faz antes de clicar."
 Log-Message "LOG" "---------------------------------------------------------------"
-Log-Message "LOG" "NOVO NA v5.71"
-Log-Message "SUCESSO" "  Vídeos tutoriais: a seção agora fica logo abaixo de EXTERNOS"
-Log-Message "SUCESSO" "  Vídeos tutoriais: nova seção VÍDEOS TUTORIAIS com o passo a passo para enviar ao cliente (alterar preço de produto, NFC-e OFF contingência e arquivos fiscais); o botão baixa o vídeo e abre a pasta com ele selecionado"
+Log-Message "LOG" "NOVO NA v5.72"
+Log-Message "SUCESSO" "  Vídeos tutoriais: novo botão Vídeos Tutoriais em EXTERNOS com o passo a passo para enviar ao cliente (alterar preço de produto, NFC-e OFF contingência e arquivos fiscais); escolha o vídeo e ele é baixado e a pasta abre com ele selecionado"
 Log-Message "SUCESSO" "  Programas NetControll: o botão TecnoSpeed NFCe agora fecha todos os programas NetControll antes de instalar (antes fechava só o Concentrador e o NetStart)"
 Log-Message "SUCESSO" "  Segurança: a senha de abertura não fica mais escrita no código, que é público no GitHub (o programa guarda só o hash dela); a senha continua a mesma"
 Log-Message "SUCESSO" "  Suporte: o LIMPAR MEMÓRIA não faz mais a janela sumir: a limpeza roda em segundo plano (esvaziar muitos GB de cache leva alguns segundos e o Windows mostrava a janela como Não está respondendo), mostra o andamento e não deixa fechar a janela no meio"
