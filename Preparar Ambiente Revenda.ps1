@@ -1,6 +1,6 @@
 ﻿# =============================================================================
 # PREPARADOR XMENU - VERSAO REVENDA
-# Baseado na v5.70
+# Baseado na v5.71
 # Alteracoes Revenda:
 #   - Wallpaper: fundo_revenda.png
 #   - Removido: Atalhos de Suporte e Pasta Netcontroll
@@ -21514,7 +21514,7 @@ $formWidth = if ($screen.Width -lt 1000) { 900 } else { 1000 }
 $formHeight = if ($screen.Height -lt 800) { 700 } else { 800 }
 
 $form = New-Object System.Windows.Forms.Form
-$form.Text = "Preparador XMenu – Suporte Técnico v5.70 - REVENDA"
+$form.Text = "Preparador XMenu – Suporte Técnico v5.71 - REVENDA"
 $form.Size = New-Object System.Drawing.Size($formWidth, $formHeight)
 $form.StartPosition = "CenterScreen"
 $form.BackColor = [System.Drawing.Color]::FromArgb(25, 25, 30); $form.ForeColor = 'White'
@@ -22168,12 +22168,6 @@ Add-Btn "Cardápio Tablet (ZIP)" "" "" "" $true "Tablet" -Help "Versões compact
 Add-Btn "Totem Auto-Atendimento (ZIP)" "" "" "" $true "Totem" -Help "Versões compactadas para o sistema de Totem (Auto-atendimento). Nas abas Totem 5.0 e Pesável 5.0 (Totem Pesável, com balança): instalador, executável e APK, com copiar link e versão manual."
 Add-Btn "KDS Monitor (5.0)" "" "" "" $true "KDS" -Help "KDS Monitor 5.0 (monitor da cozinha): instalador, executável ou APK (Android), com copiar link e versão manual. O instalador e o executável abrem sozinhos; o APK só baixa e abre a pasta."
 
-Add-Title "VÍDEOS TUTORIAIS (ENVIAR AO CLIENTE)"
-$urlVideos = "https://raw.githubusercontent.com/VMazza10/Preparador-de-Ambiente-XMenu/main/Videos-Tutoriais"
-Add-Btn "Como alterar o preço de um produto" "" "$urlVideos/como-alterar-preco-de-produto.mp4" "Como alterar o preço de um produto - XMenu.mp4" -Color $colorBlue -Help "Vídeo passo a passo para o cliente. Baixa e abre a pasta com o vídeo selecionado, pronto para enviar."
-Add-Btn "Como ativar NFC-e OFF (contingência)" "" "$urlVideos/como-ativar-nfce-off-contingencia.mp4" "Como ativar NFC-e OFF contingência.mp4" -Color $colorBlue -Help "Vídeo passo a passo para o cliente. Baixa e abre a pasta com o vídeo selecionado, pronto para enviar."
-Add-Btn "Arquivos fiscais - passo a passo" "" "$urlVideos/arquivos-fiscais-passo-a-passo.mp4" "Arquivos fiscais passo a passo.mp4" -Color $colorBlue -Help "Vídeo passo a passo para o cliente. Baixa e abre a pasta com o vídeo selecionado, pronto para enviar."
-
 Add-Title "EXTERNOS"
 
 $bTecno = New-Object System.Windows.Forms.Button; $bTecno.Height = 50; $bTecno.Dock = 'Top'
@@ -22217,6 +22211,12 @@ Add-Btn "Balança Teste" "" "https://github.com/VMazza10/Preparador-de-Ambiente-
 Add-Btn "Driver Balança Serial PCI (ZIP)" "" "https://drive.usercontent.google.com/download?id=1P2CH59rEporytibv32tMRsdX6uXby2p3&export=download&confirm=t" "Driver_Multi_Serial_PCI.zip" -Help "Driver da placa multi serial PCI usada para ligar a balança na porta serial. Baixa do Google Drive (120 MB) e extrai a pasta automaticamente."
 # Instalador oficial da Gertec (assinado por GERTEC BRASIL LTDA), o mais novo do Download Center para os PIN Pads de mesa
 Add-Btn "Driver PIN Pad Gertec (3.0.0.4)" "" "https://www.gertec.com.br/wp-content/uploads/2025/01/Gertec-Full-Installer_3.0.0.4.zip" "Gertec_PinPad_Driver_3.0.0.4.zip" -Help "Driver oficial da Gertec (Full Installer 3.0.0.4) para os PIN Pads PPC910, PPC920, PPC930, PPC940, PPC950 e PPC960. Baixa do site da Gertec (1 MB), extrai e abre a pasta: é só rodar o Gertec-Full-Installer. Os PIN Pads móveis MP5 e MP15 usam outro instalador (2.2.2.0, no site da Gertec)."
+
+Add-Title "VÍDEOS TUTORIAIS"
+$urlVideos = "https://raw.githubusercontent.com/VMazza10/Preparador-de-Ambiente-XMenu/main/Videos-Tutoriais"
+Add-Btn "Como alterar o preço de um produto" "" "$urlVideos/como-alterar-preco-de-produto.mp4" "Como alterar o preço de um produto - XMenu.mp4" -Color $colorBlue -Help "Vídeo passo a passo para o cliente. Baixa e abre a pasta com o vídeo selecionado, pronto para enviar."
+Add-Btn "Como ativar NFC-e OFF (contingência)" "" "$urlVideos/como-ativar-nfce-off-contingencia.mp4" "Como ativar NFC-e OFF contingência.mp4" -Color $colorBlue -Help "Vídeo passo a passo para o cliente. Baixa e abre a pasta com o vídeo selecionado, pronto para enviar."
+Add-Btn "Arquivos fiscais - passo a passo" "" "$urlVideos/arquivos-fiscais-passo-a-passo.mp4" "Arquivos fiscais passo a passo.mp4" -Color $colorBlue -Help "Vídeo passo a passo para o cliente. Baixa e abre a pasta com o vídeo selecionado, pronto para enviar."
 
 $colorDiag = [System.Drawing.Color]::FromArgb(30, 80, 30)
 $colorFix = [System.Drawing.Color]::FromArgb(100, 30, 30)
@@ -22446,7 +22446,7 @@ $bRam.Add_Click({ Show-LiberarMemoria })
 [void]$tbl.Controls.Add($bRam)
 
 # Mensagem de abertura: explica o programa para quem abre pela primeira vez
-Log-Message "INFO" "Preparador XMenu v5.70 - REVENDA - preparo e suporte de computadores com o sistema XMenu"
+Log-Message "INFO" "Preparador XMenu v5.71 - REVENDA - preparo e suporte de computadores com o sistema XMenu"
 foreach ($msgSenha in $Script:LogSenhaPendente) { Log-Message "INFO" $msgSenha }
 Log-Message "INFO" "Senha de abertura: acesso liberado"
 Log-Message "LOG" "==============================================================="
@@ -22458,7 +22458,8 @@ Log-Message "LOG" "  EXTERNOS ................... acesso remoto, Chrome, TEF HUB
 Log-Message "LOG" "  SUPORTE E DIAGNÓSTICO ...... impressoras, rede, SQL, backup, XMLs e reparos do Windows"
 Log-Message "LOG" "  Passe o mouse sobre um botão para ver o que ele faz antes de clicar."
 Log-Message "LOG" "---------------------------------------------------------------"
-Log-Message "LOG" "NOVO NA v5.70"
+Log-Message "LOG" "NOVO NA v5.71"
+Log-Message "SUCESSO" "  Vídeos tutoriais: a seção agora fica logo abaixo de EXTERNOS"
 Log-Message "SUCESSO" "  Vídeos tutoriais: nova seção VÍDEOS TUTORIAIS com o passo a passo para enviar ao cliente (alterar preço de produto, NFC-e OFF contingência e arquivos fiscais); o botão baixa o vídeo e abre a pasta com ele selecionado"
 Log-Message "SUCESSO" "  Programas NetControll: o botão TecnoSpeed NFCe agora fecha todos os programas NetControll antes de instalar (antes fechava só o Concentrador e o NetStart)"
 Log-Message "SUCESSO" "  Segurança: a senha de abertura não fica mais escrita no código, que é público no GitHub (o programa guarda só o hash dela); a senha continua a mesma"
