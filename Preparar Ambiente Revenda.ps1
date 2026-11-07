@@ -1,6 +1,6 @@
 ﻿# =============================================================================
 # PREPARADOR XMENU - VERSAO REVENDA
-# Baseado na v5.73
+# Baseado na v5.74
 # Alteracoes Revenda:
 #   - Wallpaper: fundo_revenda.png
 #   - Removido: Atalhos de Suporte e Pasta Netcontroll
@@ -881,6 +881,27 @@ function Set-RecuperacaoSpooler {
     return ($p.ExitCode -eq 0)
 }
 
+function Start-LpdAposSpooler {
+    # O LPD depende do Spooler: parar o Spooler derruba o LPD junto e o Windows nao o religa
+    $lpd = Get-Service LPDSVC -ErrorAction SilentlyContinue
+    if (-not $lpd -or $lpd.StartType -ne 'Automatic' -or $lpd.Status -eq 'Running') { return }
+    try {
+        Start-Service LPDSVC -ErrorAction Stop
+        Log-Message "INFO" "LPD religado (ele para junto quando o Spooler reinicia)"
+    }
+    catch { Log-Message "ERRO" "O LPD não voltou depois de reiniciar o Spooler: $($_.Exception.Message)" }
+}
+
+function Register-VigiaLpd {
+    # Qualquer programa que reinicia o Spooler deixa o LPD parado, e a recuperacao do servico so age quando ele trava:
+    # a tarefa confere a cada 5 minutos e religa o LPD parado que esta com inicio automatico
+    $cmd = '$s = Get-Service LPDSVC -ErrorAction SilentlyContinue; if ($s.StartType -eq ''Automatic'' -and $s.Status -ne ''Running'') { Start-Service LPDSVC }'
+    $acao = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument "-NoProfile -WindowStyle Hidden -Command `"$cmd`""
+    $gatilho = New-ScheduledTaskTrigger -Once -At (Get-Date) -RepetitionInterval (New-TimeSpan -Minutes 5)
+    $conf = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Minutes 2)
+    Register-ScheduledTask -TaskName 'Preparador XMenu - Religar LPD' -Action $acao -Trigger $gatilho -Settings $conf -User 'SYSTEM' -RunLevel Highest -Force -ErrorAction Stop | Out-Null
+}
+
 function Show-EscolhaPortaUsb {
     # Mais de uma impressora ou mais de uma porta: o tecnico escolhe qual vai onde.
     # Devolve @{ Nome; De; Para } so das que ganharam porta.
@@ -1066,6 +1087,7 @@ function Get-ServicosRelevantes {
             elseif ($s.Name -eq 'SQLWriter') { $grupo = "SQL Writer (backup)" }
             elseif ($s.Name -like 'SQLAgent$*' -or $s.Name -eq 'SQLSERVERAGENT') { $grupo = "SQL Agent (tarefas)" }
             elseif ($s.Name -eq 'Spooler') { $grupo = "Spooler de impressao" }
+            elseif ($s.Name -eq 'LPDSVC') { $grupo = "LPD (impressora LPR na rede)" }
             elseif ($s.Name -match 'netcontroll|concentrador|xmenu|netpdv|xbot' -or
                 $s.DisplayName -match 'NetControll|Concentrador|XMenu|NetPDV|XBot') { $grupo = "Sistema NetControll" }
 
@@ -12714,6 +12736,7 @@ function Invoke-SpoolerReset {
         Log-Message "CMD" "COMANDO: Start-Service Spooler"
         Start-Service Spooler
         Log-Message "SUCESSO" "Spooler reiniciado com sucesso."
+        Start-LpdAposSpooler
     }
     catch {
         Log-Message "ERRO" "Falha ao resetar spooler: $_"
@@ -16037,6 +16060,7 @@ function Remove-PortasLprRegistro {
     }
     if ($apagadas.Count -gt 0) {
         Restart-Service -Name Spooler -Force -ErrorAction Stop
+        Start-LpdAposSpooler
         Remove-LprMac -Portas $apagadas
     }
     return $apagadas
@@ -16085,12 +16109,14 @@ function Update-PortaLprCompleto {
         # o spooler nao aceita duas portas com o mesmo nome
         [void](& $trocaLpr -SoOIp)
         Restart-Service -Name Spooler -Force -ErrorAction Stop
+        Start-LpdAposSpooler
         return @{ Porta = $Porta; Impressoras = $impressoras; Aviso = "Já existe outra porta chamada ${novoNome}: esta manteve o nome $Porta, mas já aponta para $Servidor." }
     }
     # a porta com o nome novo pode ter sobrado de uma troca antiga: e reaproveitada e nunca apagada no desfazer
     $jaExistia = ($novoNome -ne $Porta -and $nomesMesmoTipo -contains $novoNome)
     $nova = & $trocaLpr
     Restart-Service -Name Spooler -Force -ErrorAction Stop
+    Start-LpdAposSpooler
     $res = @{ Porta = $nova; Impressoras = $impressoras; Aviso = "" }
     if ($nova -eq $Porta) { return $res }
 
@@ -16110,6 +16136,7 @@ function Update-PortaLprCompleto {
     [void](& $trocaLpr -SoOIp)
     if (-not $jaExistia) { & $apagaLpr $nova }
     Restart-Service -Name Spooler -Force -ErrorAction Stop
+    Start-LpdAposSpooler
     $res.Porta = $Porta
     $res.Aviso = "O Windows não deixou renomear a porta: ela manteve o nome $Porta, mas já aponta para $Servidor."
     return $res
@@ -18722,6 +18749,7 @@ function Show-PrinterManager {
 
                         Log-Message "INFO" "Reiniciando spooler para aplicar registros..."
                         Restart-Service -Name Spooler -Force
+                        Start-LpdAposSpooler
                         Log-Message "SUCESSO" "Registros RPC aplicados, Firewall liberado e Spooler reiniciado com sucesso!"
 
                         $netPath = "\\$env:COMPUTERNAME\$shareName"
@@ -18944,6 +18972,11 @@ function Show-PrinterManager {
                 # Se o servico cair no meio do movimento, o Windows sobe sozinho
                 sc.exe failure LPDSVC reset= 86400 actions= restart/5000/restart/10000/restart/30000 | Out-Null
 
+                # A recuperacao acima so age quando o LPD trava; parado junto com o Spooler, so a tarefa religa
+                Log-Message "INFO" "Criando a tarefa que religa o LPD sozinho (confere a cada 5 minutos)..."
+                try { Register-VigiaLpd; Log-Message "SUCESSO" "Tarefa 'Preparador XMenu - Religar LPD' criada" }
+                catch { Log-Message "ERRO" "Não foi possível criar a tarefa que religa o LPD: $($_.Exception.Message)" }
+
                 Log-Message "INFO" "Adicionando regra de Firewall..."
                 # Apaga antes de criar: senao cada clique empilha uma regra igual
                 netsh advfirewall firewall delete rule name="LPD Porta 515" 2>&1 | Out-Null
@@ -19130,7 +19163,8 @@ function Show-PrinterManager {
 
                 Log-Message "INFO" "Reiniciando spooler..."
                 Restart-Service -Name Spooler -Force
-                
+                Start-LpdAposSpooler
+
                 Log-Message "SUCESSO" "Cliente LPR ativado com sucesso!"
                 
                 $colinha = @"
@@ -21514,7 +21548,7 @@ $formWidth = if ($screen.Width -lt 1000) { 900 } else { 1000 }
 $formHeight = if ($screen.Height -lt 800) { 700 } else { 800 }
 
 $form = New-Object System.Windows.Forms.Form
-$form.Text = "Preparador XMenu – Suporte Técnico v5.73 - REVENDA"
+$form.Text = "Preparador XMenu – Suporte Técnico v5.74 - REVENDA"
 $form.Size = New-Object System.Drawing.Size($formWidth, $formHeight)
 $form.StartPosition = "CenterScreen"
 $form.BackColor = [System.Drawing.Color]::FromArgb(25, 25, 30); $form.ForeColor = 'White'
@@ -22483,7 +22517,7 @@ $bRam.Add_Click({ Show-LiberarMemoria })
 [void]$tbl.Controls.Add($bRam)
 
 # Mensagem de abertura: explica o programa para quem abre pela primeira vez
-Log-Message "INFO" "Preparador XMenu v5.73 - REVENDA - preparo e suporte de computadores com o sistema XMenu"
+Log-Message "INFO" "Preparador XMenu v5.74 - REVENDA - preparo e suporte de computadores com o sistema XMenu"
 foreach ($msgSenha in $Script:LogSenhaPendente) { Log-Message "INFO" $msgSenha }
 Log-Message "INFO" "Senha de abertura: acesso liberado"
 Log-Message "LOG" "==============================================================="
@@ -22495,7 +22529,10 @@ Log-Message "LOG" "  EXTERNOS ................... acesso remoto, Chrome, TEF HUB
 Log-Message "LOG" "  SUPORTE E DIAGNÓSTICO ...... impressoras, rede, SQL, backup, XMLs e reparos do Windows"
 Log-Message "LOG" "  Passe o mouse sobre um botão para ver o que ele faz antes de clicar."
 Log-Message "LOG" "---------------------------------------------------------------"
-Log-Message "LOG" "NOVO NA v5.73"
+Log-Message "LOG" "NOVO NA v5.74"
+Log-Message "SUCESSO" "  Impressoras: reiniciar o Spooler (botão REINICIAR SPOOLER, troca ou remoção de porta LPR, compartilhar impressora, ativar o cliente LPR) agora religa o LPD, que parava junto e ficava parado"
+Log-Message "SUCESSO" "  Impressoras: o ATIVAR LPD cria a tarefa 'Preparador XMenu - Religar LPD', que confere a cada 5 minutos e religa o LPD se ele parar por qualquer motivo"
+Log-Message "SUCESSO" "  Serviços: o LPD aparece no painel de serviços, para ver e iniciar dali"
 Log-Message "SUCESSO" "  Vídeos tutoriais: vídeo da NFC-e atualizado (agora Como ativar NFC-e OFF e ON)"
 Log-Message "SUCESSO" "  Vídeos tutoriais: novo botão Vídeos Tutoriais em EXTERNOS com o passo a passo para enviar ao cliente (alterar preço de produto, NFC-e OFF e ON e arquivos fiscais); escolha o vídeo e ele é baixado e a pasta abre com ele selecionado"
 Log-Message "SUCESSO" "  Programas NetControll: o botão TecnoSpeed NFCe agora fecha todos os programas NetControll antes de instalar (antes fechava só o Concentrador e o NetStart)"
