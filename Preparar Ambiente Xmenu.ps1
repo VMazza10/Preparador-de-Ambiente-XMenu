@@ -1,5 +1,5 @@
 ﻿# =============================================================================
-# PREPARADOR XMENU v5.76
+# PREPARADOR XMENU v5.77
 # Visual: Dashboard Moderno
 # Correcoes:
 #   - CRITICO: Removido DoEvents do loop de evento de download (causava crash).
@@ -12172,6 +12172,216 @@ function Set-NetStartInicializacao {
 }
 
 # -----------------------------------------------------------------------------
+# LOGON AUTOMATICO DO WINDOWS
+# PC que religa sozinho (queda de energia, Windows Update) fica parado na tela de entrada e os programas da NetControll
+# so abrem quando alguem digita a senha. Com o logon automatico o Windows entra sozinho com o usuario.
+# A senha vai como segredo LSA "DefaultPassword" (o mesmo do netplwiz e do Autologon da Sysinternals): o valor
+# DefaultPassword da chave Winlogon, o jeito comum, qualquer usuario do PC consegue ler.
+# -----------------------------------------------------------------------------
+function Initialize-LogonAutoApi {
+    # Segredo LSA e conferencia da senha (LogonUser). Compilado na primeira vez.
+    if ('XMenuTools.LogonAuto' -as [type]) { return }
+    Add-Type -TypeDefinition @'
+using System;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+namespace XMenuTools {
+    public static class LogonAuto {
+        [StructLayout(LayoutKind.Sequential)]
+        struct LSA_UNICODE_STRING { public ushort Length; public ushort MaximumLength; public IntPtr Buffer; }
+        [StructLayout(LayoutKind.Sequential)]
+        struct LSA_OBJECT_ATTRIBUTES { public int Length; public IntPtr RootDirectory; public IntPtr ObjectName; public uint Attributes; public IntPtr SecurityDescriptor; public IntPtr SecurityQualityOfService; }
+        [DllImport("advapi32.dll")] static extern uint LsaOpenPolicy(IntPtr sistema, ref LSA_OBJECT_ATTRIBUTES atributos, uint acesso, out IntPtr politica);
+        [DllImport("advapi32.dll")] static extern uint LsaStorePrivateData(IntPtr politica, ref LSA_UNICODE_STRING nome, IntPtr dado);
+        [DllImport("advapi32.dll")] static extern int LsaNtStatusToWinError(uint status);
+        [DllImport("advapi32.dll")] static extern uint LsaClose(IntPtr politica);
+        [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        static extern bool LogonUser(string usuario, string dominio, string senha, int tipo, int provedor, out IntPtr token);
+        [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr h);
+
+        static LSA_UNICODE_STRING Texto(string s) {
+            LSA_UNICODE_STRING u = new LSA_UNICODE_STRING();
+            u.Buffer = Marshal.StringToHGlobalUni(s);
+            u.Length = (ushort)(s.Length * 2);
+            u.MaximumLength = (ushort)(s.Length * 2 + 2);
+            return u;
+        }
+
+        // Grava o segredo; valor null apaga a senha (o Windows deixa o segredo vazio; se nao existe, nao e erro)
+        public static void GravarSegredo(string nome, string valor) {
+            LSA_OBJECT_ATTRIBUTES atr = new LSA_OBJECT_ATTRIBUTES();
+            IntPtr politica;
+            uint st = LsaOpenPolicy(IntPtr.Zero, ref atr, 0x20 /* POLICY_CREATE_SECRET */, out politica);
+            if (st != 0) throw new Win32Exception(LsaNtStatusToWinError(st));
+            LSA_UNICODE_STRING chave = Texto(nome);
+            LSA_UNICODE_STRING dado = new LSA_UNICODE_STRING();
+            IntPtr pDado = IntPtr.Zero;
+            try {
+                if (valor != null) {
+                    dado = Texto(valor);
+                    pDado = Marshal.AllocHGlobal(Marshal.SizeOf(typeof(LSA_UNICODE_STRING)));
+                    Marshal.StructureToPtr(dado, pDado, false);
+                }
+                st = LsaStorePrivateData(politica, ref chave, pDado);
+                if (st != 0 && !(valor == null && st == 0xC0000034)) throw new Win32Exception(LsaNtStatusToWinError(st));
+            }
+            finally {
+                if (pDado != IntPtr.Zero) Marshal.FreeHGlobal(pDado);
+                if (dado.Buffer != IntPtr.Zero) Marshal.FreeHGlobal(dado.Buffer);
+                Marshal.FreeHGlobal(chave.Buffer);
+                LsaClose(politica);
+            }
+        }
+
+        // 0 = o Windows aceitou usuario e senha; senao, o codigo de erro do Windows (1326 = usuario ou senha errados)
+        public static int ConferirSenha(string usuario, string dominio, string senha) {
+            IntPtr token;
+            if (!LogonUser(usuario, dominio, senha, 2 /* LOGON32_LOGON_INTERACTIVE */, 0, out token)) return Marshal.GetLastWin32Error();
+            CloseHandle(token);
+            return 0;
+        }
+    }
+}
+'@
+}
+
+function Get-LogonAutomatico {
+    # Como esta hoje: @{ Ligado; Usuario }. -Chave so serve para o teste.
+    param([string]$Chave = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon')
+    $wl = Get-ItemProperty -Path $Chave -ErrorAction SilentlyContinue
+    $usuario = "$($wl.DefaultUserName)"
+    if ("$($wl.DefaultDomainName)" -ne "" -and "$($wl.DefaultDomainName)" -ine $env:COMPUTERNAME) { $usuario = "$($wl.DefaultDomainName)\$usuario" }
+    return @{ Ligado = ("$($wl.AutoAdminLogon)" -eq '1' -and "$($wl.DefaultUserName)" -ne ''); Usuario = $usuario }
+}
+
+function Set-LogonAutomatico {
+    # Liga o logon automatico (ou desliga, com -Desligar). Senha vazia vai no registro (nao ha o que esconder); com
+    # senha, o DefaultPassword do registro sai (o Windows usaria ele antes do segredo LSA).
+    # -Chave, -ChaveHello e -Segredo so servem para o teste.
+    param([string]$Usuario, [string]$Dominio, [string]$Senha = "", [switch]$Desligar,
+        [string]$Chave = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon',
+        [string]$ChaveHello = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\PasswordLess\Device',
+        [string]$Segredo = 'DefaultPassword')
+    Initialize-LogonAutoApi
+    if ($Desligar) {
+        Set-ItemProperty -Path $Chave -Name 'AutoAdminLogon' -Value '0' -Type String -ErrorAction Stop
+        Remove-ItemProperty -Path $Chave -Name 'DefaultPassword' -ErrorAction SilentlyContinue
+        [XMenuTools.LogonAuto]::GravarSegredo($Segredo, $null)
+        return
+    }
+    Set-ItemProperty -Path $Chave -Name 'DefaultUserName' -Value $Usuario -Type String -ErrorAction Stop
+    Set-ItemProperty -Path $Chave -Name 'DefaultDomainName' -Value $Dominio -Type String -ErrorAction Stop
+    if ($Senha -eq "") {
+        [XMenuTools.LogonAuto]::GravarSegredo($Segredo, $null)
+        Set-ItemProperty -Path $Chave -Name 'DefaultPassword' -Value '' -Type String -ErrorAction Stop
+    }
+    else {
+        [XMenuTools.LogonAuto]::GravarSegredo($Segredo, $Senha)
+        Remove-ItemProperty -Path $Chave -Name 'DefaultPassword' -ErrorAction SilentlyContinue
+    }
+    # AutoLogonCount desliga o logon automatico depois de N entradas
+    Remove-ItemProperty -Path $Chave -Name 'AutoLogonCount' -ErrorAction SilentlyContinue
+    # Windows 11 com "Exigir o Windows Hello para contas Microsoft" ignora o logon automatico
+    if (Test-Path -LiteralPath $ChaveHello) { Set-ItemProperty -Path $ChaveHello -Name 'DevicePasswordLessBuildVersion' -Value 0 -Type DWord -ErrorAction Stop }
+    # Por ultimo: so liga depois de tudo gravado
+    Set-ItemProperty -Path $Chave -Name 'AutoAdminLogon' -Value '1' -Type String -ErrorAction Stop
+}
+
+function Show-LogonAutomatico {
+    # Janela do logon automatico (botao do Suporte e opcao do Preparar ambiente). Confere a senha no Windows antes de
+    # gravar: com a senha errada o PC fica parado na tela de entrada sem aviso nenhum.
+    $titulo = "Logon automático do Windows"
+    $atual = Get-LogonAutomatico
+    $usuarioPadrao = $atual.Usuario
+    if (-not $atual.Ligado) {
+        # Quem esta logado no PC (o Preparador pode estar aberto com outro administrador)
+        $usuarioPadrao = $env:USERNAME
+        try {
+            $sessao = [System.Diagnostics.Process]::GetCurrentProcess().SessionId
+            $explorer = @(Get-CimInstance Win32_Process -Filter "Name='explorer.exe' AND SessionId=$sessao" -ErrorAction Stop)[0]
+            if ($null -ne $explorer) {
+                $dono = Invoke-CimMethod -InputObject $explorer -MethodName GetOwner -ErrorAction Stop
+                if ("$($dono.User)" -ne "") { $usuarioPadrao = if ("$($dono.Domain)" -ine $env:COMPUTERNAME) { "$($dono.Domain)\$($dono.User)" } else { "$($dono.User)" } }
+            }
+        }
+        catch {}
+    }
+    Log-Message "INFO" "Logon automático: hoje está $(if ($atual.Ligado) { "ligado para $($atual.Usuario)" } else { 'desligado' })"
+
+    $dlgLa = New-ToolForm $titulo 480 348
+    $dlgLa.FormBorderStyle = 'FixedDialog'
+    $dlgLa.MaximizeBox = $false
+    $dlgLa.MinimizeBox = $false
+    New-ToolLabel $dlgLa "Entrar no Windows sem digitar a senha" 20 16 11 -Negrito | Out-Null
+    $lblExplica = New-ToolLabel $dlgLa "Ao ligar o PC (inclusive depois de uma queda de energia) o Windows entra sozinho com este usuário e os programas da NetControll abrem sem ninguém digitar a senha." 20 44 9.5 -Cor $Script:UiSuave -W 430
+    $lblExplica.Height = 58
+    $corStatus = if ($atual.Ligado) { $Script:UiVerde } else { $Script:UiSuave }
+    New-ToolLabel $dlgLa "Hoje: $(if ($atual.Ligado) { "ligado para $($atual.Usuario)" } else { 'desligado' })" 20 108 9.5 -Negrito -Cor $corStatus | Out-Null
+    $campos = @{}
+    foreach ($campo in @(@{ Nome = 'Usuario'; Rotulo = 'Usuário'; Y = 138 }, @{ Nome = 'Senha'; Rotulo = 'Senha'; Y = 174 })) {
+        New-ToolLabel $dlgLa $campo.Rotulo 20 ($campo.Y + 4) 9.5 | Out-Null
+        $txt = New-Object System.Windows.Forms.TextBox
+        $txt.Location = New-Object System.Drawing.Point(90, $campo.Y)
+        $txt.Size = New-Object System.Drawing.Size(350, 28)
+        $txt.BackColor = [System.Drawing.Color]::FromArgb(20, 24, 34)
+        $txt.ForeColor = $Script:UiTexto
+        $txt.BorderStyle = 'FixedSingle'
+        $txt.Font = New-Object System.Drawing.Font("Segoe UI", 11)
+        [void]$dlgLa.Controls.Add($txt)
+        $campos[$campo.Nome] = $txt
+    }
+    $campos.Usuario.Text = $usuarioPadrao
+    $campos.Senha.UseSystemPasswordChar = $true
+    New-ToolLabel $dlgLa "Usuário sem senha: deixe a senha vazia." 90 206 8.5 -Cor $Script:UiSuave | Out-Null
+    $btnAtivarLa = New-ToolButton $dlgLa "ATIVAR" 20 244 135 34 $Script:UiVerde $null ""
+    $btnDesligarLa = New-ToolButton $dlgLa "DESATIVAR" 163 244 135 34 $Script:UiVermelho $null ""
+    $btnCancelarLa = New-ToolButton $dlgLa "CANCELAR" 306 244 134 34 $Script:UiCinza $null ""
+    $btnDesligarLa.Enabled = $atual.Ligado
+    $btnDesligarLa.DialogResult = [System.Windows.Forms.DialogResult]::No
+    $btnCancelarLa.DialogResult = [System.Windows.Forms.DialogResult]::Cancel
+    $dlgLa.CancelButton = $btnCancelarLa
+    $dlgLa.ActiveControl = $campos.Senha
+    $btnAtivarLa.Add_Click({
+            $u = $campos.Usuario.Text.Trim()
+            if ($u -eq "") { [System.Windows.Forms.MessageBox]::Show("Digite o usuário do Windows.", $titulo, "OK", "Warning") | Out-Null; return }
+            $dom = $env:COMPUTERNAME
+            if ($u -match '^(.+)\\(.+)$') { $dom = $Matches[1]; $u = $Matches[2] }
+            $cod = [XMenuTools.LogonAuto]::ConferirSenha($u, $(if ($dom -ieq $env:COMPUTERNAME) { '.' } else { $dom }), $campos.Senha.Text)
+            if ($cod -ne 0) {
+                $motivo = (New-Object System.ComponentModel.Win32Exception([int]$cod)).Message
+                Log-Message "ERRO" "Logon automático: o Windows não aceitou o usuário $dom\$u e a senha digitada ($motivo)"
+                $resp = [System.Windows.Forms.MessageBox]::Show("O Windows não aceitou o usuário e a senha:`r`n$motivo`r`n`r`nCom a senha errada o PC fica parado na tela de entrada. Gravar mesmo assim?", $titulo, "YesNo", "Warning", "Button2")
+                if ($resp -ne [System.Windows.Forms.DialogResult]::Yes) { return }
+            }
+            $dlgLa.Tag = @{ Usuario = $u; Dominio = $dom; Senha = $campos.Senha.Text }
+            $dlgLa.DialogResult = [System.Windows.Forms.DialogResult]::Yes
+        })
+    Initialize-LogonAutoApi
+    $resLa = $dlgLa.ShowDialog()
+    $dadosLa = $dlgLa.Tag
+    $dlgLa.Dispose()
+    try {
+        if ($resLa -eq [System.Windows.Forms.DialogResult]::Yes) {
+            Set-LogonAutomatico -Usuario $dadosLa.Usuario -Dominio $dadosLa.Dominio -Senha $dadosLa.Senha
+            $nome = if ($dadosLa.Dominio -ine $env:COMPUTERNAME) { "$($dadosLa.Dominio)\$($dadosLa.Usuario)" } else { $dadosLa.Usuario }
+            Log-Message "SUCESSO" "Logon automático ligado para $nome $(if ($dadosLa.Senha -eq '') { '(usuário sem senha)' } else { '(senha guardada protegida pelo Windows, fora do registro)' })"
+            [System.Windows.Forms.MessageBox]::Show("Pronto: ao ligar, o Windows entra sozinho com o usuário $nome.`r`n`r`nReinicie o PC para conferir.", $titulo, "OK", "Information") | Out-Null
+        }
+        elseif ($resLa -eq [System.Windows.Forms.DialogResult]::No) {
+            Set-LogonAutomatico -Desligar
+            Log-Message "SUCESSO" "Logon automático desligado (a senha guardada foi apagada)"
+            [System.Windows.Forms.MessageBox]::Show("Logon automático desligado: ao ligar, o Windows volta a pedir a senha.", $titulo, "OK", "Information") | Out-Null
+        }
+        else { Log-Message "CANCEL" "Logon automático: nada mudou" }
+    }
+    catch {
+        Log-Message "ERRO" "Logon automático: não consegui gravar - $($_.Exception.Message)"
+        [System.Windows.Forms.MessageBox]::Show("Não consegui gravar o logon automático:`r`n$($_.Exception.Message)", $titulo, "OK", "Error") | Out-Null
+    }
+    $dadosLa = $null
+}
+
+# -----------------------------------------------------------------------------
 # LIBERAR MEMORIA RAM (no estilo do RAMMap da Sysinternals)
 # Nada aqui mexe no Windows essencial nem no sistema (NetControll e SQL Server):
 #  1) Limpar: tira da RAM as paginas paradas dos programas abertos (o "Empty Working Sets" do
@@ -21129,8 +21339,9 @@ function Open-Selector {
 # -----------------------------------------------------------------------------
 function Confirm-PrepararAmbiente {
     # Confirmacao do PREPARAR AMBIENTE WINDOWS (clique sem querer acontece). CANCELAR vem como padrao: um Enter a toa
-    # nao dispara. A troca do plano de fundo e opcional (ja vem marcada). Devolve @{ TrocarFundo } ou $null.
-    $dlgCfg = New-ToolForm "Preparar ambiente" 470 226
+    # nao dispara. A troca do plano de fundo e o logon automatico sao opcionais (ja vem marcados; o logon so quando
+    # ainda esta desligado). Devolve @{ TrocarFundo; LogonAutomatico } ou $null.
+    $dlgCfg = New-ToolForm "Preparar ambiente" 470 256
     $dlgCfg.FormBorderStyle = 'FixedDialog'
     $dlgCfg.MaximizeBox = $false
     $dlgCfg.MinimizeBox = $false
@@ -21146,8 +21357,18 @@ function Confirm-PrepararAmbiente {
     $chkFundo.Cursor = 'Hand'
     $chkFundo.Checked = $true
     [void]$dlgCfg.Controls.Add($chkFundo)
-    $btnPreparar = New-ToolButton $dlgCfg "PREPARAR" 20 136 205 34 $Script:UiVerde $null ""
-    $btnCancelarCfg = New-ToolButton $dlgCfg "CANCELAR" 235 136 205 34 $Script:UiCinza $null ""
+    $logonAtual = Get-LogonAutomatico
+    $chkLogon = New-Object System.Windows.Forms.CheckBox
+    $chkLogon.Text = if ($logonAtual.Ligado) { "Logon automático (já está ligado para $($logonAtual.Usuario))" } else { "Logon automático: o Windows entra sozinho (pede a senha)" }
+    $chkLogon.Location = New-Object System.Drawing.Point(20, 120)
+    $chkLogon.Size = New-Object System.Drawing.Size(420, 24)
+    $chkLogon.ForeColor = $Script:UiTexto
+    $chkLogon.BackColor = [System.Drawing.Color]::Transparent
+    $chkLogon.Cursor = 'Hand'
+    $chkLogon.Checked = -not $logonAtual.Ligado
+    [void]$dlgCfg.Controls.Add($chkLogon)
+    $btnPreparar = New-ToolButton $dlgCfg "PREPARAR" 20 164 205 34 $Script:UiVerde $null ""
+    $btnCancelarCfg = New-ToolButton $dlgCfg "CANCELAR" 235 164 205 34 $Script:UiCinza $null ""
     $btnPreparar.DialogResult = [System.Windows.Forms.DialogResult]::Yes
     $btnCancelarCfg.DialogResult = [System.Windows.Forms.DialogResult]::Cancel
     $dlgCfg.AcceptButton = $btnCancelarCfg
@@ -21155,9 +21376,10 @@ function Confirm-PrepararAmbiente {
     $dlgCfg.ActiveControl = $btnCancelarCfg
     $resCfg = $dlgCfg.ShowDialog()
     $trocar = [bool]$chkFundo.Checked
+    $logonAuto = [bool]$chkLogon.Checked
     $dlgCfg.Dispose()
     if ($resCfg -ne [System.Windows.Forms.DialogResult]::Yes) { return $null }
-    return @{ TrocarFundo = $trocar }
+    return @{ TrocarFundo = $trocar; LogonAutomatico = $logonAuto }
 }
 
 function Run-Config {
@@ -21630,7 +21852,7 @@ $formWidth = if ($screen.Width -lt 1200) { $screen.Width - 50 } else { 1200 }
 $formHeight = if ($screen.Height -lt 900) { $screen.Height - 50 } else { 900 }
 
 $form = New-Object System.Windows.Forms.Form
-$form.Text = "Preparador XMenu – Suporte Técnico v5.76"
+$form.Text = "Preparador XMenu – Suporte Técnico v5.77"
 $form.Size = New-Object System.Drawing.Size($formWidth, $formHeight)
 $form.StartPosition = "CenterScreen"
 $form.BackColor = [System.Drawing.Color]::FromArgb(25, 25, 30); $form.ForeColor = 'White'
@@ -22056,7 +22278,9 @@ $bCfg.Add_Click({
         $botaoCfg = $this
         $rCfg = Confirm-PrepararAmbiente
         if ($null -eq $rCfg) { Log-Message "CANCEL" "Preparar ambiente: cancelado na confirmação"; return }
-        Log-Message "INFO" "Preparar ambiente: confirmado ($(if ($rCfg.TrocarFundo) { 'trocando' } else { 'sem trocar' }) o plano de fundo)"
+        Log-Message "INFO" "Preparar ambiente: confirmado ($(if ($rCfg.TrocarFundo) { 'trocando' } else { 'sem trocar' }) o plano de fundo, $(if ($rCfg.LogonAutomatico) { 'com' } else { 'sem' }) logon automático)"
+        # Antes do resto: a senha e pedida com o tecnico ainda na frente do PC
+        if ($rCfg.LogonAutomatico) { Show-LogonAutomatico }
         Run-Config $botaoCfg -TrocarFundo $rCfg.TrocarFundo
     })
 [void]$layout.Controls.Add($bCfg, 0, 1)
@@ -22595,6 +22819,14 @@ $Script:ToolTip.SetToolTip($bNetStart, "Cria o NetStart.bat na pasta Inicializar
 $bNetStart.Add_Click({ Set-NetStartInicializacao $this })
 [void]$tbl.Controls.Add($bNetStart)
 
+$bLogonAuto = New-Object System.Windows.Forms.Button; $bLogonAuto.Height = 50; $bLogonAuto.Dock = 'Top'
+$bLogonAuto.Text = "Logon Automático do Windows"; $bLogonAuto.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
+$bLogonAuto.Cursor = 'Hand'
+Format-SupportBtn $bLogonAuto $colorGray
+$Script:ToolTip.SetToolTip($bLogonAuto, "Faz o Windows entrar sozinho com o usuário ao ligar o PC: depois de uma queda de energia os programas da NetControll abrem sem ninguém digitar a senha. Confere a senha antes de gravar e guarda a senha protegida pelo Windows (não fica legível no registro). Também desliga.")
+$bLogonAuto.Add_Click({ Show-LogonAutomatico })
+[void]$tbl.Controls.Add($bLogonAuto)
+
 $bRam = New-Object System.Windows.Forms.Button; $bRam.Height = 50; $bRam.Dock = 'Top'
 $bRam.Text = "Liberar Memória RAM"; $bRam.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
 $bRam.Cursor = 'Hand'
@@ -22604,7 +22836,7 @@ $bRam.Add_Click({ Show-LiberarMemoria })
 [void]$tbl.Controls.Add($bRam)
 
 # Mensagem de abertura: explica o programa para quem abre pela primeira vez
-Log-Message "INFO" "Preparador XMenu v5.76 - preparo e suporte de computadores com o sistema XMenu"
+Log-Message "INFO" "Preparador XMenu v5.77 - preparo e suporte de computadores com o sistema XMenu"
 foreach ($msgSenha in $Script:LogSenhaPendente) { Log-Message "INFO" $msgSenha }
 Log-Message "INFO" "Senha de abertura: acesso liberado"
 Log-Message "LOG" "==============================================================="
@@ -22616,7 +22848,9 @@ Log-Message "LOG" "  EXTERNOS ................... acesso remoto, Chrome, TEF HUB
 Log-Message "LOG" "  SUPORTE E DIAGNÓSTICO ...... impressoras, rede, SQL, backup, XMLs e reparos do Windows"
 Log-Message "LOG" "  Passe o mouse sobre um botão para ver o que ele faz antes de clicar."
 Log-Message "LOG" "---------------------------------------------------------------"
-Log-Message "LOG" "NOVO NA v5.76"
+Log-Message "LOG" "NOVO NA v5.77"
+Log-Message "SUCESSO" "  Suporte: novo botão Logon Automático do Windows: ao ligar o PC (inclusive depois de queda de energia) o Windows entra sozinho com o usuário e os programas da NetControll abrem sem ninguém digitar a senha; confere a senha antes de gravar, guarda a senha protegida pelo Windows (não fica legível no registro) e também desliga"
+Log-Message "SUCESSO" "  Preparar ambiente: a confirmação tem a opção Logon automático (já vem marcada quando ainda está desligado) e pede a senha do usuário antes de começar"
 Log-Message "SUCESSO" "  Vídeos tutoriais: novos vídeos Como integrar produtos no iFood e Como usar a API do XMenu"
 Log-Message "SUCESSO" "  Impressoras: a tarefa que religa o LPD confere a cada minuto (na v5.74 eram 5 minutos de pedidos parados); quem ativou o LPD na v5.74 clica de novo em ATIVAR LPD para atualizar"
 Log-Message "SUCESSO" "  Impressoras: reiniciar o Spooler (botão REINICIAR SPOOLER, troca ou remoção de porta LPR, compartilhar impressora, ativar o cliente LPR) agora religa o LPD, que parava junto e ficava parado"
