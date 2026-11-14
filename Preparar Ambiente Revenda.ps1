@@ -1,6 +1,6 @@
 ﻿# =============================================================================
 # PREPARADOR XMENU - VERSAO REVENDA
-# Baseado na v5.75
+# Baseado na v5.76
 # Alteracoes Revenda:
 #   - Wallpaper: fundo_revenda.png
 #   - Removido: Atalhos de Suporte e Pasta Netcontroll
@@ -21548,7 +21548,7 @@ $formWidth = if ($screen.Width -lt 1000) { 900 } else { 1000 }
 $formHeight = if ($screen.Height -lt 800) { 700 } else { 800 }
 
 $form = New-Object System.Windows.Forms.Form
-$form.Text = "Preparador XMenu – Suporte Técnico v5.75 - REVENDA"
+$form.Text = "Preparador XMenu – Suporte Técnico v5.76 - REVENDA"
 $form.Size = New-Object System.Drawing.Size($formWidth, $formHeight)
 $form.StartPosition = "CenterScreen"
 $form.BackColor = [System.Drawing.Color]::FromArgb(25, 25, 30); $form.ForeColor = 'White'
@@ -22177,7 +22177,9 @@ function Open-VideosTutoriais {
     $videos = @(
         @{ Name = "Como alterar o preço de um produto"; Url = "$base/como-alterar-preco-de-produto.mp4"; File = "Como alterar o preço de um produto - XMenu.mp4" },
         @{ Name = "Como ativar NFC-e OFF e ON"; Url = "$base/como-ativar-nfce-off-contingencia.mp4"; File = "XMENU - Como ativar NFC-e OFF e ON.mp4" },
-        @{ Name = "Arquivos fiscais - passo a passo"; Url = "$base/arquivos-fiscais-passo-a-passo.mp4"; File = "Arquivos fiscais passo a passo.mp4" }
+        @{ Name = "Arquivos fiscais - passo a passo"; Url = "$base/arquivos-fiscais-passo-a-passo.mp4"; File = "Arquivos fiscais passo a passo.mp4" },
+        @{ Name = "Como integrar produtos no iFood"; Url = "$base/como-integrar-produtos-ifood.mp4"; File = "Como integrar produtos no iFood - XMenu.mp4" },
+        @{ Name = "Como usar a API do XMenu"; Url = "$base/como-usar-api-xmenu.mp4"; File = "Como usar a API do XMenu.mp4" }
     )
 
     $fVid = New-Object System.Windows.Forms.Form
@@ -22517,7 +22519,7 @@ $bRam.Add_Click({ Show-LiberarMemoria })
 [void]$tbl.Controls.Add($bRam)
 
 # Mensagem de abertura: explica o programa para quem abre pela primeira vez
-Log-Message "INFO" "Preparador XMenu v5.75 - REVENDA - preparo e suporte de computadores com o sistema XMenu"
+Log-Message "INFO" "Preparador XMenu v5.76 - REVENDA - preparo e suporte de computadores com o sistema XMenu"
 foreach ($msgSenha in $Script:LogSenhaPendente) { Log-Message "INFO" $msgSenha }
 Log-Message "INFO" "Senha de abertura: acesso liberado"
 Log-Message "LOG" "==============================================================="
@@ -22529,7 +22531,8 @@ Log-Message "LOG" "  EXTERNOS ................... acesso remoto, Chrome, TEF HUB
 Log-Message "LOG" "  SUPORTE E DIAGNÓSTICO ...... impressoras, rede, SQL, backup, XMLs e reparos do Windows"
 Log-Message "LOG" "  Passe o mouse sobre um botão para ver o que ele faz antes de clicar."
 Log-Message "LOG" "---------------------------------------------------------------"
-Log-Message "LOG" "NOVO NA v5.75"
+Log-Message "LOG" "NOVO NA v5.76"
+Log-Message "SUCESSO" "  Vídeos tutoriais: novos vídeos Como integrar produtos no iFood e Como usar a API do XMenu"
 Log-Message "SUCESSO" "  Impressoras: a tarefa que religa o LPD confere a cada minuto (na v5.74 eram 5 minutos de pedidos parados); quem ativou o LPD na v5.74 clica de novo em ATIVAR LPD para atualizar"
 Log-Message "SUCESSO" "  Impressoras: reiniciar o Spooler (botão REINICIAR SPOOLER, troca ou remoção de porta LPR, compartilhar impressora, ativar o cliente LPR) agora religa o LPD, que parava junto e ficava parado"
 Log-Message "SUCESSO" "  Impressoras: o ATIVAR LPD cria a tarefa 'Preparador XMenu - Religar LPD', que confere a cada minuto e religa o LPD se ele parar por qualquer motivo"
