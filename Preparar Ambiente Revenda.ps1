@@ -1,6 +1,6 @@
 ﻿# =============================================================================
 # PREPARADOR XMENU - VERSAO REVENDA
-# Baseado na v5.78
+# Baseado na v5.79
 # Alteracoes Revenda:
 #   - Wallpaper: fundo_revenda.png
 #   - Removido: Atalhos de Suporte e Pasta Netcontroll
@@ -21055,6 +21055,312 @@ function Install-SqlManual {
     }
 }
 
+# -----------------------------------------------------------------------------
+# DESINSTALAR SQL
+# Cliente com o SQL de outro sistema: o nosso so instala depois de tirar o dele. Sai tudo que tem SQL no nome, de
+# qualquer fabricante, nesta ordem: as instancias do SQL Server pelo proprio setup.exe do SQL (sem janela), depois os
+# programas (MSI sem janela; duas voltas, porque um componente pode depender de outro). A pasta Microsoft SQL Server e
+# renomeada, nao apagada: desinstalar o SQL nao apaga os bancos (.mdf/.ldf), e eles ficam guardados nela.
+# -----------------------------------------------------------------------------
+function Get-SqlInstalados {
+    # Instancias do SQL Server e tudo com SQL no nome nos Programas e Recursos (64 e 32 bits, de todos e do usuario).
+    # So le. Os parametros so mudam no teste.
+    param(
+        [string[]]$Raizes = @('HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall', 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall', 'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall'),
+        [string[]]$RaizesSql = @('HKLM:\SOFTWARE\Microsoft\Microsoft SQL Server', 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Microsoft SQL Server'))
+    $ignorar = @('PSPath', 'PSParentPath', 'PSChildName', 'PSDrive', 'PSProvider')
+    $instancias = @()
+    foreach ($raiz in $RaizesSql) {
+        $nomes = Get-ItemProperty -Path "$raiz\Instance Names\SQL" -ErrorAction SilentlyContinue
+        if ($null -eq $nomes) { continue }
+        foreach ($p in $nomes.PSObject.Properties) {
+            if ($p.Name -in $ignorar) { continue }
+            $setup = Get-ItemProperty -Path "$raiz\$($p.Value)\Setup" -ErrorAction SilentlyContinue
+            $instancias += [pscustomobject]@{ Instancia = $p.Name; Versao = "$($setup.Version)"; PastaDados = "$($setup.SQLDataRoot)"; PastaSql = "$($setup.SqlProgramDir)" }
+        }
+    }
+    $programas = @()
+    foreach ($raiz in $Raizes) {
+        foreach ($k in @(Get-ChildItem -Path $raiz -ErrorAction SilentlyContinue)) {
+            $p = Get-ItemProperty -LiteralPath $k.PSPath -ErrorAction SilentlyContinue
+            if ("$($p.DisplayName)" -notmatch '(?i)sql') { continue }
+            $programas += [pscustomobject]@{
+                Nome = "$($p.DisplayName)"; Versao = "$($p.DisplayVersion)"; Fabricante = "$($p.Publisher)"; Chave = $k.PSChildName
+                Desinstalar = "$($p.UninstallString)"; Silencioso = "$($p.QuietUninstallString)"
+                Msi = ("$($p.WindowsInstaller)" -eq '1'); Oculto = ("$($p.SystemComponent)" -eq '1')
+            }
+        }
+    }
+    return [pscustomobject]@{
+        Instancias = @($instancias | Sort-Object Instancia -Unique)
+        Programas  = @($programas | Sort-Object Chave -Unique | Sort-Object Nome)
+    }
+}
+
+function Get-ComandoDesinstalar {
+    # Como tirar um item dos Programas e Recursos sem janela: MSI pelo codigo do produto, o QuietUninstallString se houver,
+    # instalador do Package Cache (SSMS e outros) com /quiet. Sem jeito silencioso, o desinstalador normal (o tecnico
+    # confirma na janela dele). Devolve @{ Exe; Args; Silencioso } ou $null (sem desinstalador registrado).
+    param($Item)
+    $guid = ""
+    if ($Item.Chave -match '^\{[0-9A-Fa-f-]{36}\}$' -and ($Item.Msi -or $Item.Desinstalar -match '(?i)msiexec')) { $guid = $Item.Chave }
+    elseif ($Item.Desinstalar -match '(?i)msiexec.*?(\{[0-9A-Fa-f-]{36}\})') { $guid = $Matches[1] }
+    if ($guid -ne "") { return @{ Exe = "msiexec.exe"; Args = "/x $guid /qn /norestart"; Silencioso = $true } }
+    $temSilencioso = ("$($Item.Silencioso)".Trim() -ne "")
+    $linha = if ($temSilencioso) { "$($Item.Silencioso)" } else { "$($Item.Desinstalar)" }
+    if ($linha.Trim() -eq "") { return $null }
+    if ($linha -match '^\s*"([^"]+)"\s*(.*)$') { $exe = $Matches[1]; $resto = $Matches[2] }
+    elseif ($linha -match '^\s*(.+?\.exe)\s*(.*)$') { $exe = $Matches[1]; $resto = $Matches[2] }
+    else { $exe = $linha.Trim(); $resto = "" }
+    if (-not $temSilencioso -and $linha -match '(?i)\\Package Cache\\' -and $resto -match '(?i)/uninstall') { $resto += " /quiet /norestart"; $temSilencioso = $true }
+    return @{ Exe = $exe; Args = $resto.Trim(); Silencioso = $temSilencioso }
+}
+
+function Get-ComandoInstanciaSql {
+    # setup.exe da versao da instancia (Setup Bootstrap), no modo desinstalar e sem janela. $null: sem setup.exe (SQL 2005
+    # ou pasta apagada); a instancia sai pela lista de programas.
+    param($Instancia)
+    if ("$($Instancia.Versao)" -match '^(\d+)\.') { $maior = $Matches[1] } else { return $null }
+    $pastaSql = if ("$($Instancia.PastaSql)" -ne "") { "$($Instancia.PastaSql)" } else { Join-Path $env:ProgramFiles "Microsoft SQL Server" }
+    $boot = Join-Path $pastaSql "$($maior)0\Setup Bootstrap"
+    $setup = @(Get-ChildItem -LiteralPath $boot -Filter "setup.exe" -Recurse -Depth 1 -File -ErrorAction SilentlyContinue | Where-Object { $_.FullName -notmatch '(?i)\\(Update Cache|Log)\\' } | Select-Object -First 1)
+    if ($setup.Count -eq 0) { return $null }
+    $nome = $Instancia.Instancia
+    return @{
+        Exe     = $setup[0].FullName
+        Args    = "/ACTION=Uninstall /FEATURES=SQL,AS,RS,IS,Tools /INSTANCENAME=$nome /Q /HIDECONSOLE"
+        # Versao que recusa recurso que nao esta instalado: so o motor do banco
+        Reserva = "/ACTION=Uninstall /FEATURES=SQL /INSTANCENAME=$nome /Q /HIDECONSOLE"
+    }
+}
+
+function Find-BancoNetWebPdv {
+    # Primeiro NetWebPDV*.mdf nas pastas de dados das instancias ou em C:\netcontroll (fora de backup e do banco novo de
+    # Versoes). So le. "" = nao achou.
+    param($Instancias, [string]$PastaNetControll = "C:\netcontroll")
+    foreach ($inst in @($Instancias)) {
+        if ("$($inst.PastaDados)" -eq "" -or -not (Test-Path -LiteralPath $inst.PastaDados)) { continue }
+        $achado = @(Get-ChildItem -LiteralPath $inst.PastaDados -Filter "NetWebPDV*.mdf" -Recurse -Depth 3 -File -ErrorAction SilentlyContinue | Select-Object -First 1)
+        if ($achado.Count -gt 0) { return $achado[0].FullName }
+    }
+    if (Test-Path -LiteralPath $PastaNetControll) {
+        $achado = @(Get-ChildItem -LiteralPath $PastaNetControll -Filter "NetWebPDV*.mdf" -Recurse -Depth 4 -File -ErrorAction SilentlyContinue | Where-Object { $_.FullName -notmatch '(?i)\\(Backup[^\\]*|\.OLD|Versoes)\\' } | Select-Object -First 1)
+        if ($achado.Count -gt 0) { return $achado[0].FullName }
+    }
+    return ""
+}
+
+function Invoke-ProcessoSemTravar {
+    # Roda e espera com a janela respondendo; devolve o codigo de saida. -Visivel: desinstalador com janela propria.
+    param([string]$Exe, [string]$Argumentos = "", [switch]$Visivel)
+    $opcoes = @{ FilePath = $Exe; PassThru = $true; ErrorAction = 'Stop' }
+    if ($Argumentos -ne "") { $opcoes.ArgumentList = $Argumentos }
+    if (-not $Visivel) { $opcoes.WindowStyle = 'Hidden' }
+    $proc = Start-Process @opcoes
+    $null = $proc.Handle   # sem isto o ExitCode pode vir vazio
+    while (-not $proc.HasExited) { [System.Windows.Forms.Application]::DoEvents(); Start-Sleep -Milliseconds 150 }
+    return $proc.ExitCode
+}
+
+function Invoke-DesinstalarSql {
+    # Faz a desinstalacao. -Escrever recebe cada linha do andamento. Para antes dos programas se uma instancia nao sair:
+    # arrancar componente de uma instancia que ficou quebraria o SQL. Devolve @{ Ok; Reiniciar; Falhas; Ficaram; Renomeadas }.
+    # -Raizes, -RaizesSql e -Pastas so mudam no teste.
+    param([scriptblock]$Escrever, [string[]]$Raizes = $null, [string[]]$RaizesSql = $null, [string[]]$Pastas = $null)
+    $inv = @{}
+    if ($null -ne $Raizes) { $inv.Raizes = $Raizes }
+    if ($null -ne $RaizesSql) { $inv.RaizesSql = $RaizesSql }
+    if ($null -eq $Pastas) { $Pastas = @((Join-Path $env:ProgramFiles "Microsoft SQL Server"), (Join-Path ${env:ProgramFiles(x86)} "Microsoft SQL Server")) }
+    # 1605/1614: o MSI ja tinha saido junto com outro; 3010: saiu, falta reiniciar
+    $codigosOk = @(0, 1605, 1614, 3010)
+    $res = @{ Ok = $true; Reiniciar = $false; Falhas = @(); Ficaram = @(); Renomeadas = @() }
+
+    foreach ($inst in @((Get-SqlInstalados @inv).Instancias)) {
+        $cmd = Get-ComandoInstanciaSql $inst
+        if ($null -eq $cmd) { & $Escrever "Instância $($inst.Instancia) (SQL $($inst.Versao)): sem o setup.exe do SQL, sai pela lista de programas"; continue }
+        & $Escrever "Desinstalando a instância $($inst.Instancia) (SQL $($inst.Versao)). Leva alguns minutos..."
+        Log-Message "CMD" "COMANDO: `"$($cmd.Exe)`" $($cmd.Args)"
+        $cod = Invoke-ProcessoSemTravar $cmd.Exe $cmd.Args
+        if ($cod -notin $codigosOk) {
+            & $Escrever "  o setup recusou (código $cod); tentando só o motor do banco..."
+            Log-Message "CMD" "COMANDO: `"$($cmd.Exe)`" $($cmd.Reserva)"
+            $cod = Invoke-ProcessoSemTravar $cmd.Exe $cmd.Reserva
+        }
+        if ($cod -eq 3010) { $res.Reiniciar = $true }
+        if ($cod -in $codigosOk) { & $Escrever "  instância $($inst.Instancia) removida"; continue }
+        $res.Ok = $false
+        $res.Falhas += "Instância $($inst.Instancia) (código $cod)"
+        & $Escrever "  FALHOU (código $cod). O motivo fica no Summary.txt da pasta $(Join-Path (Split-Path (Split-Path $cmd.Exe -Parent) -Parent) 'Log'). Se o Windows estiver esperando reiniciar, reinicie e rode de novo."
+        & $Escrever "Parei antes dos programas: tirar componente de uma instância que ficou quebraria o SQL."
+        return $res
+    }
+
+    for ($volta = 1; $volta -le 2; $volta++) {
+        # O "Microsoft SQL Server 20xx" do SetupARP e o assistente do SQL (com janela): sai junto com as instancias
+        $itens = @((Get-SqlInstalados @inv).Programas | Where-Object { $_.Desinstalar -notmatch '(?i)SetupARP\.exe' } | ForEach-Object { [pscustomobject]@{ Item = $_; Cmd = (Get-ComandoDesinstalar $_) } })
+        # Os que saem sem janela primeiro; os que pedem confirmacao na janela deles por ultimo (e so na primeira volta)
+        $itens = @($itens | Where-Object { $null -ne $_.Cmd -and ($volta -eq 1 -or $_.Cmd.Silencioso) } | Sort-Object { -not $_.Cmd.Silencioso })
+        if ($itens.Count -eq 0) { break }
+        if ($volta -gt 1) { & $Escrever "Segunda volta: tentando de novo o que dependia de outro componente..." }
+        $tirou = 0
+        foreach ($x in $itens) {
+            & $Escrever "Desinstalando $($x.Item.Nome)$(if (-not $x.Cmd.Silencioso) { ' (confirme na janela dele)' })..."
+            Log-Message "CMD" "COMANDO: `"$($x.Cmd.Exe)`" $($x.Cmd.Args)"
+            try { $cod = Invoke-ProcessoSemTravar $x.Cmd.Exe $x.Cmd.Args -Visivel:(-not $x.Cmd.Silencioso) }
+            catch { $cod = -1; & $Escrever "  não abriu: $($_.Exception.Message)" }
+            if ($cod -eq 3010) { $res.Reiniciar = $true }
+            if ($cod -in $codigosOk) { $tirou++ } else { & $Escrever "  código $cod" }
+        }
+        if ($tirou -eq 0) { break }
+    }
+
+    $sufixo = " (antigo $((Get-Date).ToString("yyyy-MM-dd HH'h'mm")))"
+    foreach ($pasta in @($Pastas | Select-Object -Unique)) {
+        if ("$pasta" -eq "" -or -not (Test-Path -LiteralPath $pasta)) { continue }
+        $novoNome = (Split-Path $pasta -Leaf) + $sufixo
+        try {
+            Rename-Item -LiteralPath $pasta -NewName $novoNome -ErrorAction Stop
+            $res.Renomeadas += (Join-Path (Split-Path $pasta -Parent) $novoNome)
+            & $Escrever "Pasta $pasta renomeada para $novoNome (os bancos antigos ficam nela)"
+        }
+        catch {
+            $res.Falhas += "Pasta $pasta"
+            & $Escrever "Não consegui renomear $pasta ($($_.Exception.Message)). Reinicie o PC e renomeie na mão antes de instalar o SQL novo."
+        }
+    }
+
+    $fim = Get-SqlInstalados @inv
+    $res.Ficaram = @(@($fim.Instancias | ForEach-Object { "Instância $($_.Instancia)" }) + @($fim.Programas | ForEach-Object { $_.Nome }))
+    if ($res.Ficaram.Count -gt 0 -or $res.Falhas.Count -gt 0) { $res.Ok = $false }
+    return $res
+}
+
+function Show-DesinstalarSql {
+    # Botao Desinstalar SQL: mostra o que sai, exige digitar DESINSTALAR quando o banco do sistema esta no PC e
+    # desinstala com a janela respondendo (ela nao fecha no meio)
+    param($Button)
+    $titulo = "Desinstalar SQL"
+    $inv = Get-SqlInstalados
+    $banco = Find-BancoNetWebPdv $inv.Instancias
+    Log-Message "INFO" "Desinstalar SQL: $($inv.Instancias.Count) instância(s) e $($inv.Programas.Count) programa(s) com SQL no nome$(if ($banco -ne '') { "; banco do sistema em $banco" })"
+    if ($inv.Instancias.Count -eq 0 -and $inv.Programas.Count -eq 0) {
+        [System.Windows.Forms.MessageBox]::Show("Não há nada com SQL no nome instalado neste PC.", $titulo, "OK", "Information") | Out-Null
+        return
+    }
+
+    $f = New-ToolForm $titulo 780 600
+    New-ToolLabel $f "Desinstalar tudo que tem SQL no nome" 20 16 11 -Negrito | Out-Null
+    $lblExplicaDs = New-ToolLabel $f "Sai tudo que tem SQL no nome, de qualquer fabricante: primeiro as instâncias do SQL Server (pelo instalador do próprio SQL, sem janelas), depois os programas. A pasta Microsoft SQL Server é renomeada como backup, com os bancos antigos dentro. No fim, reinicie o PC antes de instalar o SQL novo." 20 44 9.5 -Cor $Script:UiSuave -W 730
+    $lblExplicaDs.Height = 58
+    $y = 108
+    $txtConfDs = $null
+    if ($banco -ne "") {
+        $lblBancoDs = New-ToolLabel $f "ATENÇÃO: este PC tem o banco do sistema. Desinstalar o SQL para o sistema até instalar o SQL novo e anexar o banco. Faça antes o Backup do Banco NetWebPDV.`r`n$banco" 20 $y 9.5 -Negrito -Cor $Script:UiVermelho -W 730
+        # Ate 4 linhas: caminho comprido do banco quebra em duas
+        $lblBancoDs.Height = 84
+        New-ToolLabel $f "Para liberar, digite DESINSTALAR:" 20 ($y + 92) 9.5 | Out-Null
+        $txtConfDs = New-Object System.Windows.Forms.TextBox
+        $txtConfDs.Location = New-Object System.Drawing.Point(250, ($y + 88))
+        $txtConfDs.Size = New-Object System.Drawing.Size(200, 28)
+        $txtConfDs.BackColor = [System.Drawing.Color]::FromArgb(20, 24, 34)
+        $txtConfDs.ForeColor = $Script:UiTexto
+        $txtConfDs.BorderStyle = 'FixedSingle'
+        $txtConfDs.Font = New-Object System.Drawing.Font("Segoe UI", 10)
+        [void]$f.Controls.Add($txtConfDs)
+        $y += 126
+    }
+    $lvDs = New-Object System.Windows.Forms.ListView
+    $lvDs.Location = New-Object System.Drawing.Point(20, $y)
+    $lvDs.Size = New-Object System.Drawing.Size(730, (430 - $y))
+    $lvDs.Anchor = 'Top, Left, Right, Bottom'
+    Format-ToolListView $lvDs
+    [void]$lvDs.Columns.Add("O que sai", 420)
+    [void]$lvDs.Columns.Add("Versão", 120)
+    [void]$lvDs.Columns.Add("Fabricante", 170)
+    $preencherDs = {
+        $lvDs.Items.Clear()
+        $atual = Get-SqlInstalados
+        foreach ($i in $atual.Instancias) {
+            $it = New-Object System.Windows.Forms.ListViewItem("Instância $($i.Instancia) do SQL Server")
+            [void]$it.SubItems.Add($i.Versao); [void]$it.SubItems.Add("Microsoft"); [void]$lvDs.Items.Add($it)
+        }
+        foreach ($p in $atual.Programas) {
+            $it = New-Object System.Windows.Forms.ListViewItem("$($p.Nome)$(if ($p.Oculto) { ' (componente)' })")
+            [void]$it.SubItems.Add($p.Versao); [void]$it.SubItems.Add($p.Fabricante); [void]$lvDs.Items.Add($it)
+        }
+    }
+    & $preencherDs
+    [void]$f.Controls.Add($lvDs)
+    $txtLogDs = New-Object System.Windows.Forms.TextBox
+    $txtLogDs.Multiline = $true
+    $txtLogDs.ReadOnly = $true
+    $txtLogDs.ScrollBars = 'Vertical'
+    $txtLogDs.Location = New-Object System.Drawing.Point(20, 438)
+    $txtLogDs.Size = New-Object System.Drawing.Size(730, 66)
+    $txtLogDs.Anchor = 'Left, Right, Bottom'
+    $txtLogDs.BackColor = [System.Drawing.Color]::FromArgb(20, 24, 34)
+    $txtLogDs.ForeColor = $Script:UiTexto
+    $txtLogDs.BorderStyle = 'FixedSingle'
+    $txtLogDs.Text = "$($lvDs.Items.Count) item(ns) na lista. Nada foi mexido ainda."
+    [void]$f.Controls.Add($txtLogDs)
+    $btnDesinstalarDs = New-ToolButton $f "DESINSTALAR TUDO" 20 514 260 34 $Script:UiVermelho $null ""
+    $btnFecharDs = New-ToolButton $f "FECHAR" 290 514 160 34 $Script:UiCinza $null ""
+    $btnDesinstalarDs.Anchor = 'Left, Bottom'
+    $btnFecharDs.Anchor = 'Left, Bottom'
+    $btnFecharDs.DialogResult = [System.Windows.Forms.DialogResult]::Cancel
+    $f.CancelButton = $btnFecharDs
+
+    $estadoDs = @{ Ocupado = $false }
+    $escreverDs = {
+        param($Texto)
+        Log-Message "INFO" "Desinstalar SQL: $Texto"
+        $txtLogDs.AppendText("`r`n$Texto")
+        [System.Windows.Forms.Application]::DoEvents()
+    }
+    $btnDesinstalarDs.Add_Click({
+            if ($null -ne $txtConfDs -and $txtConfDs.Text.Trim() -cne "DESINSTALAR") {
+                $txtLogDs.AppendText("`r`nPara liberar, digite DESINSTALAR (em maiúsculas) no campo acima.")
+                return
+            }
+            $resp = [System.Windows.Forms.MessageBox]::Show($f, "Desinstalar TUDO que tem SQL no nome deste PC ($($lvDs.Items.Count) item(ns) da lista)?`r`n`r`nNão tem como desfazer: para voltar, só instalando de novo. Os bancos antigos ficam na pasta renomeada.", $titulo, "YesNo", "Warning", "Button2")
+            if ($resp -ne [System.Windows.Forms.DialogResult]::Yes) { Log-Message "CANCEL" "Desinstalar SQL: cancelado na confirmação"; return }
+            $estadoDs.Ocupado = $true
+            $btnDesinstalarDs.Enabled = $false
+            $btnFecharDs.Enabled = $false
+            try {
+                Log-Message "INFO" "Desinstalar SQL: começou, confirmado pelo técnico$(if ($null -ne $txtConfDs) { ' (digitou DESINSTALAR com o banco do sistema no PC)' })"
+                $r = Invoke-DesinstalarSql -Escrever $escreverDs
+                if ($r.Ok) {
+                    Log-Message "SUCESSO" "Desinstalar SQL: tudo que tinha SQL no nome saiu$(if ($r.Renomeadas.Count -gt 0) { "; pasta(s) renomeada(s): $($r.Renomeadas -join '; ')" })"
+                    & $escreverDs "Pronto: tudo que tinha SQL no nome saiu. Reinicie o PC antes de instalar o SQL novo."
+                }
+                else {
+                    $listaFalhas = @($r.Falhas) + @($r.Ficaram | ForEach-Object { "ficou: $_" })
+                    Log-Message "ERRO" "Desinstalar SQL: terminou com pendências - $($listaFalhas -join '; ')"
+                    & $escreverDs "Terminou com pendências (veja acima). Reinicie o PC e rode de novo; o que ainda ficar, tire pelos Programas e Recursos."
+                }
+                [System.Windows.Forms.MessageBox]::Show($f, $(if ($r.Ok) { "Pronto: tudo que tinha SQL no nome saiu.`r`n`r`nReinicie o PC antes de instalar o SQL novo." } else { "Terminou com pendências:`r`n`r`n$((@($r.Falhas) + @($r.Ficaram | ForEach-Object { "ficou: $_" })) -join "`r`n")`r`n`r`nReinicie o PC e rode de novo." }), $titulo, "OK", $(if ($r.Ok) { "Information" } else { "Warning" })) | Out-Null
+            }
+            catch {
+                Log-Message "ERRO" "Desinstalar SQL: erro - $($_.Exception.Message)"
+                & $escreverDs "Erro: $($_.Exception.Message)"
+            }
+            finally {
+                $estadoDs.Ocupado = $false
+                $btnFecharDs.Enabled = $true
+                $btnDesinstalarDs.Enabled = $true
+                & $preencherDs
+            }
+        })
+    # Durante a desinstalacao a janela nao fecha (o setup do SQL ainda esta rodando)
+    $f.Add_FormClosing({
+            param($s, $e)
+            if ($estadoDs.Ocupado) { $e.Cancel = $true }
+        })
+    [void]$f.ShowDialog()
+    $f.Dispose()
+}
+
 # Versoes que o seletor (NetPDV, Link XMenu, Concentrador, Tablet, Totem) oferece; tambem alimenta o menu do botao direito
 function Get-VersoesSelector {
     param([string]$Type)
@@ -21655,6 +21961,9 @@ function Run-Config {
     Set-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" -Name "LaunchTo" -Value 1 -Force -ErrorAction SilentlyContinue
     Log-Message "CMD" "COMANDO: Set-ItemProperty ... HideFileExt 0"
     Set-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" -Name "HideFileExt" -Value 0 -Force -ErrorAction SilentlyContinue
+    # Itens ocultos visiveis (AppData, ProgramData...): o suporte vive entrando nessas pastas
+    Log-Message "CMD" "COMANDO: Set-ItemProperty ... Hidden 1"
+    Set-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" -Name "Hidden" -Value 1 -Force -ErrorAction SilentlyContinue
     
     Log-Message "LOG" "     Otimizacoes visuais preparadas (Ajuste Final Manual)."
     $Script:ProgressBar.Value = 45
@@ -21983,7 +22292,7 @@ $formWidth = if ($screen.Width -lt 1000) { 900 } else { 1000 }
 $formHeight = if ($screen.Height -lt 800) { 700 } else { 800 }
 
 $form = New-Object System.Windows.Forms.Form
-$form.Text = "Preparador XMenu – Suporte Técnico v5.78 - REVENDA"
+$form.Text = "Preparador XMenu – Suporte Técnico v5.79 - REVENDA"
 $form.Size = New-Object System.Drawing.Size($formWidth, $formHeight)
 $form.StartPosition = "CenterScreen"
 $form.BackColor = [System.Drawing.Color]::FromArgb(25, 25, 30); $form.ForeColor = 'White'
@@ -22597,6 +22906,9 @@ function Add-Btn {
     elseif ($U -eq "TOTEM-CHROME") {
         $b.Add_Click({ Show-TotemChrome $this })
     }
+    elseif ($U -eq "DESINSTALAR-SQL") {
+        $b.Add_Click({ Show-DesinstalarSql $this })
+    }
     elseif ($U -eq "VIDEOS-TUTORIAIS") {
         $b.Add_Click({ Open-VideosTutoriais $this })
     }
@@ -22671,6 +22983,8 @@ $Script:ToolTip.SetToolTip($bSqlMan, "ATENÇÃO: Instalação MANUAL e AVANÇADA
 $bSqlMan.Add_Click({ Install-SqlManual $this })
 Add-CopiarLinkAoBotao $bSqlMan "https://go.microsoft.com/fwlink/?linkid=866658" "SQL 2019 (Microsoft)" "Botão direito: copia o link do instalador do SQL 2019 (Microsoft)."
 [void]$tbl.Controls.Add($bSqlMan)
+# Vermelho: apaga coisas (o cliente com SQL de outro sistema precisa tirar antes de instalar o nosso)
+Add-Btn "Desinstalar SQL (tudo com SQL no nome)" "" "DESINSTALAR-SQL" "" -Color ([System.Drawing.Color]::FromArgb(120, 35, 35)) -Help "Para o cliente que já tem o SQL de outro sistema: mostra tudo que tem SQL no nome (de qualquer fabricante) e desinstala, primeiro as instâncias do SQL Server (pelo instalador do próprio SQL, sem janelas) e depois os programas. A pasta Microsoft SQL Server é renomeada como backup, com os bancos antigos dentro. Se o PC tiver o banco NetWebPDV, pede para digitar DESINSTALAR. No fim, reinicie o PC antes de instalar o SQL novo."
 
 Add-Title "PROGRAMAS NETCONTROLL"
 Add-Btn "Concentrador (Instalador)" "" "https://www.netcontroll.com.br/util/instaladores/netpdv/InstaladorConcentrador.exe" "Concentrador.exe" -Color $colorBlue -Help "Instalador automático do Concentrador XMenu."
@@ -22713,6 +23027,7 @@ $Script:ToolTip.SetToolTip($bVspe, "Instala o emulador de porta serial VSPE e os
 $bVspe.Add_Click({ Install-VSPE-Combined $this })
 Add-CopiarLinkAoBotao $bVspe "https://www.netcontroll.com.br/util/instaladores/VSPE/VSPE.zip" "VSPE" "Botão direito: copia o link do VSPE (o driver Epson fica no repositório interno e não tem link para repassar)."
 [void]$tbl.Controls.Add($bVspe)
+Add-Btn "OpenVSPE (2.0.7)" "" "https://github.com/VMazza10/OpenVSPE/releases/download/v2.0.7/OpenVSPE_V2.0.7.zip" "OpenVSPE_V2.0.7.zip" -Help "Alternativa ao VSPE que não pede conta: liga balança de porta serial e impressora térmica ao sistema pela rede e abre sozinho quando o usuário entra no Windows (atalho na Inicialização; se for fechado, não abre de novo sozinho). Baixa do GitHub (143 MB), extrai e abre a pasta: execute o OpenVSPE_V2.0.7.exe como administrador, com as pastas ui e service ao lado dele."
 
 Add-Btn "TeamViewer Full" "" "https://download.teamviewer.com/download/TeamViewer_Setup_x64.exe" "Teamviewer.exe" -Help "Cliente completo para acesso remoto TeamViewer."
 Add-Btn "TeamViewer com senha" "" "https://www.netcontroll.com.br/util/TeamViewerAtendimento.exe" "TeamViewerAtendimento.exe" -Help "TeamViewer QuickSupport de atendimento da NetControll, com senha: roda sem instalar; é só passar o ID para o suporte."
@@ -22968,7 +23283,7 @@ $bRam.Add_Click({ Show-LiberarMemoria })
 [void]$tbl.Controls.Add($bRam)
 
 # Mensagem de abertura: explica o programa para quem abre pela primeira vez
-Log-Message "INFO" "Preparador XMenu v5.78 - REVENDA - preparo e suporte de computadores com o sistema XMenu"
+Log-Message "INFO" "Preparador XMenu v5.79 - REVENDA - preparo e suporte de computadores com o sistema XMenu"
 foreach ($msgSenha in $Script:LogSenhaPendente) { Log-Message "INFO" $msgSenha }
 Log-Message "INFO" "Senha de abertura: acesso liberado"
 Log-Message "LOG" "==============================================================="
@@ -22980,7 +23295,10 @@ Log-Message "LOG" "  EXTERNOS ................... acesso remoto, Chrome, TEF HUB
 Log-Message "LOG" "  SUPORTE E DIAGNÓSTICO ...... impressoras, rede, SQL, backup, XMLs e reparos do Windows"
 Log-Message "LOG" "  Passe o mouse sobre um botão para ver o que ele faz antes de clicar."
 Log-Message "LOG" "---------------------------------------------------------------"
-Log-Message "LOG" "NOVO NA v5.78"
+Log-Message "LOG" "NOVO NA v5.79"
+Log-Message "SUCESSO" "  Preparar ambiente: o Explorer passa a mostrar os itens ocultos (as extensões de arquivo já apareciam)"
+Log-Message "SUCESSO" "  Externos: novo botão OpenVSPE (2.0.7), ao lado do VSPE: baixa do GitHub, extrai e abre a pasta para rodar o instalador (alternativa ao VSPE que não pede conta e abre quando o usuário entra no Windows)"
+Log-Message "SUCESSO" "  Banco de dados: novo botão Desinstalar SQL: tira tudo que tem SQL no nome (instâncias do SQL Server pelo instalador do próprio SQL, sem janelas, e depois os programas), renomeia a pasta Microsoft SQL Server como backup (os bancos antigos ficam nela) e pede para digitar DESINSTALAR quando o PC tem o banco NetWebPDV"
 Log-Message "SUCESSO" "  Externos: novo botão Totem Chrome (Criar Atalho): pede o IP do servidor, confere se o totem responde e cria o atalho Totem XMenu, que abre o totem no Chrome em tela cheia sem o aviso de restaurar páginas e sem zoom ou voltar página pelo toque"
 Log-Message "SUCESSO" "  Totem Chrome: pode abrir sozinho quando o Windows inicia, esperando o servidor responder (o totem que liga antes do servidor não fica na tela de erro); atalho antigo do totem na pasta Inicializar sai dela (fica guardado em Arquivos Xmenu\Inicializar antigo) para o Chrome não abrir duas vezes"
 Log-Message "SUCESSO" "  Suporte: novo botão Logon Automático do Windows: ao ligar o PC (inclusive depois de queda de energia) o Windows entra sozinho com o usuário e os programas da NetControll abrem sem ninguém digitar a senha; confere a senha antes de gravar, guarda a senha protegida pelo Windows (não fica legível no registro) e também desliga"
