@@ -1,6 +1,6 @@
 ﻿# =============================================================================
 # PREPARADOR XMENU - VERSAO REVENDA
-# Baseado na v5.77
+# Baseado na v5.78
 # Alteracoes Revenda:
 #   - Wallpaper: fundo_revenda.png
 #   - Removido: Atalhos de Suporte e Pasta Netcontroll
@@ -12017,23 +12017,24 @@ function Invoke-ClockSync {
 function Find-InicializacoesNetStart {
     # Onde o NetStart ja abre sozinho com o Windows, para nao criar um segundo e ele abrir duas vezes: arquivos das
     # pastas Inicializar que citam o netstart (no nome, dentro do .bat/.cmd ou no destino do atalho) e valores Run do
-    # registro. So le, nao muda nada. -Ignorar: o NetStart.bat do proprio Preparador.
-    param([string[]]$Pastas, [string[]]$ChavesRun, [string]$Ignorar = "")
+    # registro. So le, nao muda nada. -Ignorar: o NetStart.bat do proprio Preparador. -Padrao: o que procurar (o
+    # atalho do totem no Chrome usa outro).
+    param([string[]]$Pastas, [string[]]$ChavesRun, [string]$Ignorar = "", [string]$Padrao = '(?i)netstart')
     $achados = @()
     $shell = $null
     foreach ($pasta in $Pastas) {
         if ("$pasta".Trim() -eq "" -or -not (Test-Path -LiteralPath $pasta)) { continue }
         foreach ($arq in @(Get-ChildItem -LiteralPath $pasta -File -ErrorAction SilentlyContinue)) {
             if ($Ignorar -ne "" -and $arq.FullName -ieq $Ignorar) { continue }
-            $cita = ($arq.Name -match '(?i)netstart')
+            $cita = ($arq.Name -match $Padrao)
             if (-not $cita -and $arq.Extension -match '^(?i)\.(bat|cmd)$') {
-                try { $cita = ([System.IO.File]::ReadAllText($arq.FullName) -match '(?i)netstart') } catch {}
+                try { $cita = ([System.IO.File]::ReadAllText($arq.FullName) -match $Padrao) } catch {}
             }
             elseif (-not $cita -and $arq.Extension -ieq '.lnk') {
                 try {
                     if ($null -eq $shell) { $shell = New-Object -ComObject WScript.Shell }
                     $atalho = $shell.CreateShortcut($arq.FullName)
-                    $cita = ("$($atalho.TargetPath) $($atalho.Arguments)" -match '(?i)netstart')
+                    $cita = ("$($atalho.TargetPath) $($atalho.Arguments)" -match $Padrao)
                 }
                 catch {}
             }
@@ -12045,7 +12046,7 @@ function Find-InicializacoesNetStart {
             $valores = Get-ItemProperty -Path $chave -ErrorAction Stop
             foreach ($valor in $valores.PSObject.Properties) {
                 if ($valor.Name -in @('PSPath', 'PSParentPath', 'PSChildName', 'PSDrive', 'PSProvider')) { continue }
-                if ("$($valor.Value)" -match '(?i)netstart') { $achados += "$chave ($($valor.Name))" }
+                if ("$($valor.Value)" -match $Padrao) { $achados += "$chave ($($valor.Name))" }
             }
         }
         catch {}
@@ -20719,6 +20720,218 @@ function Install-PdvEdgeShortcut {
     }
 }
 
+# -----------------------------------------------------------------------------
+# TOTEM NO CHROME (TELA CHEIA)
+# O totem web (http://servidor/TOTEM/) roda no Chrome em modo quiosque. O atalho chama o AbrirTotem.cmd, que espera o
+# servidor responder antes de abrir o Chrome: o totem que liga antes do servidor (queda de energia) ficaria na tela de
+# erro, e o Chrome so tenta de novo depois de 1, 5 e 10 minutos.
+# -----------------------------------------------------------------------------
+function Get-ChromeExecutable {
+    # Chrome instalado para todos (Program Files), so para o usuario (AppData) ou onde o Windows registrou
+    $caminhos = @("$env:ProgramFiles\Google\Chrome\Application\chrome.exe", "${env:ProgramFiles(x86)}\Google\Chrome\Application\chrome.exe", "$env:LOCALAPPDATA\Google\Chrome\Application\chrome.exe")
+    try { $caminhos += "$((Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\chrome.exe' -ErrorAction Stop).'(default)')" } catch {}
+    foreach ($c in $caminhos) { if ("$c" -ne "" -and (Test-Path -LiteralPath $c)) { return $c } }
+    return ""
+}
+
+function New-TotemChromeAtalho {
+    # Grava o AbrirTotem.cmd e o atalho "Totem XMenu" na Area de Trabalho de todos e, com -Inicializar, na pasta
+    # Inicializar do usuario logado (sem -Inicializar, tira de la o atalho que o Preparador tinha posto).
+    # Os caminhos so mudam no teste.
+    param([string]$Endereco, [string]$Chrome, [switch]$Inicializar,
+        [string]$PastaLancador = "C:\Netcontroll\TotemChrome", [string]$AreaTrabalho = "", [string]$PastaInicializar = "")
+    # Aspas e % quebrariam o .cmd
+    if ($Endereco -notmatch '^https?://[^\s"%/]+(/[^\s"%]*)?$') { throw "endereço inválido: $Endereco" }
+    if ($AreaTrabalho -eq "") { $AreaTrabalho = [Environment]::GetFolderPath('CommonDesktopDirectory') }
+    if ($PastaInicializar -eq "") { $PastaInicializar = Get-PastaInicializarUsuario }
+    # Opcoes conferidas no codigo do Chromium (11/2026): --hide-crash-restore-bubble tira o "Restaurar paginas?" depois
+    # de queda de energia, --disable-pinch tira o zoom de pinca e OverscrollHistoryNavigation desligado tira o voltar
+    # pagina arrastando o dedo. O --disable-session-crashed-bubble e o --overscroll-history-navigation=0 sairam do Chrome.
+    $opcoes = '--profile-directory="Default" --kiosk --app="%URL%" --no-first-run --no-default-browser-check --hide-crash-restore-bubble --disable-pinch --disable-features=OverscrollHistoryNavigation'
+    $conteudo = (@(
+            '@echo off',
+            'rem Criado pelo Preparador XMenu: abre o totem no Chrome em tela cheia (para sair: Alt+F4).',
+            'rem Espera o servidor responder (ate uns 5 minutos) para o totem nao abrir na tela de erro.',
+            "set `"URL=$Endereco`"",
+            'if not exist "%SystemRoot%\System32\curl.exe" goto abrir',
+            'set /a tentativas=0',
+            ':esperar',
+            '"%SystemRoot%\System32\curl.exe" -s -f -o nul -m 3 "%URL%" && goto abrir',
+            'set /a tentativas+=1',
+            'if %tentativas% geq 40 goto abrir',
+            'ping -n 6 127.0.0.1 >nul',
+            'goto esperar',
+            ':abrir',
+            "start `"`" `"$Chrome`" $opcoes"
+        ) -join "`r`n") + "`r`n"
+    New-Item -ItemType Directory -Path $PastaLancador -Force | Out-Null
+    $cmd = Join-Path $PastaLancador "AbrirTotem.cmd"
+    # Sem BOM (o cmd leria o BOM como lixo); caminho com acento vai na pagina de codigo do prompt
+    $codCmd = [System.Text.Encoding]::ASCII
+    if ($conteudo -match '[^\x00-\x7F]') { $codCmd = [System.Text.Encoding]::GetEncoding([System.Globalization.CultureInfo]::CurrentCulture.TextInfo.OEMCodePage) }
+    [System.IO.File]::WriteAllText($cmd, $conteudo, $codCmd)
+    if ([System.IO.File]::ReadAllText($cmd, $codCmd) -ne $conteudo) { throw "o $cmd gravado não ficou igual" }
+
+    $shell = New-Object -ComObject WScript.Shell
+    $atalhos = @()
+    $noInicializar = Join-Path $PastaInicializar "Totem XMenu.lnk"
+    foreach ($pasta in @($AreaTrabalho) + @(if ($Inicializar) { $PastaInicializar })) {
+        if (-not (Test-Path -LiteralPath $pasta)) { New-Item -ItemType Directory -Path $pasta -Force | Out-Null }
+        $lnkPath = Join-Path $pasta "Totem XMenu.lnk"
+        $lnk = $shell.CreateShortcut($lnkPath)
+        $lnk.TargetPath = $cmd
+        $lnk.WorkingDirectory = $PastaLancador
+        $lnk.WindowStyle = 7   # a janela preta da espera fica minimizada
+        $lnk.IconLocation = "$Chrome,0"
+        $lnk.Save()
+        $atalhos += $lnkPath
+    }
+    if (-not $Inicializar -and (Test-Path -LiteralPath $noInicializar)) { Remove-Item -LiteralPath $noInicializar -Force }
+    return [pscustomobject]@{ Lancador = $cmd; Atalhos = $atalhos }
+}
+
+function Show-TotemChrome {
+    # Botao Totem Chrome (Criar Atalho): pede o IP do servidor, confere se o totem responde e cria o atalho
+    param($Button)
+    $titulo = "Totem no Chrome (tela cheia)"
+    $chrome = Get-ChromeExecutable
+    if ($chrome -eq "") {
+        Log-Message "ERRO" "Totem Chrome: o Google Chrome não está instalado neste PC"
+        [System.Windows.Forms.MessageBox]::Show("O Google Chrome não está instalado neste PC.`r`n`r`nInstale pelo botão Google Chrome (EXTERNOS) e clique de novo.", $titulo, "OK", "Warning") | Out-Null
+        return
+    }
+    # Reconfigurando: volta o endereco que ja estava; senao, a faixa de IP deste PC (o tecnico so completa o final)
+    $inicial = ""
+    try {
+        $existente = [System.IO.File]::ReadAllText("C:\Netcontroll\TotemChrome\AbrirTotem.cmd")
+        if ($existente -match 'set "URL=([^"\r\n]+)"') { $inicial = $Matches[1] }
+    }
+    catch {}
+    if ($inicial -eq "") {
+        try {
+            $ipPc = "$(@(Get-NetIPConfiguration -ErrorAction Stop | Where-Object { $_.IPv4DefaultGateway })[0].IPv4Address[0].IPAddress)"
+            if ($ipPc -match '^(\d+\.\d+\.\d+\.)') { $inicial = $Matches[1] }
+        }
+        catch {}
+    }
+    Log-Message "INFO" "Totem Chrome: abrindo a janela (Chrome em $chrome)"
+
+    $dlgTc = New-ToolForm $titulo 500 344
+    $dlgTc.FormBorderStyle = 'FixedDialog'
+    $dlgTc.MaximizeBox = $false
+    $dlgTc.MinimizeBox = $false
+    New-ToolLabel $dlgTc "Atalho do totem no Chrome" 20 16 11 -Negrito | Out-Null
+    $lblExplicaTc = New-ToolLabel $dlgTc "Abre o totem em tela cheia, sem barra nem abas (modo quiosque), sem o aviso de restaurar páginas e sem zoom ou voltar página pelo toque. Para sair do totem: Alt+F4." 20 44 9.5 -Cor $Script:UiSuave -W 450
+    $lblExplicaTc.Height = 58
+    New-ToolLabel $dlgTc "IP do servidor" 20 112 9.5 | Out-Null
+    $txtIpTc = New-Object System.Windows.Forms.TextBox
+    $txtIpTc.Location = New-Object System.Drawing.Point(130, 108)
+    $txtIpTc.Size = New-Object System.Drawing.Size(340, 28)
+    $txtIpTc.BackColor = [System.Drawing.Color]::FromArgb(20, 24, 34)
+    $txtIpTc.ForeColor = $Script:UiTexto
+    $txtIpTc.BorderStyle = 'FixedSingle'
+    $txtIpTc.Font = New-Object System.Drawing.Font("Segoe UI", 11)
+    $txtIpTc.Text = $inicial
+    [void]$dlgTc.Controls.Add($txtIpTc)
+    $lblUrlTc = New-ToolLabel $dlgTc "" 130 140 8.5 -Cor $Script:UiSuave -W 340
+    # IP sozinho vira http://IP/TOTEM/; endereco completo (com http ou com /) fica como foi digitado
+    $montarUrl = {
+        $t = $txtIpTc.Text.Trim()
+        if ($t -match '^https?://') { return $t }
+        if ($t -match '/') { return "http://$t" }
+        return "http://$t/TOTEM/"
+    }
+    $txtIpTc.Add_TextChanged({ $lblUrlTc.Text = "Endereço: $(& $montarUrl)" })
+    $lblUrlTc.Text = "Endereço: $(& $montarUrl)"
+    $chkIniTc = New-Object System.Windows.Forms.CheckBox
+    $chkIniTc.Text = "Abrir sozinho quando o Windows iniciar (espera o servidor responder)"
+    $chkIniTc.Location = New-Object System.Drawing.Point(20, 170)
+    $chkIniTc.Size = New-Object System.Drawing.Size(450, 24)
+    $chkIniTc.ForeColor = $Script:UiTexto
+    $chkIniTc.BackColor = [System.Drawing.Color]::Transparent
+    $chkIniTc.Cursor = 'Hand'
+    $chkIniTc.Checked = $true
+    [void]$dlgTc.Controls.Add($chkIniTc)
+    $lblStatusTc = New-ToolLabel $dlgTc "" 20 200 9 -Cor $Script:UiSuave -W 450
+    $lblStatusTc.Height = 38
+    $btnCriarTc = New-ToolButton $dlgTc "CRIAR ATALHO" 20 246 225 34 $Script:UiVerde $null ""
+    $btnCancelarTc = New-ToolButton $dlgTc "CANCELAR" 255 246 215 34 $Script:UiCinza $null ""
+    $btnCancelarTc.DialogResult = [System.Windows.Forms.DialogResult]::Cancel
+    $dlgTc.CancelButton = $btnCancelarTc
+    $dlgTc.ActiveControl = $txtIpTc
+    $btnCriarTc.Add_Click({
+            $url = & $montarUrl
+            if ($url -notmatch '^https?://[^\s"%/]+(/[^\s"%]*)?$' -or $url -match '^https?://(\d+\.){3}/') {
+                $lblStatusTc.ForeColor = $Script:UiVermelho
+                $lblStatusTc.Text = "Digite o IP do servidor completo (ex.: 192.168.1.126)."
+                return
+            }
+            # Confere em segundo plano (ate 5 s) se o totem responde: IP digitado errado deixaria o totem esperando
+            $btnCriarTc.Enabled = $false
+            $lblStatusTc.ForeColor = $Script:UiSuave
+            $lblStatusTc.Text = "Conferindo se o totem responde em $url ..."
+            $motivo = ""
+            $cliente = $null
+            try {
+                Add-Type -AssemblyName System.Net.Http
+                $cliente = New-Object System.Net.Http.HttpClient
+                $cliente.Timeout = [TimeSpan]::FromSeconds(5)
+                $tarefa = $cliente.GetAsync($url)
+                Wait-SqlTarefa $tarefa
+                if (-not $tarefa.Result.IsSuccessStatusCode) { $motivo = "o servidor respondeu $([int]$tarefa.Result.StatusCode) $($tarefa.Result.ReasonPhrase)" }
+            }
+            catch [System.OperationCanceledException] { $motivo = "não respondeu em 5 segundos" }
+            catch {
+                # O HttpClient embrulha o motivo de verdade (conexão recusada, nome não encontrado...)
+                $ex = $_.Exception
+                while ($null -ne $ex.InnerException) { $ex = $ex.InnerException }
+                $motivo = $ex.Message
+            }
+            finally { if ($null -ne $cliente) { $cliente.Dispose() }; $btnCriarTc.Enabled = $true }
+            if ($motivo -ne "") {
+                Log-Message "ERRO" "Totem Chrome: $url não respondeu ($motivo)"
+                $lblStatusTc.ForeColor = $Script:UiVermelho
+                $lblStatusTc.Text = "Não respondeu: $motivo"
+                $resp = [System.Windows.Forms.MessageBox]::Show("O totem não respondeu em:`r`n$url`r`n($motivo)`r`n`r`nConfira o IP do servidor e se o servidor está ligado. Criar o atalho mesmo assim?", $titulo, "YesNo", "Warning", "Button2")
+                if ($resp -ne [System.Windows.Forms.DialogResult]::Yes) { return }
+            }
+            else { Log-Message "INFO" "Totem Chrome: $url respondeu" }
+            $dlgTc.Tag = @{ Url = $url; Inicializar = [bool]$chkIniTc.Checked }
+            $dlgTc.DialogResult = [System.Windows.Forms.DialogResult]::OK
+        })
+    $resTc = $dlgTc.ShowDialog()
+    $dadosTc = $dlgTc.Tag
+    $dlgTc.Dispose()
+    if ($resTc -ne [System.Windows.Forms.DialogResult]::OK) { Log-Message "CANCEL" "Totem Chrome: nada foi criado"; return }
+
+    try {
+        # Atalho antigo que ja abre o totem com o Windows: com dois, o Chrome abriria duas janelas
+        if ($dadosTc.Inicializar) {
+            $pastasIni = @((Get-PastaInicializarUsuario), [Environment]::GetFolderPath('CommonStartup'), [Environment]::GetFolderPath('Startup')) | Select-Object -Unique
+            $antigos = @(Find-InicializacoesNetStart -Pastas $pastasIni -ChavesRun @() -Padrao '(?i)--kiosk|AbrirTotem' | Where-Object { (Split-Path $_ -Leaf) -ine 'Totem XMenu.lnk' })
+            if ($antigos.Count -gt 0) {
+                $lista = (@($antigos | ForEach-Object { "  - $_" })) -join "`r`n"
+                $resp = [System.Windows.Forms.MessageBox]::Show("Estes atalhos já abrem o totem quando o Windows inicia e vão sair da pasta Inicializar, para o Chrome não abrir duas vezes (ficam guardados em Arquivos Xmenu\Inicializar antigo):`r`n`r`n$lista", $titulo, "OKCancel", "Information")
+                if ($resp -ne [System.Windows.Forms.DialogResult]::OK) { Log-Message "CANCEL" "Totem Chrome: nada foi criado (atalhos antigos mantidos)"; return }
+                $guarda = Join-Path $Script:DownloadFolder ("Inicializar antigo\" + (Get-Date).ToString("yyyy-MM-dd HH'h'mm'm'ss"))
+                New-Item -ItemType Directory -Path $guarda -Force | Out-Null
+                foreach ($velho in $antigos) {
+                    Move-Item -LiteralPath $velho -Destination (Join-Path $guarda (Split-Path $velho -Leaf)) -Force -ErrorAction Stop
+                    Log-Message "INFO" "Totem Chrome: $velho saiu da pasta Inicializar (guardado em $guarda)"
+                }
+            }
+        }
+        $info = New-TotemChromeAtalho -Endereco $dadosTc.Url -Chrome $chrome -Inicializar:$dadosTc.Inicializar
+        Log-Message "SUCESSO" "Totem Chrome: atalho criado para $($dadosTc.Url) em $($info.Atalhos -join '; ') (abre $($info.Lancador))"
+        if ($null -ne $Button) { Set-ButtonDone -Button $Button -Label "ATALHO CRIADO" }
+        [System.Windows.Forms.MessageBox]::Show("Pronto: o atalho Totem XMenu está na Área de Trabalho$(if ($dadosTc.Inicializar) { ' e abre sozinho quando o Windows inicia' }).`r`n`r`nEndereço: $($dadosTc.Url)`r`nPara sair do totem: Alt+F4.", $titulo, "OK", "Information") | Out-Null
+    }
+    catch {
+        Log-Message "ERRO" "Totem Chrome: não consegui criar o atalho - $($_.Exception.Message)"
+        [System.Windows.Forms.MessageBox]::Show("Não consegui criar o atalho do totem:`r`n$($_.Exception.Message)", $titulo, "OK", "Error") | Out-Null
+    }
+}
+
 function Install-VSPE-Combined {
     param($Button)
     if ($Script:IsDownloading) { 
@@ -21770,7 +21983,7 @@ $formWidth = if ($screen.Width -lt 1000) { 900 } else { 1000 }
 $formHeight = if ($screen.Height -lt 800) { 700 } else { 800 }
 
 $form = New-Object System.Windows.Forms.Form
-$form.Text = "Preparador XMenu – Suporte Técnico v5.77 - REVENDA"
+$form.Text = "Preparador XMenu – Suporte Técnico v5.78 - REVENDA"
 $form.Size = New-Object System.Drawing.Size($formWidth, $formHeight)
 $form.StartPosition = "CenterScreen"
 $form.BackColor = [System.Drawing.Color]::FromArgb(25, 25, 30); $form.ForeColor = 'White'
@@ -22381,6 +22594,9 @@ function Add-Btn {
     elseif ($U -eq "PDV-EDGE-SHORTCUT") {
         $b.Add_Click({ Install-PdvEdgeShortcut $this })
     }
+    elseif ($U -eq "TOTEM-CHROME") {
+        $b.Add_Click({ Show-TotemChrome $this })
+    }
     elseif ($U -eq "VIDEOS-TUTORIAIS") {
         $b.Add_Click({ Open-VideosTutoriais $this })
     }
@@ -22503,6 +22719,7 @@ Add-Btn "TeamViewer com senha" "" "https://www.netcontroll.com.br/util/TeamViewe
 Add-Btn "AnyDesk" "" "https://download.anydesk.com/AnyDesk.exe" "AnyDesk.exe" -Help "Ferramenta de acesso remoto AnyDesk."
 Add-Btn "Google Chrome" "" "https://github.com/VMazza10/Preparador-de-Ambiente-XMenu/releases/download/Chrome/ChromeSetup.exe" "ChromeSetup.exe" -Help "Instalador online do navegador Google Chrome."
 Add-Btn "PDV EDGE (Criar Atalho)" "" "PDV-EDGE-SHORTCUT" "" -Color $colorBlue -Help "Cria na Área de Trabalho o atalho do NetPDV para abrir pelo Microsoft Edge em modo aplicativo/tela cheia."
+Add-Btn "Totem Chrome (Criar Atalho)" "" "TOTEM-CHROME" "" -Color $colorBlue -Help "Cria o atalho Totem XMenu: abre o totem (http://IP-do-servidor/TOTEM/) no Chrome em tela cheia, sem o aviso de restaurar páginas e sem zoom ou voltar página pelo toque. Pode abrir sozinho quando o Windows inicia e espera o servidor responder antes de abrir. Confere se o totem responde antes de criar."
 Add-Btn "Revo Uninstaller" "" "https://download.revouninstaller.com/download/revosetup.exe" "revosetup.exe" -Help "Utilitário para desinstalação completa de programas e limpeza de restos."
 Add-Btn "TEF HUB Windows (x86 - sempre a versão atual)" "" "TEFHUB-X86" "" -Help "Consulta o GitHub oficial da Elgin no momento do clique e baixa a versão x86 mais recente do TEF HUB. Não precisa mais trocar o link na mão."
 Add-Btn "Advanced IP Scanner" "" "https://download.advanced-ip-scanner.com/download/files/Advanced_IP_Scanner_2.5.4594.1.exe" "Advanced_IP_Scanner.exe" -Help "Ferramenta de varredura de rede local Advanced IP Scanner."
@@ -22751,7 +22968,7 @@ $bRam.Add_Click({ Show-LiberarMemoria })
 [void]$tbl.Controls.Add($bRam)
 
 # Mensagem de abertura: explica o programa para quem abre pela primeira vez
-Log-Message "INFO" "Preparador XMenu v5.77 - REVENDA - preparo e suporte de computadores com o sistema XMenu"
+Log-Message "INFO" "Preparador XMenu v5.78 - REVENDA - preparo e suporte de computadores com o sistema XMenu"
 foreach ($msgSenha in $Script:LogSenhaPendente) { Log-Message "INFO" $msgSenha }
 Log-Message "INFO" "Senha de abertura: acesso liberado"
 Log-Message "LOG" "==============================================================="
@@ -22763,7 +22980,9 @@ Log-Message "LOG" "  EXTERNOS ................... acesso remoto, Chrome, TEF HUB
 Log-Message "LOG" "  SUPORTE E DIAGNÓSTICO ...... impressoras, rede, SQL, backup, XMLs e reparos do Windows"
 Log-Message "LOG" "  Passe o mouse sobre um botão para ver o que ele faz antes de clicar."
 Log-Message "LOG" "---------------------------------------------------------------"
-Log-Message "LOG" "NOVO NA v5.77"
+Log-Message "LOG" "NOVO NA v5.78"
+Log-Message "SUCESSO" "  Externos: novo botão Totem Chrome (Criar Atalho): pede o IP do servidor, confere se o totem responde e cria o atalho Totem XMenu, que abre o totem no Chrome em tela cheia sem o aviso de restaurar páginas e sem zoom ou voltar página pelo toque"
+Log-Message "SUCESSO" "  Totem Chrome: pode abrir sozinho quando o Windows inicia, esperando o servidor responder (o totem que liga antes do servidor não fica na tela de erro); atalho antigo do totem na pasta Inicializar sai dela (fica guardado em Arquivos Xmenu\Inicializar antigo) para o Chrome não abrir duas vezes"
 Log-Message "SUCESSO" "  Suporte: novo botão Logon Automático do Windows: ao ligar o PC (inclusive depois de queda de energia) o Windows entra sozinho com o usuário e os programas da NetControll abrem sem ninguém digitar a senha; confere a senha antes de gravar, guarda a senha protegida pelo Windows (não fica legível no registro) e também desliga"
 Log-Message "SUCESSO" "  Preparar ambiente: a confirmação tem a opção Logon automático (já vem marcada quando ainda está desligado) e pede a senha do usuário antes de começar"
 Log-Message "SUCESSO" "  Vídeos tutoriais: novos vídeos Como integrar produtos no iFood e Como usar a API do XMenu"
