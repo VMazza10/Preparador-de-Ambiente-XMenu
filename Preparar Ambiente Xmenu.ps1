@@ -1,5 +1,5 @@
 ﻿# =============================================================================
-# PREPARADOR XMENU v5.79
+# PREPARADOR XMENU v5.80
 # Visual: Dashboard Moderno
 # Correcoes:
 #   - CRITICO: Removido DoEvents do loop de evento de download (causava crash).
@@ -20962,6 +20962,53 @@ function Show-TotemChrome {
     }
 }
 
+# -----------------------------------------------------------------------------
+# OPENVSPE (sempre a versao atual)
+# O botao consulta a ultima versao publicada (Release) no GitHub na hora do clique: versao nova do OpenVSPE e so
+# publicar a Release com o .zip, o Preparador nao muda. Sem resposta do GitHub, baixa a 2.0.7 de reserva.
+# -----------------------------------------------------------------------------
+function Get-OpenVspeUltimaVersao {
+    # @{ Versao; Url; Arquivo } da ultima Release com .zip, ou $null. Consulta em segundo plano (ate 10 s).
+    # -Api so muda no teste.
+    param([string]$Api = "https://api.github.com/repos/VMazza10/OpenVSPE/releases/latest")
+    $cliente = $null
+    try {
+        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+        Add-Type -AssemblyName System.Net.Http
+        $cliente = New-Object System.Net.Http.HttpClient
+        $cliente.Timeout = [TimeSpan]::FromSeconds(10)
+        $cliente.DefaultRequestHeaders.UserAgent.ParseAdd("XMenu-Preparador")
+        $tarefa = $cliente.GetStringAsync($Api)
+        Wait-SqlTarefa $tarefa
+        $rel = $tarefa.Result | ConvertFrom-Json
+        $zip = @($rel.assets | Where-Object { "$($_.name)" -match '(?i)\.zip$' })[0]
+        if ($null -eq $zip) { Log-Message "ERRO" "OpenVSPE: a última Release ($($rel.tag_name)) não tem .zip anexado"; return $null }
+        return [pscustomobject]@{ Versao = ("$($rel.tag_name)" -replace '^[vV]', ''); Url = "$($zip.browser_download_url)"; Arquivo = "$($zip.name)" }
+    }
+    catch {
+        $ex = $_.Exception
+        while ($null -ne $ex.InnerException) { $ex = $ex.InnerException }
+        Log-Message "ERRO" "OpenVSPE: não consegui consultar a última versão no GitHub: $($ex.Message)"
+        return $null
+    }
+    finally { if ($null -ne $cliente) { $cliente.Dispose() } }
+}
+
+function Install-OpenVspe {
+    param($Button)
+    $textoOriginal = $Button.Text
+    $Button.Text = "Verificando a última versão..."
+    $Button.Enabled = $false
+    try { $info = Get-OpenVspeUltimaVersao }
+    finally { $Button.Enabled = $true; $Button.Text = $textoOriginal }
+    if ($null -eq $info) {
+        $info = [pscustomobject]@{ Versao = "2.0.7"; Url = "https://github.com/VMazza10/OpenVSPE/releases/download/v2.0.7/OpenVSPE_V2.0.7.zip"; Arquivo = "OpenVSPE_V2.0.7.zip" }
+        Log-Message "INFO" "OpenVSPE: sem resposta do GitHub, baixando a versão de reserva $($info.Versao)"
+    }
+    else { Log-Message "INFO" "OpenVSPE: última versão publicada no GitHub: $($info.Versao) ($($info.Arquivo))" }
+    Start-Download $info.Url $info.Arquivo $Button
+}
+
 function Install-VSPE-Combined {
     param($Button)
     if ($Script:IsDownloading) { 
@@ -22374,7 +22421,7 @@ $formWidth = if ($screen.Width -lt 1200) { $screen.Width - 50 } else { 1200 }
 $formHeight = if ($screen.Height -lt 900) { $screen.Height - 50 } else { 900 }
 
 $form = New-Object System.Windows.Forms.Form
-$form.Text = "Preparador XMenu – Suporte Técnico v5.79"
+$form.Text = "Preparador XMenu – Suporte Técnico v5.80"
 $form.Size = New-Object System.Drawing.Size($formWidth, $formHeight)
 $form.StartPosition = "CenterScreen"
 $form.BackColor = [System.Drawing.Color]::FromArgb(25, 25, 30); $form.ForeColor = 'White'
@@ -22992,6 +23039,10 @@ function Add-Btn {
     elseif ($U -eq "DESINSTALAR-SQL") {
         $b.Add_Click({ Show-DesinstalarSql $this })
     }
+    elseif ($U -eq "OPENVSPE") {
+        # Link resolvido na hora do clique (ultima Release publicada)
+        $b.Add_Click({ Install-OpenVspe $this })
+    }
     elseif ($U -eq "VIDEOS-TUTORIAIS") {
         $b.Add_Click({ Open-VideosTutoriais $this })
     }
@@ -23109,7 +23160,7 @@ $Script:ToolTip.SetToolTip($bVspe, "Instala o emulador de porta serial VSPE e os
 $bVspe.Add_Click({ Install-VSPE-Combined $this })
 Add-CopiarLinkAoBotao $bVspe "https://www.netcontroll.com.br/util/instaladores/VSPE/VSPE.zip" "VSPE" "Botão direito: copia o link do VSPE (o driver Epson fica no repositório interno e não tem link para repassar)."
 [void]$tbl.Controls.Add($bVspe)
-Add-Btn "OpenVSPE (2.0.7)" "" "https://github.com/VMazza10/OpenVSPE/releases/download/v2.0.7/OpenVSPE_V2.0.7.zip" "OpenVSPE_V2.0.7.zip" -Help "Alternativa ao VSPE que não pede conta: liga balança de porta serial e impressora térmica ao sistema pela rede e abre sozinho quando o usuário entra no Windows (atalho na Inicialização; se for fechado, não abre de novo sozinho). Baixa do GitHub (143 MB), extrai e abre a pasta: execute o OpenVSPE_V2.0.7.exe como administrador, com as pastas ui e service ao lado dele."
+Add-Btn "OpenVSPE (sempre a versão atual)" "" "OPENVSPE" "" -Help "Alternativa ao VSPE que não pede conta: liga balança de porta serial e impressora térmica ao sistema pela rede e abre sozinho quando o usuário entra no Windows (atalho na Inicialização; se for fechado, não abre de novo sozinho). Na hora do clique consulta a última versão publicada no GitHub, baixa (cerca de 140 MB), extrai e abre a pasta: execute o OpenVSPE_V*.exe como administrador, com as pastas ui e service ao lado dele."
 
 Add-Btn "TeamViewer Full" "" "https://download.teamviewer.com/download/TeamViewer_Setup_x64.exe" "Teamviewer.exe" -Help "Cliente completo para acesso remoto TeamViewer."
 Add-Btn "TeamViewer com senha" "" "https://www.netcontroll.com.br/util/TeamViewerAtendimento.exe" "TeamViewerAtendimento.exe" -Help "TeamViewer QuickSupport de atendimento da NetControll, com senha: roda sem instalar; é só passar o ID para o suporte."
@@ -23368,7 +23419,7 @@ $bRam.Add_Click({ Show-LiberarMemoria })
 [void]$tbl.Controls.Add($bRam)
 
 # Mensagem de abertura: explica o programa para quem abre pela primeira vez
-Log-Message "INFO" "Preparador XMenu v5.79 - preparo e suporte de computadores com o sistema XMenu"
+Log-Message "INFO" "Preparador XMenu v5.80 - preparo e suporte de computadores com o sistema XMenu"
 foreach ($msgSenha in $Script:LogSenhaPendente) { Log-Message "INFO" $msgSenha }
 Log-Message "INFO" "Senha de abertura: acesso liberado"
 Log-Message "LOG" "==============================================================="
@@ -23380,7 +23431,8 @@ Log-Message "LOG" "  EXTERNOS ................... acesso remoto, Chrome, TEF HUB
 Log-Message "LOG" "  SUPORTE E DIAGNÓSTICO ...... impressoras, rede, SQL, backup, XMLs e reparos do Windows"
 Log-Message "LOG" "  Passe o mouse sobre um botão para ver o que ele faz antes de clicar."
 Log-Message "LOG" "---------------------------------------------------------------"
-Log-Message "LOG" "NOVO NA v5.79"
+Log-Message "LOG" "NOVO NA v5.80"
+Log-Message "SUCESSO" "  Externos: o botão OpenVSPE agora consulta a última versão publicada no GitHub na hora do clique (versão nova do OpenVSPE já aparece sem atualizar o Preparador; sem resposta do GitHub, baixa a 2.0.7)"
 Log-Message "SUCESSO" "  Preparar ambiente: o Explorer passa a mostrar os itens ocultos (as extensões de arquivo já apareciam)"
 Log-Message "SUCESSO" "  Externos: novo botão OpenVSPE (2.0.7), ao lado do VSPE: baixa do GitHub, extrai e abre a pasta para rodar o instalador (alternativa ao VSPE que não pede conta e abre quando o usuário entra no Windows)"
 Log-Message "SUCESSO" "  Banco de dados: novo botão Desinstalar SQL: tira tudo que tem SQL no nome (instâncias do SQL Server pelo instalador do próprio SQL, sem janelas, e depois os programas), renomeia a pasta Microsoft SQL Server como backup (os bancos antigos ficam nela) e pede para digitar DESINSTALAR quando o PC tem o banco NetWebPDV"
