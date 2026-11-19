@@ -1,6 +1,6 @@
 ﻿# =============================================================================
 # PREPARADOR XMENU - VERSAO REVENDA
-# Baseado na v5.80
+# Baseado na v5.81
 # Alteracoes Revenda:
 #   - Wallpaper: fundo_revenda.png
 #   - Removido: Atalhos de Suporte e Pasta Netcontroll
@@ -1430,6 +1430,74 @@ function ConvertTo-FaixaTexto {
     return ($partes -join ", ")
 }
 
+function ConvertFrom-SeriesNotas {
+    # Notas de varias series no mesmo campo: "10: 8704, 8841; 28: 14, 19-20". O que vem antes da primeira
+    # "serie:" (ou o campo todo, quando nao tem nenhuma) e da serie da caixa, como sempre foi.
+    # Cliente com varios caixas (uma serie em cada) fazia uma busca por serie.
+    # Devolve hashtable: Ok / Grupos (@{ Serie; Notas }, Serie $null = falta escolher) / Total / Erro / Confirmar
+    param([string]$Texto, [string]$SeriePadrao = "", [int]$LimiteAviso = 2000, [switch]$Confirmar)
+    $res = @{ Ok = $false; Grupos = @(); Total = 0; Erro = ""; Confirmar = $false }
+    # [antes da 1a serie, serie, notas, serie, notas...]; (?<!\d) para "12345:" nao virar a serie 345
+    $pedacos = [regex]::Split("$Texto", '(?<!\d)(\d{1,3})\s*:')
+    # Chave em texto: dicionario ordenado com chave numero seria lido pela posicao
+    $porSerie = [ordered]@{}
+    $padrao = "$SeriePadrao".Trim()
+    if ("$($pedacos[0])" -match '\d') { $porSerie["$padrao"] = @("$($pedacos[0])") }
+    for ($i = 1; $i -lt $pedacos.Count; $i += 2) {
+        $s = "$([int]$pedacos[$i])"
+        if (-not $porSerie.Contains($s)) { $porSerie[$s] = @() }
+        $porSerie[$s] += "$($pedacos[$i + 1])"
+    }
+    if ($porSerie.Count -eq 0) { $res.Erro = "Não entendi as notas. Informe algo como 1-15 ou 1,5,9 (várias séries: 10: 1-5; 28: 7)."; return $res }
+    foreach ($s in $porSerie.Keys) {
+        $fx = ConvertFrom-FaixaNotas -Texto ($porSerie[$s] -join ',')
+        if (-not $fx.Ok) {
+            if ($porSerie.Count -gt 1) { $res.Erro = "Série $($s): $($fx.Erro)" } else { $res.Erro = $fx.Erro }
+            return $res
+        }
+        $serieGrupo = $null
+        if ($s -match '^\d+$') { $serieGrupo = [int]$s }
+        $res.Grupos += @{ Serie = $serieGrupo; Notas = $fx.Notas }
+        $res.Total += $fx.Total
+    }
+    $res.Ok = $true
+    if ($res.Total -gt $LimiteAviso) {
+        $res.Confirmar = $true
+        if ($Confirmar) {
+            $msg = "Você selecionou $($res.Total) notas. Isso pode demorar bastante e gerar muitos arquivos.`r`n`r`nDeseja continuar mesmo assim?"
+            $r = [System.Windows.Forms.MessageBox]::Show($msg, "Baixar XMLs NFC-e", "YesNo", "Warning")
+            if ($r -ne [System.Windows.Forms.DialogResult]::Yes) {
+                $res.Ok = $false
+                $res.Erro = "Busca cancelada: $($res.Total) notas é um lote muito grande."
+            }
+        }
+    }
+    return $res
+}
+
+function ConvertFrom-ListaColadaNotas {
+    # Texto de varias linhas colado no campo Notas, que e de uma linha so:
+    # - relatorio do contador (Inicial / Final / Serie / Especie, "8704  8704  10  NFC-e") vira
+    #   "10: 8704, 8841; 28: 14, 19-20"; titulo, CNPJ e cabecalho saem, e NF-e (modelo 55) fica de fora
+    # - qualquer outra lista (uma nota por linha, "serie: notas" por linha) so junta as linhas
+    # Devolve hashtable: Texto / Faixas (linhas do relatorio lidas) / NFe (linhas de NF-e deixadas de fora)
+    param([string]$Texto)
+    $porSerie = [ordered]@{}; $faixas = 0; $nfe = 0
+    foreach ($l in ("$Texto" -split '\r?\n')) {
+        if ($l -notmatch '^\s*(\d+)\s+(?:a\s+)?(\d+)\s+(\d{1,3})\s+(.*\S)\s*$') { continue }
+        $ini = [long]$matches[1]; $fim = [long]$matches[2]; $s = "$([int]$matches[3])"; $especie = $matches[4]
+        # So linha com a especie NFC-e: tres numeros soltos podem ser so uma lista de notas
+        if ($especie -notmatch '(?i)NFC') { if ($especie -match '(?i)\bNF-?e\b') { $nfe++ }; continue }
+        if (-not $porSerie.Contains($s)) { $porSerie[$s] = @() }
+        $porSerie[$s] += $(if ($ini -eq $fim) { "$ini" } else { "$ini-$fim" })
+        $faixas++
+    }
+    if ($faixas -gt 0) { $txt = (@($porSerie.Keys | ForEach-Object { "$($_): " + ($porSerie[$_] -join ', ') }) -join '; ') }
+    elseif ($nfe -gt 0) { $txt = "" }
+    else { $txt = (@("$Texto" -split '\r?\n' | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' }) -join ', ') }
+    return @{ Texto = $txt; Faixas = $faixas; NFe = $nfe }
+}
+
 # Le a linha inteira de uma vez, coluna por coluna, na ordem em que vieram.
 #
 # Esta e a forma segura: em cliente com SQL Server 2008 R2 o leitor so entregava o
@@ -1793,6 +1861,7 @@ function Get-XmlNomeLote {
     # que tem dentro e nada mais, sem data e hora da geracao. Baixar o mesmo
     # filtro de novo vira "(2)", "(3)" em New-XmlLotePasta.
     #   Serie ...  XML NFC-e - Série 1 - Notas 1 a 15 e 2000 | ... - Nota 5
+    #              varias series: XML NFC-e - Séries 2, 10 e 28 - 7 notas (-Series e -Quantidade)
     #   Periodo .  XML NFC-e - Agosto de 2026 | ... - Julho a Agosto de 2026
     #              XML NFC-e - 01-08-2026 a 12-09-2026 | ... - 12-09-2026
     #   Chave ...  XML NFC-e - 3 chaves de acesso
@@ -1826,7 +1895,11 @@ function Get-XmlNomeLote {
         elseif ($listaSeries.Count -gt 3) { $partes += "$($listaSeries.Count) séries" }
     }
 
-    if ($Modo -eq 'Serie' -or $Modo -eq 'Pedido') {
+    if ($Modo -eq 'Serie' -and "$Serie".Trim() -eq "" -and @($Series | Sort-Object -Unique).Count -gt 1) {
+        # Varias series no mesmo lote: os numeros sem a serie do lado confundiriam
+        if ($Quantidade -eq 1) { $partes += "1 nota" } else { $partes += "$Quantidade notas" }
+    }
+    elseif ($Modo -eq 'Serie' -or $Modo -eq 'Pedido') {
         $palavra = "Nota"
         if ($Modo -eq 'Pedido') { $palavra = "Pedido" }
         $ord = @($Notas | Sort-Object -Unique)
@@ -3448,6 +3521,14 @@ function Show-XmlDownloader {
         $cmbSerie = & $novaCombo $cardBusca 76 48 90 -Editavel
         New-ToolLabel $cardBusca "Notas:" 182 51 9 -Cor $Script:UiSuave | Out-Null
         $txtNotas = & $novoCampo $cardBusca 232 48 300 "1-15,2000"
+        # Multilinha so por dentro (sem quebra e na altura de uma linha): a caixa de uma linha guarda so a
+        # primeira linha do que e colado, e a lista do contador vem uma faixa por linha. O $contaNotas
+        # junta as linhas assim que o texto chega.
+        $txtNotas.Multiline = $true
+        $txtNotas.WordWrap = $false
+        $txtNotas.Height = $cmbSerie.Height
+        $Script:XmlMultiSerie = $false
+        $Script:XmlGrupos = @()
         $lblContagem = New-ToolLabel $cardBusca "" 546 51 9 -Cor $Script:UiVerde -W 390
 
         $rbPeriodo = & $novoRadio $cardBusca "Por período" 12 76 230
@@ -3579,8 +3660,8 @@ function Show-XmlDownloader {
             $Script:ToolTip.SetToolTip($cmbParceiro, "Código da loja dentro do banco. Carrega sozinho ao testar a conexão. Quando só existe um, já vem escolhido.")
             $Script:ToolTip.SetToolTip($cmbCert, "Este banco emite NFC-e com mais de um certificado (uma empresa em cada caixa). Escolha de qual empresa são as notas; em Todos, cada empresa sai no seu próprio lote e zip. O nome vem do certificado que assinou as notas.")
             $Script:ToolTip.SetToolTip($rbSerie, "O modo mais usado: você sabe a série e os números das notas que o cliente pediu.")
-            $Script:ToolTip.SetToolTip($cmbSerie, "Série do caixa. A lista vem do próprio banco depois de testar a conexão.")
-            $Script:ToolTip.SetToolTip($txtNotas, "Aceita intervalo, lista ou os dois juntos:  1-15  |  1,5,9  |  1-10,15,20-25. Pode digitar com espaços. Enter já faz a busca.")
+            $Script:ToolTip.SetToolTip($cmbSerie, "Série do caixa. A lista vem do próprio banco depois de testar a conexão. Com várias séries escritas em Notas (10: 1-5; 28: 7), esta caixa só vale para os números sem série na frente.")
+            $Script:ToolTip.SetToolTip($txtNotas, "Aceita intervalo, lista ou os dois juntos:  1-15  |  1,5,9  |  1-10,15,20-25. Pode digitar com espaços. Enter já faz a busca.`r`nVárias séries de uma vez: a série com dois-pontos antes das notas dela:  10: 8704, 8841; 28: 14, 19-20; 4: 755`r`nPode colar a lista de notas do contador (Inicial / Final / Série / Espécie): ela já vira esse formato, e as linhas de NF-e ficam de fora.")
             $Script:ToolTip.SetToolTip($rbPeriodo, "Quando o cliente pede tudo de um dia ou de um mês, em vez de números específicos.")
             $Script:ToolTip.SetToolTip($rbChave, "Quando o cliente mandou a chave de acesso da nota em vez do número.")
             $Script:ToolTip.SetToolTip($txtChaves, "Cole as chaves de 44 posições separadas por vírgula ou uma por linha. Pontos, espaços e o NFe da frente são ignorados. Aceita a chave de CNPJ alfanumérico (com letras).")
@@ -3656,17 +3737,31 @@ function Show-XmlDownloader {
         }
 
         $contaNotas = {
+            # Texto colado com varias linhas: vira uma linha so (a lista do contador vira "serie: notas").
+            # Trocar o Text chama este evento de novo, ja sem quebra de linha.
+            if ("$($txtNotas.Text)" -match '[\r\n]') {
+                $colada = ConvertFrom-ListaColadaNotas -Texto $txtNotas.Text
+                $txtNotas.Text = $colada.Texto
+                $txtNotas.SelectionStart = $txtNotas.Text.Length
+                if ($colada.Faixas -gt 0) { Log-Message "INFO" "XMLs: lista de notas colada ($($colada.Faixas) linha(s) com série) virou: $($colada.Texto)" }
+                if ($colada.NFe -gt 0) {
+                    & $setStatus "$($colada.NFe) linha(s) de NF-e (modelo 55) ficaram de fora: esta janela baixa só NFC-e." $Script:UiAmarelo
+                    Log-Message "INFO" "XMLs: $($colada.NFe) linha(s) de NF-e da lista colada ficaram de fora (só NFC-e)"
+                }
+                return
+            }
             $bruto = "$($txtNotas.Text)".Trim()
             if ($bruto -eq "") {
                 # Campo vazio vira a propria explicacao de como se preenche
                 $lblContagem.ForeColor = $Script:UiSuave
-                $lblContagem.Text = "ex.:  1-15   |   1,5,9   |   1-10,15,20-25"
+                $lblContagem.Text = "ex.:  1-15  |  1,5,9  |  várias séries: 10: 1-5; 28: 7"
                 return
             }
-            $r = ConvertFrom-FaixaNotas -Texto $bruto
+            $r = ConvertFrom-SeriesNotas -Texto $bruto -SeriePadrao "$($cmbSerie.Text)"
             if ($r.Ok) {
                 $lblContagem.ForeColor = $Script:UiVerde
                 $txt = "$($r.Total) notas selecionadas"
+                if ($r.Grupos.Count -gt 1) { $txt = "$($r.Total) notas em $($r.Grupos.Count) séries (" + (@($r.Grupos | ForEach-Object { if ($null -eq $_.Serie) { "?" } else { "$($_.Serie)" } }) -join ", ") + ")" }
                 if ($r.Confirmar) { $txt = $txt + " (lote grande)" }
                 $lblContagem.Text = $txt
             }
@@ -3984,18 +4079,25 @@ function Show-XmlDownloader {
             if ($null -eq $sel) { $p.Value = [System.DBNull]::Value } else { $p.Value = $sel }
         }
 
-        # Faltantes separados por empresa ("ALTA ALIMENTOS LTDA: 5, 9 | NICOLETTI...: 7") para
-        # o aviso e o COPIAR FALTANTES; vazio quando o banco tem um certificado so
+        # Faltantes separados por empresa ("ALTA ALIMENTOS LTDA: 5, 9 | NICOLETTI...: 7") e, na busca de
+        # varias series, por serie ("Série 10: 8841 | Série 28: 19") para o aviso e o COPIAR FALTANTES;
+        # vazio com um certificado so e uma serie (quem chama usa a lista de numeros)
         $faltantesPorEmpresa = {
-            param($Itens)
-            if (@($Script:XmlServidores).Count -le 1) { return "" }
+            param($Itens, [string]$Separador = " | ")
+            $variasEmp = (@($Script:XmlServidores).Count -gt 1)
+            if (-not $variasEmp -and -not $Script:XmlMultiSerie) { return "" }
             $partesF = @()
             foreach ($grupoF in @(@($Itens) | Group-Object { "$($_.Servidor)" } | Sort-Object Name)) {
-                $numsF = @($grupoF.Group | ForEach-Object { [long]$_.Nota } | Sort-Object -Unique)
-                if ($numsF.Count -eq 0) { continue }
-                $partesF += "$(& $nomeEmpresa $grupoF.Group[0].Servidor): $(ConvertTo-FaixaTexto $numsF)"
+                foreach ($grupoS in @($grupoF.Group | Group-Object { [int]$_.Serie } | Sort-Object { [int]$_.Name })) {
+                    $numsF = @($grupoS.Group | ForEach-Object { [long]$_.Nota } | Sort-Object -Unique)
+                    if ($numsF.Count -eq 0) { continue }
+                    $rotuloF = @()
+                    if ($variasEmp) { $rotuloF += "$(& $nomeEmpresa $grupoF.Group[0].Servidor)" }
+                    if ($Script:XmlMultiSerie) { $rotuloF += "Série $($grupoS.Name)" }
+                    $partesF += "$($rotuloF -join ' - '): $(ConvertTo-FaixaTexto $numsF)"
+                }
             }
-            return ($partesF -join " | ")
+            return ($partesF -join $Separador)
         }
 
         # Nome curto da empresa de um IDServidorFiscal (vazio quando o banco tem um so)
@@ -4556,6 +4658,8 @@ function Show-XmlDownloader {
                 $Script:XmlPedidas = @()
                 $Script:XmlFaltantes = @()
                 $Script:XmlFaltantesTexto = ""
+                $Script:XmlMultiSerie = $false
+                $Script:XmlGrupos = @()
                 $pb.Value = 0
                 $lblProg.Text = ""
 
@@ -4587,18 +4691,30 @@ function Show-XmlDownloader {
                 else { $Script:XmlServidoresBusca = @($servSel) }
 
                 if ($rbSerie.Checked) {
-                    if ("$($cmbSerie.Text)".Trim() -eq "") {
-                        & $setStatus "Escolha a série." $Script:UiVermelho; return $false
+                    # Uma serie (a da caixa) ou varias escritas no campo: "10: 8704, 8841; 28: 14"
+                    $sn = ConvertFrom-SeriesNotas -Texto $txtNotas.Text -SeriePadrao "$($cmbSerie.Text)" -Confirmar
+                    if (-not $sn.Ok) { & $setStatus $sn.Erro $Script:UiVermelho; return $false }
+                    if (@($sn.Grupos | Where-Object { $null -eq $_.Serie }).Count -gt 0) {
+                        & $setStatus "Escolha a série (ou escreva a série antes das notas: 10: 8704, 8841)." $Script:UiVermelho; return $false
                     }
-                    $serie = [int]("$($cmbSerie.Text)".Trim())
-                    $fx = ConvertFrom-FaixaNotas -Texto $txtNotas.Text -Confirmar
-                    if (-not $fx.Ok) { & $setStatus $fx.Erro $Script:UiVermelho; return $false }
-                    $Script:XmlPedidas = $fx.Notas
+                    $Script:XmlGrupos = @($sn.Grupos)
+                    $Script:XmlMultiSerie = ($sn.Grupos.Count -gt 1)
+                    # Uma entrada por serie + nota pedida (a mesma nota em duas series conta duas vezes)
+                    $Script:XmlPedidas = @($sn.Grupos | ForEach-Object { $_.Notas })
+                    $todasNotas = $Script:XmlPedidas
+                    if ($Script:XmlMultiSerie) { Log-Message "INFO" "XMLs: busca em $($sn.Grupos.Count) séries de uma vez: $(@($sn.Grupos | ForEach-Object { "série $($_.Serie): $(ConvertTo-FaixaTexto $_.Notas)" }) -join ' | ')" }
 
-                    # Blocos de no maximo 500 numeros por query
-                    for ($ini = 0; $ini -lt $fx.Notas.Count; $ini += 500) {
-                        $fim = [Math]::Min($ini + 499, $fx.Notas.Count - 1)
-                        $bloco = @($fx.Notas[$ini..$fim])
+                    # Blocos de no maximo 500 numeros por query, cada um de uma serie so
+                    $blocosBusca = @()
+                    foreach ($gs in $sn.Grupos) {
+                        for ($ini = 0; $ini -lt $gs.Notas.Count; $ini += 500) {
+                            $fim = [Math]::Min($ini + 499, $gs.Notas.Count - 1)
+                            $blocosBusca += @{ Serie = [int]$gs.Serie; Notas = @($gs.Notas[$ini..$fim]) }
+                        }
+                    }
+                    foreach ($bb in $blocosBusca) {
+                        $serie = $bb.Serie
+                        $bloco = @($bb.Notas)
                         $nomes = @()
                         for ($i = 0; $i -lt $bloco.Count; $i++) { $nomes += "@n$i" }
                         $inSql = ($nomes -join ",")
@@ -4722,7 +4838,7 @@ function Show-XmlDownloader {
                     $Script:XmlDicaBusca = ""
                     if ($achados.Count -eq 0) {
                         try {
-                            $amostra = @($fx.Notas | Select-Object -First 50)
+                            $amostra = @($todasNotas | Sort-Object -Unique | Select-Object -First 50)
                             $nomesD = @(); for ($i = 0; $i -lt $amostra.Count; $i++) { $nomesD += "@d$i" }
                             $cmdD = $cn.CreateCommand()
                             $cmdD.CommandTimeout = 60
@@ -4742,7 +4858,7 @@ function Show-XmlDownloader {
                             else {
                                 $Script:XmlDicaBusca = "Esses números não existem na tabela NFCeTokenID deste banco, em nenhum parceiro ou série."
                             }
-                            Log-Message "INFO" "XMLs: busca sem resultado (parceiro $parceiro, série $serie). $($Script:XmlDicaBusca)"
+                            Log-Message "INFO" "XMLs: busca sem resultado (parceiro $parceiro, série $(@($sn.Grupos | ForEach-Object { $_.Serie }) -join ', ')). $($Script:XmlDicaBusca)"
                         }
                         catch { Log-Message "ERRO" "XMLs: não consegui conferir onde estão essas notas: $($_.Exception.Message)" }
                         & $conferirConexao
@@ -4750,27 +4866,32 @@ function Show-XmlDownloader {
 
                     # Numero pedido que nem linha tem na tabela de numeracao. Com mais de um
                     # certificado confere em cada empresa: a nota 100 de uma nao tampa a falta da outra.
+                    # A serie entra na conta: a nota 14 da serie 28 nao tampa a falta da 14 da serie 10.
                     $vistos = @{}
                     foreach ($a in $achados) {
-                        if ($multiEmp) { $vistos["$($a.Servidor)|$($a.Nota)"] = $true } else { $vistos["$($a.Nota)"] = $true }
+                        $svVisto = ""
+                        if ($multiEmp) { $svVisto = "$($a.Servidor)" }
+                        $vistos["$svVisto|$([int]$a.Serie)|$($a.Nota)"] = $true
                     }
                     foreach ($servBusca in $Script:XmlServidoresBusca) {
-                        foreach ($n in $fx.Notas) {
-                            $chaveVisto = "$n"
-                            if ($multiEmp) { $chaveVisto = "$servBusca|$n" }
-                            if (-not $vistos.ContainsKey($chaveVisto)) {
-                                $achados.Add(@{
-                                        Nota = [long]$n; Serie = $serie; Data = $null; Chave = ""
-                                        Status = "NÃO ENCONTRADA"; Origem = ""; Conteudo = ""; Arquivo = ""
-                                        Tamanho = 0; Aviso = "sem registro na NFCeTokenID"; Inutilizada = $false
-                                        Codigo = $null; Cancelamento = ""; ChaveCanc = ""
-                                        Cancelada = $false; DataCancelamento = $null; Linha = $null
-                                        Servidor = $servBusca
-                                    })
+                        $svVisto = ""
+                        if ($multiEmp) { $svVisto = "$servBusca" }
+                        foreach ($gs in $sn.Grupos) {
+                            foreach ($n in $gs.Notas) {
+                                if (-not $vistos.ContainsKey("$svVisto|$($gs.Serie)|$n")) {
+                                    $achados.Add(@{
+                                            Nota = [long]$n; Serie = [int]$gs.Serie; Data = $null; Chave = ""
+                                            Status = "NÃO ENCONTRADA"; Origem = ""; Conteudo = ""; Arquivo = ""
+                                            Tamanho = 0; Aviso = "sem registro na NFCeTokenID"; Inutilizada = $false
+                                            Codigo = $null; Cancelamento = ""; ChaveCanc = ""
+                                            Cancelada = $false; DataCancelamento = $null; Linha = $null
+                                            Servidor = $servBusca
+                                        })
+                                }
                             }
                         }
                     }
-                    $achados = @($achados | Sort-Object { [long]$_.Nota }, { "$($_.Servidor)" })
+                    $achados = @($achados | Sort-Object { [int]$_.Serie }, { [long]$_.Nota }, { "$($_.Servidor)" })
                 }
                 elseif ($rbPeriodo.Checked) {
                     $d1 = $dtIni.Value.Date
@@ -5031,7 +5152,12 @@ function Show-XmlDownloader {
 
                 # Guarda o filtro desta busca: o nome do lote sai dele, mesmo que a tela
                 # seja mexida antes de baixar
-                if ($rbSerie.Checked) { $Script:XmlFiltro = @{ Modo = 'Serie'; Serie = "$($cmbSerie.Text)".Trim(); Notas = @($Script:XmlPedidas) } }
+                if ($rbSerie.Checked) {
+                    # Varias series: Serie fica vazia e o nome do lote sai das series e notas que vao nele
+                    $serieFiltro = ""
+                    if (-not $Script:XmlMultiSerie) { $serieFiltro = "$($Script:XmlGrupos[0].Serie)" }
+                    $Script:XmlFiltro = @{ Modo = 'Serie'; Serie = $serieFiltro; Notas = @($Script:XmlPedidas) }
+                }
                 elseif ($rbPeriodo.Checked) { $Script:XmlFiltro = @{ Modo = 'Periodo'; Serie = "$($cmbSerie2.Text)".Trim(); De = $dtIni.Value; Ate = $dtFim.Value } }
                 elseif ($rbPedido.Checked) { $Script:XmlFiltro = @{ Modo = 'Pedido'; Serie = ''; Pedidos = @($Script:XmlPedidosBuscados); Dia = $Script:XmlPedidoDia; Texto = (& $textoPedido) } }
                 else { $Script:XmlFiltro = @{ Modo = 'Chave'; Serie = ''; Texto = ((@(& $lerChaves) | Sort-Object) -join ',') } }
@@ -5118,15 +5244,11 @@ function Show-XmlDownloader {
                         $semReg = @($achados | Where-Object { "$($_.Status)" -eq "NÃO ENCONTRADA" })
                         $semXmlReg = @($achados | Where-Object { "$($_.Status)" -ne "NÃO ENCONTRADA" -and "$($_.Conteudo)" -eq "" })
                         if ($semReg.Count -gt 0 -or $semXmlReg.Count -gt 0) {
+                            # Uma linha por empresa e por serie quando houver mais de uma
                             $faixaEmpresa = {
                                 param($Linhas)
-                                if ($multiEmp) {
-                                    $partesFe = @()
-                                    foreach ($gFe in @($Linhas | Group-Object { "$($_.Servidor)" } | Sort-Object Name)) {
-                                        $partesFe += "$(& $nomeEmpresa $gFe.Group[0].Servidor): $(ConvertTo-FaixaTexto @($gFe.Group | ForEach-Object { [int]$_.Nota }))"
-                                    }
-                                    return ($partesFe -join "`r`n")
-                                }
+                                $txtFe = & $faltantesPorEmpresa $Linhas "`r`n"
+                                if ($txtFe -ne "") { return $txtFe }
                                 return (ConvertTo-FaixaTexto @($Linhas | ForEach-Object { [int]$_.Nota }))
                             }
                             $itensNe = @()
@@ -5137,10 +5259,12 @@ function Show-XmlDownloader {
                                 $itensNe += @{ Tipo = 'alerta'; Titulo = 'ENCONTRADA(S), MAS SEM XML NO BANCO'; Texto = ((& $faixaEmpresa $semXmlReg) + "`r`nA nota existe, mas o banco não guardou o XML dela.") }
                             }
                             $itensNe += @{ Tipo = 'info'; Titulo = ''; Texto = 'O botão COPIAR FALTANTES leva esses números para a área de transferência.' }
-                            $numsFaltam = @(@($semReg) + @($semXmlReg) | ForEach-Object { [long]$_.Nota } | Sort-Object -Unique)
+                            $numsFaltam = @(@($semReg) + @($semXmlReg) | ForEach-Object { "$([int]$_.Serie)|$([long]$_.Nota)" } | Sort-Object -Unique)
                             $pedidasNe = $Script:XmlPedidas.Count
                             $vieramNe = [Math]::Max(0, $pedidasNe - $numsFaltam.Count)
-                            & $avisaNaoEncontradas "FALTAM $($numsFaltam.Count) DE $pedidasNe NOTA(S) PEDIDA(S)" "Você pediu $pedidasNe nota(s) da série $($Script:XmlFiltro.Serie) e só $vieramNe vieram com XML. Veja abaixo quais não vieram." $pedidasNe $numsFaltam.Count $itensNe
+                            $daSerieNe = "da série $($Script:XmlFiltro.Serie)"
+                            if ($Script:XmlMultiSerie) { $daSerieNe = "de $(@($Script:XmlGrupos).Count) séries" }
+                            & $avisaNaoEncontradas "FALTAM $($numsFaltam.Count) DE $pedidasNe NOTA(S) PEDIDA(S)" "Você pediu $pedidasNe nota(s) $daSerieNe e só $vieramNe vieram com XML. Veja abaixo quais não vieram." $pedidasNe $numsFaltam.Count $itensNe
                         }
                     }
                     elseif ($rbPedido.Checked -and $pedidosSemNfce.Count -gt 0 -and $achados.Count -gt 0) {
@@ -5205,6 +5329,11 @@ function Show-XmlDownloader {
             if ($null -eq $filtro) { $filtro = @{ Modo = 'Chave'; Serie = '' } }
             $seriesLote = @($ItensLote | ForEach-Object { [int]$_.Serie } | Sort-Object -Unique)
             if ($filtro.Modo -eq 'Serie') {
+                # Varias series: o nome sai do que vai neste lote ("Séries 2 e 10 - 5 notas", ou "Série 10 - Notas ..."
+                # quando so uma delas tem XML)
+                if ("$($filtro.Serie)" -eq "") {
+                    return (Get-XmlNomeLote -Modo Serie -Series $seriesLote -Notas @($ItensLote | ForEach-Object { [int]$_.Nota }) -Quantidade @($ItensLote).Count -Titulo $Titulo -Empresa $Empresa)
+                }
                 return (Get-XmlNomeLote -Modo Serie -Serie $filtro.Serie -Notas $filtro.Notas -Titulo $Titulo -Empresa $Empresa)
             }
             if ($filtro.Modo -eq 'Periodo') {
@@ -5241,7 +5370,11 @@ function Show-XmlDownloader {
                 $Script:XmlFaltantes = $faltaram
                 & $atualizaModo
                 $aviso = "Nenhuma das $($lista.Count) notas selecionadas tem XML no banco."
-                if ($faltaram.Count -gt 0) { $aviso = $aviso + "`r`n`r`nSem XML: " + (ConvertTo-FaixaTexto $faltaram) }
+                if ($faltaram.Count -gt 0) {
+                    $txtFaltaram = & $faltantesPorEmpresa $semXml
+                    if ($txtFaltaram -eq "") { $txtFaltaram = ConvertTo-FaixaTexto $faltaram }
+                    $aviso = $aviso + "`r`n`r`nSem XML: " + $txtFaltaram
+                }
                 $aviso = $aviso + "`r`n`r`nNada foi baixado e nenhuma pasta foi criada."
                 & $setStatus "Nenhuma das notas tem XML no banco - nada foi gravado." $Script:UiVermelho
                 Log-Message "ERRO" "XMLs: nenhuma das $($lista.Count) notas tem XML no banco"
@@ -5298,8 +5431,8 @@ function Show-XmlDownloader {
 
             $nNormal = 0; $nInut = 0; $nCorr = 0; $nCanc = 0; $nSemProt = 0
             $nFalta = $semXml.Count
-            $baixadas = @()
-            $baixadasPorServ = @{}
+            # "empresa|serie|nota" de cada nota gravada (empresa vazia com um certificado so)
+            $baixadasChave = @{}
             $pastasLote = @()
             $zipsLote = @()
             $i = 0
@@ -5350,9 +5483,9 @@ function Show-XmlDownloader {
                         if ($it.Inutilizada) { $nInut++ }
                         elseif ($semProt) { $nSemProt++ }
                         else { $nNormal++ }
-                        $baixadas += [int]$it.Nota
-                        if (-not $baixadasPorServ.ContainsKey("$($it.Servidor)")) { $baixadasPorServ["$($it.Servidor)"] = @{} }
-                        $baixadasPorServ["$($it.Servidor)"]["$($it.Nota)"] = $true
+                        $svBaixada = ""
+                        if (@($Script:XmlServidores).Count -gt 1) { $svBaixada = "$($it.Servidor)" }
+                        $baixadasChave["$svBaixada|$([int]$it.Serie)|$($it.Nota)"] = $true
 
                         if ("$($it.Cancelamento)" -ne "") {
                             if (-not (Test-Path $pastaCanc)) { New-Item -Path $pastaCanc -ItemType Directory -Force | Out-Null }
@@ -5404,25 +5537,19 @@ function Show-XmlDownloader {
             $Script:XmlFaltantes = @()
             $Script:XmlFaltantesTexto = ""
             if ($rbSerie.Checked -and $Script:XmlPedidas.Count -gt 0) {
-                if (@($Script:XmlServidores).Count -gt 1) {
-                    $todasFaltas = @(); $partesFalta = @()
-                    foreach ($servF in @($Script:XmlServidoresBusca)) {
-                        $veioServ = $baixadasPorServ["$servF"]
-                        if ($null -eq $veioServ) { $veioServ = @{} }
-                        $faltaServ = @($Script:XmlPedidas | Where-Object { -not $veioServ.ContainsKey("$_") })
-                        if ($faltaServ.Count -gt 0) {
-                            $todasFaltas += $faltaServ
-                            $partesFalta += "$(& $nomeEmpresa $servF): $(ConvertTo-FaixaTexto $faltaServ)"
+                # Cada nota pedida (serie + numero) em cada empresa buscada que nao foi gravada
+                $faltaItens = @()
+                foreach ($servF in @($Script:XmlServidoresBusca)) {
+                    $svF = ""
+                    if (@($Script:XmlServidores).Count -gt 1) { $svF = "$servF" }
+                    foreach ($gF in @($Script:XmlGrupos)) {
+                        foreach ($nF in $gF.Notas) {
+                            if (-not $baixadasChave.ContainsKey("$svF|$($gF.Serie)|$nF")) { $faltaItens += @{ Servidor = $servF; Serie = [int]$gF.Serie; Nota = [long]$nF } }
                         }
                     }
-                    $Script:XmlFaltantes = @($todasFaltas | Sort-Object -Unique)
-                    $Script:XmlFaltantesTexto = ($partesFalta -join " | ")
                 }
-                else {
-                    $veio = @{}
-                    foreach ($n in $baixadas) { $veio["$n"] = $true }
-                    $Script:XmlFaltantes = @($Script:XmlPedidas | Where-Object { -not $veio.ContainsKey("$_") })
-                }
+                $Script:XmlFaltantes = @($faltaItens | ForEach-Object { [int]$_.Nota } | Sort-Object -Unique)
+                $Script:XmlFaltantesTexto = & $faltantesPorEmpresa $faltaItens
             }
             else {
                 $Script:XmlFaltantes = $faltaram
@@ -5782,14 +5909,15 @@ function Show-XmlDownloader {
                 if ("$($cmbParceiro.Text)".Trim() -eq "") {
                     & $setStatus "Clique em TESTAR CONEXÃO antes de conferir." $Script:UiVermelho; return
                 }
-                if ("$($cmbSerie.Text)".Trim() -eq "") {
-                    & $setStatus "Escolha a série." $Script:UiVermelho; return
+                # Uma serie (a da caixa) ou varias escritas no campo, como na busca
+                $sn = ConvertFrom-SeriesNotas -Texto $txtNotas.Text -SeriePadrao "$($cmbSerie.Text)"
+                if (-not $sn.Ok) { & $setStatus $sn.Erro $Script:UiVermelho; return }
+                if (@($sn.Grupos | Where-Object { $null -eq $_.Serie }).Count -gt 0) {
+                    & $setStatus "Escolha a série (ou escreva a série antes das notas: 10: 8704, 8841)." $Script:UiVermelho; return
                 }
-                $fx = ConvertFrom-FaixaNotas -Texto $txtNotas.Text
-                if (-not $fx.Ok) { & $setStatus $fx.Erro $Script:UiVermelho; return }
+                $Script:XmlMultiSerie = ($sn.Grupos.Count -gt 1)
 
                 $parceiro = [long]("$($cmbParceiro.Text)".Trim())
-                $serie = [int]("$($cmbSerie.Text)".Trim())
                 $Script:XmlCancelar = $false
                 $btnCancelar.Enabled = $true
                 & $setStatus "Conferindo a sequência..." $Script:UiAmarelo
@@ -5812,12 +5940,20 @@ function Show-XmlDownloader {
                     $filtroServ = " AND (@servidor IS NULL OR IDServidorFiscal = @servidor)"
                 }
 
-                # Confere exatamente os numeros pedidos, em blocos de 500. Usar
+                # Confere exatamente os numeros pedidos, em blocos de 500 (cada um de uma serie). Usar
                 # BETWEEN do menor ao maior traria notas que ninguem perguntou:
                 # digitar "1-15,2000" acabaria conferindo as 2000 da serie.
-                for ($ini = 0; $ini -lt $fx.Notas.Count; $ini += 500) {
-                    $fim = [Math]::Min($ini + 499, $fx.Notas.Count - 1)
-                    $bloco = @($fx.Notas[$ini..$fim])
+                # Chaves "empresa|serie|nota" e "empresa|serie": cada serie tem a sua numeracao.
+                $blocosConf = @()
+                foreach ($gs in $sn.Grupos) {
+                    for ($ini = 0; $ini -lt $gs.Notas.Count; $ini += 500) {
+                        $fim = [Math]::Min($ini + 499, $gs.Notas.Count - 1)
+                        $blocosConf += @{ Serie = [int]$gs.Serie; Notas = @($gs.Notas[$ini..$fim]) }
+                    }
+                }
+                foreach ($bc in $blocosConf) {
+                    $serie = $bc.Serie
+                    $bloco = @($bc.Notas)
                     $nomes = @()
                     for ($i = 0; $i -lt $bloco.Count; $i++) { $nomes += "@n$i" }
 
@@ -5839,41 +5975,44 @@ function Show-XmlDownloader {
                         $sv = ""
                         if ($multiEmp) { $sv = "$(Get-XmlDbValor $rd 'IDServidorFiscal')" }
                         $id = [int]$rd["ID"]
-                        $existe["$sv|$id"] = $true
-                        if (-not [bool]$rd["Usada"]) { $naoUsadas[$sv] = @($naoUsadas[$sv]) + $id }
-                        if (-not $rd.IsDBNull($rd.GetOrdinal("Inutilizada")) -and [bool]$rd["Inutilizada"]) { $inutil[$sv] = @($inutil[$sv]) + $id }
+                        $existe["$sv|$serie|$id"] = $true
+                        if (-not [bool]$rd["Usada"]) { $naoUsadas["$sv|$serie"] = @($naoUsadas["$sv|$serie"]) + $id }
+                        if (-not $rd.IsDBNull($rd.GetOrdinal("Inutilizada")) -and [bool]$rd["Inutilizada"]) { $inutil["$sv|$serie"] = @($inutil["$sv|$serie"]) + $id }
                     }
                     $rd.Close()
                     [System.Windows.Forms.Application]::DoEvents()
                 }
 
                 $linhas = @()
-                $linhas += "Série $serie - $($fx.Total) nota(s) conferida(s): " + (ConvertTo-FaixaTexto $fx.Notas)
-                $todasSem = @(); $partesSem = @(); $totalSem = 0
-                foreach ($sv in $servidoresConf) {
-                    $semRegistro = @($fx.Notas | Where-Object { -not $existe.ContainsKey("$sv|$_") })
-                    $nUsadasSv = @($naoUsadas[$sv] | Where-Object { $null -ne $_ })
-                    $inutSv = @($inutil[$sv] | Where-Object { $null -ne $_ })
-                    $linhas += ""
-                    if ($multiEmp) { $linhas += "$(& $nomeEmpresa $sv)".ToUpper() }
-                    if ($semRegistro.Count -eq 0) { $linhas += "Numeração sem lacunas: todos os números têm registro." }
-                    else {
-                        $linhas += "SEM REGISTRO no banco ($($semRegistro.Count)): " + (ConvertTo-FaixaTexto $semRegistro)
-                        $todasSem += $semRegistro
-                        $totalSem += $semRegistro.Count
-                        if ($multiEmp) { $partesSem += "$(& $nomeEmpresa $sv): $(ConvertTo-FaixaTexto $semRegistro)" }
+                $faltaConf = @(); $totalSem = 0
+                foreach ($gs in $sn.Grupos) {
+                    $serie = [int]$gs.Serie
+                    if ($linhas.Count -gt 0) { $linhas += "" }
+                    $linhas += "Série $serie - $(@($gs.Notas).Count) nota(s) conferida(s): " + (ConvertTo-FaixaTexto $gs.Notas)
+                    foreach ($sv in $servidoresConf) {
+                        $semRegistro = @($gs.Notas | Where-Object { -not $existe.ContainsKey("$sv|$serie|$_") })
+                        $nUsadasSv = @($naoUsadas["$sv|$serie"] | Where-Object { $null -ne $_ })
+                        $inutSv = @($inutil["$sv|$serie"] | Where-Object { $null -ne $_ })
+                        $linhas += ""
+                        if ($multiEmp) { $linhas += "$(& $nomeEmpresa $sv)".ToUpper() }
+                        if ($semRegistro.Count -eq 0) { $linhas += "Numeração sem lacunas: todos os números têm registro." }
+                        else {
+                            $linhas += "SEM REGISTRO no banco ($($semRegistro.Count)): " + (ConvertTo-FaixaTexto $semRegistro)
+                            $totalSem += $semRegistro.Count
+                            foreach ($nSem in $semRegistro) { $faltaConf += @{ Servidor = $sv; Serie = $serie; Nota = [long]$nSem } }
+                        }
+                        if ($nUsadasSv.Count -gt 0) { $linhas += "Token gerado e NÃO USADO ($($nUsadasSv.Count)): " + (ConvertTo-FaixaTexto $nUsadasSv) }
+                        if ($inutSv.Count -gt 0) { $linhas += "Inutilizadas ($($inutSv.Count)): " + (ConvertTo-FaixaTexto $inutSv) }
                     }
-                    if ($nUsadasSv.Count -gt 0) { $linhas += "Token gerado e NÃO USADO ($($nUsadasSv.Count)): " + (ConvertTo-FaixaTexto $nUsadasSv) }
-                    if ($inutSv.Count -gt 0) { $linhas += "Inutilizadas ($($inutSv.Count)): " + (ConvertTo-FaixaTexto $inutSv) }
                 }
 
-                $Script:XmlFaltantes = @($todasSem | Sort-Object -Unique)
-                $Script:XmlFaltantesTexto = ($partesSem -join " | ")
+                $Script:XmlFaltantes = @($faltaConf | ForEach-Object { [int]$_.Nota } | Sort-Object -Unique)
+                $Script:XmlFaltantesTexto = & $faltantesPorEmpresa $faltaConf
                 & $atualizaModo
                 if ($totalSem -eq 0) { & $setStatus "Numeração sem lacunas: todos os números têm registro." $Script:UiVerde }
-                elseif ($multiEmp) { & $setStatus ("SEM REGISTRO no banco: " + $Script:XmlFaltantesTexto) $Script:UiAmarelo }
+                elseif ("$($Script:XmlFaltantesTexto)" -ne "") { & $setStatus ("SEM REGISTRO no banco: " + $Script:XmlFaltantesTexto) $Script:UiAmarelo }
                 else { & $setStatus ("SEM REGISTRO no banco ($totalSem): " + (ConvertTo-FaixaTexto $Script:XmlFaltantes)) $Script:UiAmarelo }
-                Log-Message "INFO" "XMLs: conferência da série $serie - $totalSem sem registro"
+                Log-Message "INFO" "XMLs: conferência da(s) série(s) $(@($sn.Grupos | ForEach-Object { $_.Serie }) -join ', ') - $totalSem sem registro"
                 & $mostraCarregando ""
                 [System.Windows.Forms.MessageBox]::Show(($linhas -join "`r`n"), "Conferir sequência", "OK", "Information") | Out-Null
             }
@@ -6133,6 +6272,8 @@ function Show-XmlDownloader {
         $rbPedido.Add_CheckedChanged($atualizaModo)
         $chkDiaPedido.Add_CheckedChanged($atualizaModo)
         $txtNotas.Add_TextChanged($contaNotas)
+        # A serie da caixa vale para as notas sem serie na frente: o contador acompanha
+        $cmbSerie.Add_TextChanged($contaNotas)
         $btnTestar.Add_Click({ & $testar })
         $btnPendentes.Add_Click({ & $mostrarPendentes })
 
@@ -6156,6 +6297,10 @@ function Show-XmlDownloader {
             "         1-15            da 1 ate a 15",
             "         1,5,9           so essas tres",
             "         1-10,15,20-25   pode misturar intervalo e avulsas",
+            "       Varias series de uma vez: a serie e dois-pontos antes das notas",
+            "         10: 8704, 8841; 28: 14, 19-20; 4: 755",
+            "       Pode colar a lista de notas do contador (Inicial / Final / Serie /",
+            "       Especie): ela ja vira esse formato. Linhas de NF-e ficam de fora.",
             "   - Por periodo",
             "       Data inicial e final, com serie opcional. Traz todas as notas do",
             "       periodo; acima de 10 mil ele pergunta antes de buscar.",
@@ -13035,17 +13180,79 @@ function Invoke-DISM {
     Start-Process powershell -ArgumentList "-NoExit", "-Command", "Write-Host 'Iniciando DISM /RestoreHealth...'; dism /online /cleanup-image /restorehealth; Write-Host 'Concluido. Pressione qualquer tecla para sair.'; [void][Console]::ReadKey()" -Verb RunAs
 }
 
+function Clear-PastasTemporarias {
+    # Apaga o conteudo das pastas em segundo plano, item por item. Na thread da janela, TEMP com milhares de arquivos
+    # (ou antivirus lendo cada um) deixava o Preparador em "Nao esta respondendo" por minutos; e um .tmp que sumia
+    # sozinho no meio (o Windows cria e apaga o tempo todo) fazia o Remove-Item -Recurse parar com "Nao existe um
+    # objeto no caminho especificado", e o resto da limpeza nao rodava. Item em uso fica e a limpeza segue.
+    param([string[]]$Pastas, [int]$LimiteSegundos = 90)
+    if ($Script:LimpezaTempAndando) { Log-Message "INFO" "     Limpeza dos temporários já está rodando em segundo plano"; return }
+    $Script:LimpezaTempAndando = $true
+    $estado = [hashtable]::Synchronized(@{ Feitos = 0; Total = 0 })
+    $ps = [PowerShell]::Create()
+    [void]$ps.AddScript({
+            param($Pastas, $Estado)
+            foreach ($pasta in $Pastas) {
+                # XmenuResources: o papel de parede do Preparar ambiente e baixado ali logo depois
+                $itens = @(Get-ChildItem -LiteralPath $pasta -Force -ErrorAction SilentlyContinue | Where-Object { $_.Name -ne 'XmenuResources' })
+                $Estado.Total += $itens.Count
+                $apagados = 0; $ficaram = 0
+                foreach ($it in $itens) {
+                    $f = $it.FullName
+                    # .NET primeiro: bem mais rapido que o Remove-Item e nao entra em atalho de pasta (junction)
+                    try { if ($it.PSIsContainer) { [System.IO.Directory]::Delete($f, $true) } else { [System.IO.File]::Delete($f) } }
+                    catch {
+                        # Somente leitura (o .NET nao apaga) ou pasta que parou porque um arquivo dela sumiu sozinho
+                        for ($volta = 0; $volta -lt 2 -and (Test-Path -LiteralPath $f); $volta++) {
+                            try { Remove-Item -LiteralPath $f -Recurse -Force -ErrorAction Stop } catch {}
+                        }
+                    }
+                    if ([System.IO.File]::Exists($f) -or [System.IO.Directory]::Exists($f)) { $ficaram++ } else { $apagados++ }
+                    $Estado.Feitos++
+                }
+                [PSCustomObject]@{ Pasta = $pasta; Apagados = $apagados; Ficaram = $ficaram }
+            }
+        }).AddArgument($Pastas).AddArgument($estado)
+    foreach ($p in $Pastas) { Log-Message "CMD" "COMANDO: Remove-Item $p\* -Recurse -Force (item por item, em segundo plano)" }
+    $espera = $ps.BeginInvoke()
+    $relogio = [System.Diagnostics.Stopwatch]::StartNew()
+    $statusAntes = "$($Script:StatusLabel.Text)"
+    while (-not $espera.IsCompleted -and $relogio.Elapsed.TotalSeconds -lt $LimiteSegundos) {
+        [System.Windows.Forms.Application]::DoEvents()
+        Start-Sleep -Milliseconds 40
+        if ($Script:StatusLabel) { $Script:StatusLabel.Text = "Limpando temporários: $($estado.Feitos) de $($estado.Total) itens..." }
+    }
+    if ($Script:StatusLabel) { $Script:StatusLabel.Text = $statusAntes }
+    $registrar = {
+        param($Ps, $Espera, $Relogio)
+        try {
+            foreach ($r in $Ps.EndInvoke($Espera)) {
+                Log-Message "LOG" "     $($r.Pasta): $($r.Apagados) itens apagados$(if ($r.Ficaram -gt 0) { ", $($r.Ficaram) em uso ficaram" })"
+            }
+            Log-Message "INFO" "     Limpeza dos temporários terminou em $([int]$Relogio.Elapsed.TotalSeconds) s"
+        }
+        catch { Log-Message "ERRO" "Falha na limpeza dos temporários: $($_.Exception.Message)" }
+        finally { $Ps.Dispose(); $Script:LimpezaTempAndando = $false }
+    }
+    if ($espera.IsCompleted) { & $registrar $ps $espera $relogio; return }
+    # Passou do limite: o resto do trabalho segue e o resultado entra no Log quando a limpeza terminar
+    Log-Message "INFO" "     Limpeza dos temporários passou de $LimiteSegundos s ($($estado.Feitos) de $($estado.Total) itens): continua em segundo plano"
+    $vigia = New-Object System.Windows.Forms.Timer
+    $vigia.Interval = 2000
+    $vigia.Tag = @{ Ps = $ps; Espera = $espera; Relogio = $relogio; Registrar = $registrar }
+    $vigia.Add_Tick({
+            if (-not $this.Tag.Espera.IsCompleted) { return }
+            $this.Stop()
+            & $this.Tag.Registrar $this.Tag.Ps $this.Tag.Espera $this.Tag.Relogio
+            $this.Dispose()
+        })
+    $vigia.Start()
+}
+
 function Invoke-DeepClean {
     Log-Message "INFO" "Iniciando Limpeza de Disco Profunda..."
     try {
-        $paths = @("$env:windir\Logs\*", "$env:windir\Prefetch\*", "$env:TEMP\*", "$env:windir\Temp\*")
-        foreach ($p in $paths) {
-            if (Test-Path $p) {
-                Log-Message "CMD" "COMANDO: Remove-Item $p -Recurse -Force"
-                Remove-Item $p -Recurse -Force -ErrorAction SilentlyContinue | Out-Null
-                Log-Message "LOG" "Limpando cache: $p"
-            }
-        }
+        Clear-PastasTemporarias @("$env:windir\Logs", "$env:windir\Prefetch", $env:TEMP, "$env:windir\Temp")
         Log-Message "CMD" "COMANDO: cleanmgr.exe /sagerun:1"
         Start-Process "cleanmgr.exe" -ArgumentList "/sagerun:1" -ErrorAction SilentlyContinue
         Log-Message "SUCESSO" "Limpeza profunda enviada ao sistema!"
@@ -22113,10 +22320,7 @@ function Run-Config {
     Set-ItemProperty -Path $policiesExplorer -Name "HideSCAMeetNow" -Value 1 -Force -ErrorAction SilentlyContinue
     
     Log-Message "LOG" "     Eliminando lixo digital e arquivos temporários..."
-    Log-Message "CMD" "COMANDO: Remove-Item $env:TEMP\*"
-    Remove-Item "$env:TEMP\*" -Recurse -Force -ErrorAction SilentlyContinue | Out-Null
-    Log-Message "CMD" "COMANDO: Remove-Item $env:windir\Temp\*"
-    Get-ChildItem -Path "$env:windir\Temp" -Force -ErrorAction SilentlyContinue | Remove-Item -Force -Recurse -ErrorAction SilentlyContinue | Out-Null
+    Clear-PastasTemporarias @($env:TEMP, "$env:windir\Temp")
     $Script:ProgressBar.Value = 80
     [System.Windows.Forms.Application]::DoEvents()
     
@@ -22339,7 +22543,7 @@ $formWidth = if ($screen.Width -lt 1000) { 900 } else { 1000 }
 $formHeight = if ($screen.Height -lt 800) { 700 } else { 800 }
 
 $form = New-Object System.Windows.Forms.Form
-$form.Text = "Preparador XMenu – Suporte Técnico v5.80 - REVENDA"
+$form.Text = "Preparador XMenu – Suporte Técnico v5.81 - REVENDA"
 $form.Size = New-Object System.Drawing.Size($formWidth, $formHeight)
 $form.StartPosition = "CenterScreen"
 $form.BackColor = [System.Drawing.Color]::FromArgb(25, 25, 30); $form.ForeColor = 'White'
@@ -22732,9 +22936,11 @@ $layout = New-Object System.Windows.Forms.TableLayoutPanel; $layout.Dock = 'Fill
 # Altura pela fonte real para acompanhar a escala do Windows (125%, 150%).
 $fonteLog = New-Object System.Drawing.Font("Consolas", 9)
 $altLog = $fonteLog.Height * 3 + $form.Font.Height + 24
-$layout.Padding = '10'; $layout.RowCount = 3
+$layout.Padding = '10'; $layout.RowCount = 4
 [void]$layout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Absolute, $altLog)))
 [void]$layout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Absolute, 60)))
+# Faixa da busca de botoes
+[void]$layout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Absolute, 40)))
 [void]$layout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Percent, 100)))
 [void]$form.Controls.Add($layout); $layout.BringToFront()
 
@@ -22772,13 +22978,177 @@ $bCfg.Add_Click({
 [void]$layout.Controls.Add($bCfg, 0, 1)
 
 $pScroll = New-Object System.Windows.Forms.Panel; $pScroll.Dock = 'Fill'; $pScroll.AutoScroll = $true
-[void]$layout.Controls.Add($pScroll, 0, 2)
+[void]$layout.Controls.Add($pScroll, 0, 3)
 $Script:ScrollPanel = $pScroll
 $pScroll.Add_Scroll({ Update-CancelOverlay })
 $tbl = New-Object System.Windows.Forms.TableLayoutPanel; $tbl.Dock = 'Top'; $tbl.AutoSize = $true
 $tbl.ColumnCount = 2; [void]$tbl.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::Percent, 50)))
 [void]$tbl.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::Percent, 50)))
 [void]$pScroll.Controls.Add($tbl)
+
+# -----------------------------------------------------------------------------
+# BUSCA DE BOTOES
+# Os tecnicos perdiam tempo procurando o botao no meio da lista. A lista e filtrada enquanto
+# digita, sem ligar para acento ou maiuscula. Ctrl+F vem para ca, Esc limpa, Enter (ou seta
+# para baixo) vai para o primeiro botao achado.
+# -----------------------------------------------------------------------------
+function ConvertTo-TextoBusca {
+    # Minusculo e sem acento: "Balança" e "balanca" sao a mesma busca
+    param([string]$Texto)
+    $d = "$Texto".ToLowerInvariant().Normalize([System.Text.NormalizationForm]::FormD)
+    return [regex]::Replace($d, '\p{Mn}', '')
+}
+
+function Set-FiltroBotoes {
+    # Mostra so os botoes com todas as palavras digitadas no nome; se nenhum nome bate, procura tambem
+    # na descricao (o balao do botao). Secao sem botao achado some junto, e o espacador que alinha as
+    # cores tambem (sem ele os achados ficam lado a lado). O botao com download andando nunca some:
+    # o CANCELAR fica em cima dele.
+    # Devolve hashtable: Achados / PelaDescricao
+    param([string]$Texto)
+    $termos = @((ConvertTo-TextoBusca $Texto) -split '\s+' | Where-Object { $_ -ne '' })
+    $itens = @($tbl.Controls)
+    $botoes = @($itens | Where-Object { $_ -is [System.Windows.Forms.Button] })
+    $casa = {
+        param([string]$Alvo)
+        $a = ConvertTo-TextoBusca $Alvo
+        foreach ($t in $termos) { if (-not $a.Contains($t)) { return $false } }
+        return $true
+    }
+    $achados = New-Object 'System.Collections.Generic.HashSet[object]'
+    $pelaDescricao = $false
+    if ($termos.Count -gt 0) {
+        foreach ($b in $botoes) { if (& $casa $b.Text) { [void]$achados.Add($b) } }
+        if ($achados.Count -eq 0) {
+            $pelaDescricao = $true
+            foreach ($b in $botoes) { if (& $casa ("$($b.Text) " + $Script:ToolTip.GetToolTip($b))) { [void]$achados.Add($b) } }
+        }
+    }
+    $tbl.SuspendLayout()
+    try {
+        $secao = $null
+        $secoesComAchado = New-Object 'System.Collections.Generic.HashSet[object]'
+        foreach ($c in $itens) {
+            if ($c -is [System.Windows.Forms.Button]) {
+                $mostra = ($termos.Count -eq 0 -or $achados.Contains($c) -or ($Script:CancelOverlayActive -and $c -eq $Script:CancelOverlayTarget))
+                $c.Visible = $mostra
+                if ($mostra -and $null -ne $secao) { [void]$secoesComAchado.Add($secao) }
+            }
+            elseif ("$($c.Text)" -ne "") { $secao = $c }
+            else { $c.Visible = ($termos.Count -eq 0) }
+        }
+        foreach ($c in $itens) {
+            if ($c -isnot [System.Windows.Forms.Button] -and "$($c.Text)" -ne "") { $c.Visible = ($termos.Count -eq 0 -or $secoesComAchado.Contains($c)) }
+        }
+    }
+    finally { $tbl.ResumeLayout() }
+    $pScroll.AutoScrollPosition = New-Object System.Drawing.Point(0, 0)
+    Update-CancelOverlay
+    return @{ Achados = $achados.Count; PelaDescricao = $pelaDescricao }
+}
+
+$pBusca = New-Object System.Windows.Forms.Panel; $pBusca.Dock = 'Fill'; $pBusca.Margin = [System.Windows.Forms.Padding]::Empty
+[void]$layout.Controls.Add($pBusca, 0, 2)
+# Caixa no mesmo alinhamento da coluna de botoes, com borda fina que fica verde quando esta em uso
+$caixaBusca = New-Object System.Windows.Forms.Panel
+$caixaBusca.Location = New-Object System.Drawing.Point(6, 4)
+$caixaBusca.Size = New-Object System.Drawing.Size(300, 30)
+$caixaBusca.BackColor = [System.Drawing.Color]::FromArgb(36, 36, 42)
+$caixaBusca.Cursor = [System.Windows.Forms.Cursors]::IBeam
+[void]$pBusca.Controls.Add($caixaBusca)
+$txtBusca = New-Object System.Windows.Forms.TextBox
+$txtBusca.BorderStyle = 'None'; $txtBusca.BackColor = $caixaBusca.BackColor; $txtBusca.ForeColor = 'White'
+$txtBusca.Font = New-Object System.Drawing.Font("Segoe UI", 10)
+$txtBusca.Location = New-Object System.Drawing.Point(32, [int](($caixaBusca.Height - $txtBusca.PreferredHeight) / 2))
+$txtBusca.Width = $caixaBusca.Width - 32 - 26
+[void]$caixaBusca.Controls.Add($txtBusca)
+# Texto de exemplo por cima do campo (o TextBox daqui nao tem placeholder)
+$lblBuscaDica = New-Object System.Windows.Forms.Label
+$lblBuscaDica.Text = "Buscar"; $lblBuscaDica.AutoSize = $true
+$lblBuscaDica.ForeColor = [System.Drawing.Color]::FromArgb(125, 125, 135)
+$lblBuscaDica.Font = $txtBusca.Font
+$lblBuscaDica.Location = New-Object System.Drawing.Point(($txtBusca.Left - 2), $txtBusca.Top)
+$lblBuscaDica.Cursor = [System.Windows.Forms.Cursors]::IBeam
+[void]$caixaBusca.Controls.Add($lblBuscaDica); $lblBuscaDica.BringToFront()
+$lblBuscaLimpar = New-Object System.Windows.Forms.Label
+$lblBuscaLimpar.Text = "✕"; $lblBuscaLimpar.AutoSize = $true; $lblBuscaLimpar.Visible = $false
+$lblBuscaLimpar.ForeColor = [System.Drawing.Color]::FromArgb(150, 150, 160)
+$lblBuscaLimpar.Font = New-Object System.Drawing.Font("Segoe UI", 9)
+$lblBuscaLimpar.Location = New-Object System.Drawing.Point(($caixaBusca.Width - 22), [int](($caixaBusca.Height - $lblBuscaLimpar.PreferredHeight) / 2))
+$lblBuscaLimpar.Cursor = [System.Windows.Forms.Cursors]::Hand
+[void]$caixaBusca.Controls.Add($lblBuscaLimpar)
+$lblBuscaRes = New-Object System.Windows.Forms.Label
+$lblBuscaRes.AutoSize = $true; $lblBuscaRes.ForeColor = 'Gray'
+$lblBuscaRes.Font = New-Object System.Drawing.Font("Segoe UI", 9)
+$lblBuscaRes.Location = New-Object System.Drawing.Point(($caixaBusca.Right + 10), ($caixaBusca.Top + [int](($caixaBusca.Height - $lblBuscaRes.PreferredHeight) / 2)))
+[void]$pBusca.Controls.Add($lblBuscaRes)
+$Script:ToolTip.SetToolTip($txtBusca, "Digite parte do nome do botão (ex.: sql, balança, impressora). Ctrl+F vem para cá, Esc limpa e Enter vai para o primeiro botão achado.")
+
+$caixaBusca.Add_Paint({
+        param($s, $e)
+        $g = $e.Graphics
+        $g.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
+        $corBorda = if ($txtBusca.Focused) { [System.Drawing.Color]::FromArgb(26, 188, 138) } else { [System.Drawing.Color]::FromArgb(62, 62, 72) }
+        $caneta = New-Object System.Drawing.Pen($corBorda, 1)
+        $g.DrawRectangle($caneta, 0, 0, $s.Width - 1, $s.Height - 1)
+        $caneta.Dispose()
+        # Lupa desenhada (acompanha a escala da tela pequena)
+        $k = $s.Height / 30.0
+        $cy = $s.Height / 2.0
+        $lupa = New-Object System.Drawing.Pen([System.Drawing.Color]::FromArgb(140, 140, 150), [single](1.6 * $k))
+        $g.DrawEllipse($lupa, [single](11 * $k), [single]($cy - 7 * $k), [single](10 * $k), [single](10 * $k))
+        $g.DrawLine($lupa, [single](19.5 * $k), [single]($cy + 1.5 * $k), [single](23 * $k), [single]($cy + 5 * $k))
+        $lupa.Dispose()
+    })
+$focaBusca = { $txtBusca.Focus() | Out-Null }
+$caixaBusca.Add_Click($focaBusca)
+$lblBuscaDica.Add_Click($focaBusca)
+$txtBusca.Add_Enter({ $caixaBusca.Invalidate() })
+$txtBusca.Add_Leave({ $caixaBusca.Invalidate() })
+$lblBuscaLimpar.Add_Click({ $txtBusca.Clear(); $txtBusca.Focus() | Out-Null })
+
+# Log da busca so quando o tecnico para de digitar (uma linha por busca, nao uma por letra)
+$tmrBuscaLog = New-Object System.Windows.Forms.Timer
+$tmrBuscaLog.Interval = 1500
+$tmrBuscaLog.Add_Tick({
+        $this.Stop()
+        $termoLog = "$($txtBusca.Text)".Trim()
+        if ($termoLog -eq "" -or $termoLog -eq $Script:BuscaUltimoLog) { return }
+        $Script:BuscaUltimoLog = $termoLog
+        Log-Message "INFO" "Busca de botões: ""$termoLog"" - $($lblBuscaRes.Text)"
+    })
+$txtBusca.Add_TextChanged({
+        $rBusca = Set-FiltroBotoes $txtBusca.Text
+        $vazio = ("$($txtBusca.Text)".Trim() -eq "")
+        $lblBuscaDica.Visible = ($txtBusca.Text -eq "")
+        $lblBuscaLimpar.Visible = -not $vazio
+        if ($vazio) { $lblBuscaRes.Text = "" }
+        elseif ($rBusca.Achados -eq 0) { $lblBuscaRes.Text = "nenhum botão encontrado" }
+        else {
+            $lblBuscaRes.Text = $(if ($rBusca.Achados -eq 1) { "1 botão" } else { "$($rBusca.Achados) botões" })
+            if ($rBusca.PelaDescricao) { $lblBuscaRes.Text += " (pela descrição)" }
+        }
+        $tmrBuscaLog.Stop(); $tmrBuscaLog.Start()
+    })
+$txtBusca.Add_KeyDown({
+        param($s, $e)
+        if ($e.KeyCode -eq [System.Windows.Forms.Keys]::Escape) { $e.SuppressKeyPress = $true; $s.Clear() }
+        elseif ($e.KeyCode -eq [System.Windows.Forms.Keys]::Enter -or $e.KeyCode -eq [System.Windows.Forms.Keys]::Down) {
+            $e.SuppressKeyPress = $true
+            $primeiro = @($tbl.Controls | Where-Object { $_ -is [System.Windows.Forms.Button] -and $_.Visible }) | Select-Object -First 1
+            if ($null -ne $primeiro) { $primeiro.Focus() | Out-Null }
+        }
+    })
+# Ctrl+F de qualquer lugar da janela principal
+$form.KeyPreview = $true
+$form.Add_KeyDown({
+        param($s, $e)
+        if ($e.Control -and $e.KeyCode -eq [System.Windows.Forms.Keys]::F) {
+            $e.SuppressKeyPress = $true
+            $txtBusca.Focus() | Out-Null
+            $txtBusca.SelectAll()
+        }
+    })
 
 function Add-Title {
     param($T) 
@@ -23334,7 +23704,7 @@ $bRam.Add_Click({ Show-LiberarMemoria })
 [void]$tbl.Controls.Add($bRam)
 
 # Mensagem de abertura: explica o programa para quem abre pela primeira vez
-Log-Message "INFO" "Preparador XMenu v5.80 - REVENDA - preparo e suporte de computadores com o sistema XMenu"
+Log-Message "INFO" "Preparador XMenu v5.81 - REVENDA - preparo e suporte de computadores com o sistema XMenu"
 foreach ($msgSenha in $Script:LogSenhaPendente) { Log-Message "INFO" $msgSenha }
 Log-Message "INFO" "Senha de abertura: acesso liberado"
 Log-Message "LOG" "==============================================================="
@@ -23344,9 +23714,14 @@ Log-Message "LOG" "  BANCO DE DADOS ............. instaladores do SQL Server"
 Log-Message "LOG" "  PROGRAMAS NETCONTROLL ...... NetPDV, Concentrador, Link XMenu, XBot, XTag, Tablet, Totem e KDS"
 Log-Message "LOG" "  EXTERNOS ................... acesso remoto, Chrome, TEF HUB, balança, PIN Pad e ferramentas de rede"
 Log-Message "LOG" "  SUPORTE E DIAGNÓSTICO ...... impressoras, rede, SQL, backup, XMLs e reparos do Windows"
+Log-Message "LOG" "  BUSCAR ..................... digite parte do nome do botão para achar mais rápido (Ctrl+F)"
 Log-Message "LOG" "  Passe o mouse sobre um botão para ver o que ele faz antes de clicar."
 Log-Message "LOG" "---------------------------------------------------------------"
-Log-Message "LOG" "NOVO NA v5.80"
+Log-Message "LOG" "NOVO NA v5.81"
+Log-Message "SUCESSO" "  Busca de botões: nova caixa Buscar acima da lista, que filtra os botões enquanto digita (sem ligar para acento ou maiúscula; se nenhum nome bate, procura na descrição do botão); Ctrl+F vem para a busca, Esc limpa e Enter vai para o primeiro botão achado"
+Log-Message "SUCESSO" "  XMLs: busca em várias séries de uma vez, com a série antes das notas no campo Notas (10: 8704, 8841; 28: 14, 19-20); o CONFERIR SEQUÊNCIA, os faltantes e o nome do lote separam por série"
+Log-Message "SUCESSO" "  XMLs: dá para colar no campo Notas a lista de notas do contador (Inicial / Final / Série / Espécie): ela já vira o formato por série e as linhas de NF-e ficam de fora; colar uma lista de várias linhas não perde mais as linhas depois da primeira"
+Log-Message "SUCESSO" "  Preparar ambiente e Limpeza de Disco Profunda: a limpeza das pastas temporárias roda em segundo plano (a janela não fica mais em Não está respondendo) e um arquivo que some no meio não interrompe mais a limpeza (erro Não existe um objeto no caminho especificado)"
 Log-Message "SUCESSO" "  Externos: o botão OpenVSPE agora consulta a última versão publicada no GitHub na hora do clique (versão nova do OpenVSPE já aparece sem atualizar o Preparador; sem resposta do GitHub, baixa a 2.0.7)"
 Log-Message "SUCESSO" "  Preparar ambiente: o Explorer passa a mostrar os itens ocultos (as extensões de arquivo já apareciam)"
 Log-Message "SUCESSO" "  Externos: novo botão OpenVSPE (2.0.7), ao lado do VSPE: baixa do GitHub, extrai e abre a pasta para rodar o instalador (alternativa ao VSPE que não pede conta e abre quando o usuário entra no Windows)"
