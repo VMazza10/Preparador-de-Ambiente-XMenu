@@ -1,6 +1,6 @@
 ﻿# =============================================================================
 # PREPARADOR XMENU - VERSAO REVENDA
-# Baseado na v5.86
+# Baseado na v5.87
 # Alteracoes Revenda:
 #   - Wallpaper: um dos 3 fundos de revenda (Fundos/revenda-1..3.jpg), sorteado a cada preparo
 #   - Removido: Atalhos de Suporte e Pasta Netcontroll
@@ -22144,19 +22144,13 @@ function Confirm-PrepararAmbiente {
     return @{ TrocarFundo = $trocar; LogonAutomatico = $logonAuto }
 }
 
-# Papel de parede baixado da pasta Fundos do repositorio: no Preparar ambiente (Xmenu: um fundo; Revenda: um dos 3,
-# sorteado) e no Totem Chrome (fundo em pe, para a tela vertical). Baixa em segundo plano (internet lenta nao trava a
-# janela) para um arquivo a parte e so troca o fundo com o download completo; grava em TEMP\XmenuResources, que a
-# limpeza dos temporarios pula. Devolve $true quando aplicou.
-function Set-PapelDeParede {
-    param([string]$Url, [string]$Arquivo, [int]$LimiteSegundos = 60)
-    $pasta = Join-Path $env:TEMP "XmenuResources"
-    if (-not (Test-Path $pasta)) { New-Item $pasta -ItemType Directory -Force | Out-Null }
-    $destino = Join-Path $pasta $Arquivo
-    $baixando = "$destino.baixando"
+# Baixa um arquivo sem travar a janela (internet lenta): em segundo plano, com limite de tempo, para um arquivo a parte
+# que so vira o definitivo com o download completo (o que ja estava no lugar nao estraga). Lanca o erro se falhar.
+function Save-ArquivoSemTravar {
+    param([string]$Url, [string]$Destino, [int]$LimiteSegundos = 60)
+    $baixando = "$Destino.baixando"
     $wc = New-Object System.Net.WebClient
     try {
-        Log-Message "CMD" "COMANDO: baixar o fundo $Arquivo"
         $tarefa = $wc.DownloadFileTaskAsync($Url, $baixando)
         $relogio = [System.Diagnostics.Stopwatch]::StartNew()
         while (-not $tarefa.IsCompleted -and $relogio.Elapsed.TotalSeconds -lt $LimiteSegundos) {
@@ -22165,7 +22159,23 @@ function Set-PapelDeParede {
         }
         if (-not $tarefa.IsCompleted) { $wc.CancelAsync(); throw "o download passou de $LimiteSegundos s" }
         if ($tarefa.IsFaulted) { throw $tarefa.Exception.GetBaseException() }
-        Move-Item -LiteralPath $baixando -Destination $destino -Force -ErrorAction Stop
+        Move-Item -LiteralPath $baixando -Destination $Destino -Force -ErrorAction Stop
+    }
+    catch { Remove-Item -LiteralPath $baixando -Force -ErrorAction SilentlyContinue; throw }
+    finally { $wc.Dispose() }
+}
+
+# Papel de parede baixado da pasta Fundos do repositorio: no Preparar ambiente (Xmenu: um fundo; Revenda: um dos 3,
+# sorteado) e no Totem Chrome (fundo em pe, para a tela vertical). Grava em TEMP\XmenuResources, que a limpeza dos
+# temporarios pula. Devolve $true quando aplicou.
+function Set-PapelDeParede {
+    param([string]$Url, [string]$Arquivo, [int]$LimiteSegundos = 60)
+    $pasta = Join-Path $env:TEMP "XmenuResources"
+    if (-not (Test-Path $pasta)) { New-Item $pasta -ItemType Directory -Force | Out-Null }
+    $destino = Join-Path $pasta $Arquivo
+    try {
+        Log-Message "CMD" "COMANDO: baixar o fundo $Arquivo"
+        Save-ArquivoSemTravar -Url $Url -Destino $destino -LimiteSegundos $LimiteSegundos
         Set-ItemProperty -Path "HKCU:\Control Panel\Desktop" -Name "WallpaperStyle" -Value "10" -Force
         Set-ItemProperty -Path "HKCU:\Control Panel\Desktop" -Name "TileWallPaper" -Value "0" -Force
         Set-ItemProperty -Path "HKCU:\Control Panel\Desktop" -Name "WallPaper" -Value $destino -Force
@@ -22178,10 +22188,8 @@ function Set-PapelDeParede {
     }
     catch {
         Log-Message "ERRO" "Falha no papel de parede ($Arquivo): $($_.Exception.Message)"
-        Remove-Item -LiteralPath $baixando -Force -ErrorAction SilentlyContinue
         return $false
     }
-    finally { $wc.Dispose() }
 }
 
 function Run-Config {
@@ -22587,7 +22595,7 @@ $formWidth = if ($screen.Width -lt 1000) { 900 } else { 1000 }
 $formHeight = if ($screen.Height -lt 800) { 700 } else { 800 }
 
 $form = New-Object System.Windows.Forms.Form
-$form.Text = "Preparador XMenu – Suporte Técnico v5.86 - REVENDA"
+$form.Text = "Preparador XMenu – Suporte Técnico v5.87 - REVENDA"
 $form.Size = New-Object System.Drawing.Size($formWidth, $formHeight)
 $form.StartPosition = "CenterScreen"
 $form.BackColor = [System.Drawing.Color]::FromArgb(25, 25, 30); $form.ForeColor = 'White'
@@ -23749,7 +23757,7 @@ $bRam.Add_Click({ Show-LiberarMemoria })
 [void]$tbl.Controls.Add($bRam)
 
 # Mensagem de abertura: explica o programa para quem abre pela primeira vez
-Log-Message "INFO" "Preparador XMenu v5.86 - REVENDA - preparo e suporte de computadores com o sistema XMenu"
+Log-Message "INFO" "Preparador XMenu v5.87 - REVENDA - preparo e suporte de computadores com o sistema XMenu"
 foreach ($msgSenha in $Script:LogSenhaPendente) { Log-Message "INFO" $msgSenha }
 Log-Message "INFO" "Senha de abertura: acesso liberado"
 Log-Message "LOG" "==============================================================="
@@ -23762,7 +23770,8 @@ Log-Message "LOG" "  SUPORTE E DIAGNÓSTICO ...... impressoras, rede, SQL, backu
 Log-Message "LOG" "  BUSCAR ..................... digite parte do nome do botão para achar mais rápido (Ctrl+F)"
 Log-Message "LOG" "  Passe o mouse sobre um botão para ver o que ele faz antes de clicar."
 Log-Message "LOG" "---------------------------------------------------------------"
-Log-Message "LOG" "NOVO NA v5.86"
+Log-Message "LOG" "NOVO NA v5.87"
+Log-Message "SUCESSO" "  Downloads do fundo e do ícone do atendimento: em segundo plano, com limite de tempo, sem travar a janela"
 Log-Message "SUCESSO" "  Log: não mostra mais links (fundo, links copiados, Links úteis e página do fabricante aparecem pelo nome; o totem pelo IP, sem http://) e nenhum endereço vira link clicável"
 Log-Message "SUCESSO" "  Fundos: três papéis de parede novos de revenda, e cada preparo sorteia um (o Log diz qual saiu); o fundo é baixado em segundo plano (a janela não trava) e, se o download falhar, o fundo atual fica"
 Log-Message "SUCESSO" "  Totem Chrome: ao criar o atalho, coloca o fundo do totem (imagem em pé, para a tela vertical)"

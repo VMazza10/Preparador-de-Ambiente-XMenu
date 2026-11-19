@@ -1,5 +1,5 @@
 ﻿# =============================================================================
-# PREPARADOR XMENU v5.86
+# PREPARADOR XMENU v5.87
 # Visual: Dashboard Moderno
 # Correcoes:
 #   - CRITICO: Removido DoEvents do loop de evento de download (causava crash).
@@ -22174,19 +22174,13 @@ function Confirm-PrepararAmbiente {
     return @{ TrocarFundo = $trocar; LogonAutomatico = $logonAuto }
 }
 
-# Papel de parede baixado da pasta Fundos do repositorio: no Preparar ambiente (Xmenu: um fundo; Revenda: um dos 3,
-# sorteado) e no Totem Chrome (fundo em pe, para a tela vertical). Baixa em segundo plano (internet lenta nao trava a
-# janela) para um arquivo a parte e so troca o fundo com o download completo; grava em TEMP\XmenuResources, que a
-# limpeza dos temporarios pula. Devolve $true quando aplicou.
-function Set-PapelDeParede {
-    param([string]$Url, [string]$Arquivo, [int]$LimiteSegundos = 60)
-    $pasta = Join-Path $env:TEMP "XmenuResources"
-    if (-not (Test-Path $pasta)) { New-Item $pasta -ItemType Directory -Force | Out-Null }
-    $destino = Join-Path $pasta $Arquivo
-    $baixando = "$destino.baixando"
+# Baixa um arquivo sem travar a janela (internet lenta): em segundo plano, com limite de tempo, para um arquivo a parte
+# que so vira o definitivo com o download completo (o que ja estava no lugar nao estraga). Lanca o erro se falhar.
+function Save-ArquivoSemTravar {
+    param([string]$Url, [string]$Destino, [int]$LimiteSegundos = 60)
+    $baixando = "$Destino.baixando"
     $wc = New-Object System.Net.WebClient
     try {
-        Log-Message "CMD" "COMANDO: baixar o fundo $Arquivo"
         $tarefa = $wc.DownloadFileTaskAsync($Url, $baixando)
         $relogio = [System.Diagnostics.Stopwatch]::StartNew()
         while (-not $tarefa.IsCompleted -and $relogio.Elapsed.TotalSeconds -lt $LimiteSegundos) {
@@ -22195,7 +22189,23 @@ function Set-PapelDeParede {
         }
         if (-not $tarefa.IsCompleted) { $wc.CancelAsync(); throw "o download passou de $LimiteSegundos s" }
         if ($tarefa.IsFaulted) { throw $tarefa.Exception.GetBaseException() }
-        Move-Item -LiteralPath $baixando -Destination $destino -Force -ErrorAction Stop
+        Move-Item -LiteralPath $baixando -Destination $Destino -Force -ErrorAction Stop
+    }
+    catch { Remove-Item -LiteralPath $baixando -Force -ErrorAction SilentlyContinue; throw }
+    finally { $wc.Dispose() }
+}
+
+# Papel de parede baixado da pasta Fundos do repositorio: no Preparar ambiente (Xmenu: um fundo; Revenda: um dos 3,
+# sorteado) e no Totem Chrome (fundo em pe, para a tela vertical). Grava em TEMP\XmenuResources, que a limpeza dos
+# temporarios pula. Devolve $true quando aplicou.
+function Set-PapelDeParede {
+    param([string]$Url, [string]$Arquivo, [int]$LimiteSegundos = 60)
+    $pasta = Join-Path $env:TEMP "XmenuResources"
+    if (-not (Test-Path $pasta)) { New-Item $pasta -ItemType Directory -Force | Out-Null }
+    $destino = Join-Path $pasta $Arquivo
+    try {
+        Log-Message "CMD" "COMANDO: baixar o fundo $Arquivo"
+        Save-ArquivoSemTravar -Url $Url -Destino $destino -LimiteSegundos $LimiteSegundos
         Set-ItemProperty -Path "HKCU:\Control Panel\Desktop" -Name "WallpaperStyle" -Value "10" -Force
         Set-ItemProperty -Path "HKCU:\Control Panel\Desktop" -Name "TileWallPaper" -Value "0" -Force
         Set-ItemProperty -Path "HKCU:\Control Panel\Desktop" -Name "WallPaper" -Value $destino -Force
@@ -22208,10 +22218,55 @@ function Set-PapelDeParede {
     }
     catch {
         Log-Message "ERRO" "Falha no papel de parede ($Arquivo): $($_.Exception.Message)"
-        Remove-Item -LiteralPath $baixando -Force -ErrorAction SilentlyContinue
         return $false
     }
-    finally { $wc.Dispose() }
+}
+
+# Atalho Atendimento XMenu (o chat do suporte desde 19/11/2026): abre a pagina de atendimento como aplicativo (janela
+# propria, sem barra de endereco) no Chrome ou, sem ele, no Edge; sem nenhum dos dois, vira um atalho de internet que
+# abre no navegador padrao. Fica na Area de Trabalho de todos, com o icone da pagina (Config/atendimento-xmenu.ico),
+# e tira o "Suporte Xmenu" antigo, mas so o que o Preparador criava (o chat local em SuporteXmenuChat).
+# Devolve o caminho do atalho criado.
+function New-AtalhoAtendimento {
+    param([string]$Desktop = [Environment]::GetFolderPath('CommonDesktopDirectory'), [string]$Pasta = "C:\Netcontroll\AtendimentoXMenu")
+    $url = "https://master.netcontroll.com.br/chat"
+    if (-not (Test-Path $Pasta)) { New-Item $Pasta -ItemType Directory -Force | Out-Null }
+    $icone = Join-Path $Pasta "atendimento-xmenu.ico"
+    try { Save-ArquivoSemTravar -Url "$Script:RepoBase/Config/atendimento-xmenu.ico" -Destino $icone -LimiteSegundos 30 }
+    catch { Log-Message "ERRO" "     Ícone do atendimento não baixou ($($_.Exception.Message)); o atalho fica com o ícone do navegador" }
+    $temIcone = Test-Path -LiteralPath $icone
+
+    $shell = New-Object -ComObject WScript.Shell
+    $antigo = Join-Path $Desktop "Suporte Xmenu.lnk"
+    if (Test-Path -LiteralPath $antigo) {
+        $lnkAntigo = $shell.CreateShortcut($antigo)
+        if ("$($lnkAntigo.TargetPath) $($lnkAntigo.Arguments)" -match 'SuporteXmenuChat') {
+            Remove-Item -LiteralPath $antigo -Force -ErrorAction Stop
+            Log-Message "INFO" "     Atalho antigo Suporte Xmenu tirado da Área de Trabalho"
+        }
+    }
+
+    $navegador = Get-ChromeExecutable
+    $nomeNavegador = "Chrome"
+    if ($navegador -eq "") { $navegador = Get-PdvEdgeExecutable; $nomeNavegador = "Edge" }
+    if ($navegador -ne "") {
+        $caminho = Join-Path $Desktop "Atendimento XMenu.lnk"
+        $lnk = $shell.CreateShortcut($caminho)
+        $lnk.TargetPath = $navegador
+        $lnk.Arguments = "--app=$url"
+        $lnk.Description = "Chat de atendimento XMenu"
+        $lnk.IconLocation = $(if ($temIcone) { "$icone,0" } else { "$navegador,0" })
+        $lnk.Save()
+    }
+    else {
+        $nomeNavegador = "navegador padrão"
+        $caminho = Join-Path $Desktop "Atendimento XMenu.url"
+        $linhas = @("[InternetShortcut]", "URL=$url")
+        if ($temIcone) { $linhas += "IconFile=$icone"; $linhas += "IconIndex=0" }
+        [System.IO.File]::WriteAllLines($caminho, $linhas)
+    }
+    Log-Message "SUCESSO" "     Atalho Atendimento XMenu criado na Área de Trabalho (abre no $nomeNavegador)"
+    return $caminho
 }
 
 function Run-Config {
@@ -22441,8 +22496,9 @@ function Run-Config {
         [void](Set-PapelDeParede -Url "$Script:RepoBase/Fundos/xmenu.jpg" -Arquivo "fundo-xmenu.jpg")
     }
     
-    # Atalho de suporte (Suporte Xmenu.lnk + C:\Netcontroll\SuporteXmenuChat) tirado em 19/11/2026: o suporte
-    # esta mudando de atalho e o novo entra aqui quando chegar. Os atalhos ja criados nos clientes ficam.
+    Log-Message "LOG" "     Criando o atalho Atendimento XMenu na Área de Trabalho..."
+    try { [void](New-AtalhoAtendimento) }
+    catch { Log-Message "ERRO" "Falha no atalho Atendimento XMenu: $($_.Exception.Message)" }
 
     # Dois ajustes que todo PDV precisa e que antes dependiam do tecnico
     # lembrar de clicar nos botoes de suporte:
@@ -22643,7 +22699,7 @@ $formWidth = if ($screen.Width -lt 1200) { $screen.Width - 50 } else { 1200 }
 $formHeight = if ($screen.Height -lt 900) { $screen.Height - 50 } else { 900 }
 
 $form = New-Object System.Windows.Forms.Form
-$form.Text = "Preparador XMenu – Suporte Técnico v5.86"
+$form.Text = "Preparador XMenu – Suporte Técnico v5.87"
 $form.Size = New-Object System.Drawing.Size($formWidth, $formHeight)
 $form.StartPosition = "CenterScreen"
 $form.BackColor = [System.Drawing.Color]::FromArgb(25, 25, 30); $form.ForeColor = 'White'
@@ -23808,7 +23864,7 @@ $bRam.Add_Click({ Show-LiberarMemoria })
 [void]$tbl.Controls.Add($bRam)
 
 # Mensagem de abertura: explica o programa para quem abre pela primeira vez
-Log-Message "INFO" "Preparador XMenu v5.86 - preparo e suporte de computadores com o sistema XMenu"
+Log-Message "INFO" "Preparador XMenu v5.87 - preparo e suporte de computadores com o sistema XMenu"
 foreach ($msgSenha in $Script:LogSenhaPendente) { Log-Message "INFO" $msgSenha }
 Log-Message "INFO" "Senha de abertura: acesso liberado"
 Log-Message "LOG" "==============================================================="
@@ -23821,7 +23877,9 @@ Log-Message "LOG" "  SUPORTE E DIAGNÓSTICO ...... impressoras, rede, SQL, backu
 Log-Message "LOG" "  BUSCAR ..................... digite parte do nome do botão para achar mais rápido (Ctrl+F)"
 Log-Message "LOG" "  Passe o mouse sobre um botão para ver o que ele faz antes de clicar."
 Log-Message "LOG" "---------------------------------------------------------------"
-Log-Message "LOG" "NOVO NA v5.86"
+Log-Message "LOG" "NOVO NA v5.87"
+Log-Message "SUCESSO" "  Preparar ambiente: novo atalho Atendimento XMenu na Área de Trabalho, com o ícone do chat; abre o atendimento como aplicativo no Chrome (ou no Edge) e tira o atalho antigo Suporte Xmenu"
+Log-Message "SUCESSO" "  Downloads do fundo e do ícone do atendimento: em segundo plano, com limite de tempo, sem travar a janela"
 Log-Message "SUCESSO" "  Log: não mostra mais links (fundo, links copiados, Links úteis e página do fabricante aparecem pelo nome; o totem pelo IP, sem http://) e nenhum endereço vira link clicável"
 Log-Message "SUCESSO" "  Fundos: novo papel de parede XMenu no Preparar ambiente; o fundo é baixado em segundo plano (a janela não trava) e, se o download falhar, o fundo atual fica"
 Log-Message "SUCESSO" "  Totem Chrome: ao criar o atalho, coloca o fundo do totem (imagem em pé, para a tela vertical)"
