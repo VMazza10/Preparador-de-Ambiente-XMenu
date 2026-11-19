@@ -1,5 +1,5 @@
 ﻿# =============================================================================
-# PREPARADOR XMENU v5.82
+# PREPARADOR XMENU v5.83
 # Visual: Dashboard Moderno
 # Correcoes:
 #   - CRITICO: Removido DoEvents do loop de evento de download (causava crash).
@@ -3532,11 +3532,15 @@ function Show-XmlDownloader {
         # se digita (o "1-15,2000" de antes era texto de verdade e tinha que ser apagado).
         $lblNotasDica = New-Object System.Windows.Forms.Label
         $lblNotasDica.Text = "ex.: 1-15,2000   ou   10: 1-5; 28: 7"
-        $lblNotasDica.AutoSize = $true
+        # Tamanho fixo 2 px para dentro da borda e texto centrado na altura: com AutoSize o rotulo ficava
+        # mais alto que o miolo da caixa em alguns PCs e cobria a borda de baixo (parecia um traco no fim)
+        $lblNotasDica.AutoSize = $false
         $lblNotasDica.Font = $txtNotas.Font
         $lblNotasDica.ForeColor = [System.Drawing.Color]::FromArgb(105, 115, 135)
         $lblNotasDica.BackColor = $txtNotas.BackColor
-        $lblNotasDica.Location = New-Object System.Drawing.Point(($txtNotas.Left + 2), ($txtNotas.Top + 3))
+        $lblNotasDica.TextAlign = 'MiddleLeft'
+        $lblNotasDica.Location = New-Object System.Drawing.Point(($txtNotas.Left + 2), ($txtNotas.Top + 2))
+        $lblNotasDica.Size = New-Object System.Drawing.Size(($txtNotas.Width - 4), ($txtNotas.Height - 4))
         $lblNotasDica.Cursor = [System.Windows.Forms.Cursors]::IBeam
         [void]$cardBusca.Controls.Add($lblNotasDica); $lblNotasDica.BringToFront()
         $lblNotasDica.Add_Click({ $txtNotas.Focus() | Out-Null })
@@ -22637,7 +22641,7 @@ $formWidth = if ($screen.Width -lt 1200) { $screen.Width - 50 } else { 1200 }
 $formHeight = if ($screen.Height -lt 900) { $screen.Height - 50 } else { 900 }
 
 $form = New-Object System.Windows.Forms.Form
-$form.Text = "Preparador XMenu – Suporte Técnico v5.82"
+$form.Text = "Preparador XMenu – Suporte Técnico v5.83"
 $form.Size = New-Object System.Drawing.Size($formWidth, $formHeight)
 $form.StartPosition = "CenterScreen"
 $form.BackColor = [System.Drawing.Color]::FromArgb(25, 25, 30); $form.ForeColor = 'White'
@@ -23801,7 +23805,7 @@ $bRam.Add_Click({ Show-LiberarMemoria })
 [void]$tbl.Controls.Add($bRam)
 
 # Mensagem de abertura: explica o programa para quem abre pela primeira vez
-Log-Message "INFO" "Preparador XMenu v5.82 - preparo e suporte de computadores com o sistema XMenu"
+Log-Message "INFO" "Preparador XMenu v5.83 - preparo e suporte de computadores com o sistema XMenu"
 foreach ($msgSenha in $Script:LogSenhaPendente) { Log-Message "INFO" $msgSenha }
 Log-Message "INFO" "Senha de abertura: acesso liberado"
 Log-Message "LOG" "==============================================================="
@@ -23814,7 +23818,8 @@ Log-Message "LOG" "  SUPORTE E DIAGNÓSTICO ...... impressoras, rede, SQL, backu
 Log-Message "LOG" "  BUSCAR ..................... digite parte do nome do botão para achar mais rápido (Ctrl+F)"
 Log-Message "LOG" "  Passe o mouse sobre um botão para ver o que ele faz antes de clicar."
 Log-Message "LOG" "---------------------------------------------------------------"
-Log-Message "LOG" "NOVO NA v5.82"
+Log-Message "LOG" "NOVO NA v5.83"
+Log-Message "SUCESSO" "  XMLs: o exemplo cinza do campo Notas fica dentro da caixa e não cobre mais a borda de baixo (aparecia um traço no fim do exemplo em alguns PCs)"
 Log-Message "SUCESSO" "  XMLs: o campo Notas abre vazio, com o exemplo das duas buscas dentro dele (1-15,2000 para uma série, 10: 1-5; 28: 7 para várias); o exemplo some quando se digita e não precisa mais ser apagado"
 Log-Message "SUCESSO" "  Busca de botões: nova caixa Buscar acima da lista, que filtra os botões enquanto digita (sem ligar para acento ou maiúscula; se nenhum nome bate, procura na descrição do botão); Ctrl+F vem para a busca, Esc limpa e Enter vai para o primeiro botão achado"
 Log-Message "SUCESSO" "  XMLs: busca em várias séries de uma vez, com a série antes das notas no campo Notas (10: 8704, 8841; 28: 14, 19-20); o CONFERIR SEQUÊNCIA, os faltantes e o nome do lote separam por série"
