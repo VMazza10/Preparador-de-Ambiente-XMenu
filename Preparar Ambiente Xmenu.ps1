@@ -1,5 +1,5 @@
 ﻿# =============================================================================
-# PREPARADOR XMENU v5.85
+# PREPARADOR XMENU v5.86
 # Visual: Dashboard Moderno
 # Correcoes:
 #   - CRITICO: Removido DoEvents do loop de evento de download (causava crash).
@@ -18806,7 +18806,7 @@ function Show-PrinterManager {
             $btn.Tag = $Url
             $btn.Add_Click({
                 try {
-                    Log-Message "INFO" "Abrindo pagina oficial: $($this.Tag)"
+                    Log-Message "INFO" "Abrindo a página oficial do fabricante no navegador"
                     Start-Process $this.Tag
                 } catch {
                     Log-Message "ERRO" "Falha ao abrir pagina: $_"
@@ -21142,13 +21142,13 @@ function Show-TotemChrome {
             }
             finally { if ($null -ne $cliente) { $cliente.Dispose() }; $btnCriarTc.Enabled = $true }
             if ($motivo -ne "") {
-                Log-Message "ERRO" "Totem Chrome: $url não respondeu ($motivo)"
+                Log-Message "ERRO" "Totem Chrome: o totem em $($url -replace '^(?i)https?://', '') não respondeu ($motivo)"
                 $lblStatusTc.ForeColor = $Script:UiVermelho
                 $lblStatusTc.Text = "Não respondeu: $motivo"
                 $resp = [System.Windows.Forms.MessageBox]::Show("O totem não respondeu em:`r`n$url`r`n($motivo)`r`n`r`nConfira o IP do servidor e se o servidor está ligado. Criar o atalho mesmo assim?", $titulo, "YesNo", "Warning", "Button2")
                 if ($resp -ne [System.Windows.Forms.DialogResult]::Yes) { return }
             }
-            else { Log-Message "INFO" "Totem Chrome: $url respondeu" }
+            else { Log-Message "INFO" "Totem Chrome: o totem em $($url -replace '^(?i)https?://', '') respondeu" }
             $dlgTc.Tag = @{ Url = $url; Inicializar = [bool]$chkIniTc.Checked }
             $dlgTc.DialogResult = [System.Windows.Forms.DialogResult]::OK
         })
@@ -21175,7 +21175,7 @@ function Show-TotemChrome {
             }
         }
         $info = New-TotemChromeAtalho -Endereco $dadosTc.Url -Chrome $chrome -Inicializar:$dadosTc.Inicializar
-        Log-Message "SUCESSO" "Totem Chrome: atalho criado para $($dadosTc.Url) em $($info.Atalhos -join '; ') (abre $($info.Lancador))"
+        Log-Message "SUCESSO" "Totem Chrome: atalho criado para $($dadosTc.Url -replace '^(?i)https?://', '') em $($info.Atalhos -join '; ') (abre $($info.Lancador))"
         # Fundo do totem: imagem em pe, para a tela vertical (falhar aqui nao desfaz o atalho)
         $fundoTotem = Set-PapelDeParede -Url "$Script:RepoBase/Fundos/totem.png" -Arquivo "fundo-totem.png"
         if ($null -ne $Button) { Set-ButtonDone -Button $Button -Label "ATALHO CRIADO" }
@@ -21796,7 +21796,7 @@ function Add-PaginaApp50 {
         param($Botao, [string]$Url, [string]$Descricao)
         try { Set-Clipboard -Value $Url -ErrorAction Stop }
         catch { [System.Windows.Forms.Clipboard]::SetText($Url) }
-        Log-Message "INFO" "Link copiado: $Descricao ($Url)"
+        Log-Message "INFO" "Link copiado: $Descricao"
         $Botao.Text = "copiado!"
         $volta50 = New-Object System.Windows.Forms.Timer
         $volta50.Interval = 1500
@@ -22019,7 +22019,7 @@ function Open-Selector {
                     $url = if ($Type -eq "PDV") { "https://netcontroll.com.br/util/instaladores/netpdv/1.3/$v/0/NetPDV.zip" } else { "http://netcontroll.com.br/util/instaladores/LinkXMenu/10/$v/LinkXMenu.zip" }
                     try { Set-Clipboard -Value $url -ErrorAction Stop }
                     catch { [System.Windows.Forms.Clipboard]::SetText($url) }
-                    Log-Message "INFO" "Link copiado (versao manual): $url"
+                    Log-Message "INFO" "Link copiado (versão manual): $Type $v"
                     $btnManLink.Text = "copiado!"
                     $voltaMan = New-Object System.Windows.Forms.Timer
                     $voltaMan.Interval = 1500
@@ -22186,7 +22186,7 @@ function Set-PapelDeParede {
     $baixando = "$destino.baixando"
     $wc = New-Object System.Net.WebClient
     try {
-        Log-Message "CMD" "COMANDO: baixar $Url"
+        Log-Message "CMD" "COMANDO: baixar o fundo $Arquivo"
         $tarefa = $wc.DownloadFileTaskAsync($Url, $baixando)
         $relogio = [System.Diagnostics.Stopwatch]::StartNew()
         while (-not $tarefa.IsCompleted -and $relogio.Elapsed.TotalSeconds -lt $LimiteSegundos) {
@@ -22643,7 +22643,7 @@ $formWidth = if ($screen.Width -lt 1200) { $screen.Width - 50 } else { 1200 }
 $formHeight = if ($screen.Height -lt 900) { $screen.Height - 50 } else { 900 }
 
 $form = New-Object System.Windows.Forms.Form
-$form.Text = "Preparador XMenu – Suporte Técnico v5.85"
+$form.Text = "Preparador XMenu – Suporte Técnico v5.86"
 $form.Size = New-Object System.Drawing.Size($formWidth, $formHeight)
 $form.StartPosition = "CenterScreen"
 $form.BackColor = [System.Drawing.Color]::FromArgb(25, 25, 30); $form.ForeColor = 'White'
@@ -22684,7 +22684,7 @@ function Add-CtxLink {
     $item.Add_Click({
             if ($Script:LinksIgnorarClique) { $Script:LinksIgnorarClique = $false; return }
             if ($Script:LinksDireitoPendente) { Copy-LinkUtil $this; return }
-            Log-Message "INFO" "Links úteis: abrindo $($this.Text) ($($this.Tag))"
+            Log-Message "INFO" "Links úteis: abrindo $($this.Text)"
             Start-Process $this.Tag
         })
 }
@@ -23047,7 +23047,7 @@ $layout.Padding = '10'; $layout.RowCount = 4
 $gLog = New-Object System.Windows.Forms.GroupBox; $gLog.Text = "Log"; $gLog.ForeColor = 'Gray'; $gLog.Dock = 'Fill'
 [void]$layout.Controls.Add($gLog, 0, 0)
 $tLog = New-Object System.Windows.Forms.RichTextBox; $tLog.Dock = 'Fill'; $tLog.BackColor = [System.Drawing.Color]::FromArgb(20, 20, 20)
-$tLog.ForeColor = 'White'; $tLog.BorderStyle = 'None'; $tLog.ReadOnly = $true; $tLog.Font = $fonteLog
+$tLog.ForeColor = 'White'; $tLog.BorderStyle = 'None'; $tLog.ReadOnly = $true; $tLog.Font = $fonteLog; $tLog.DetectUrls = $false
 [void]$gLog.Controls.Add($tLog); $Script:LogBox = $tLog
 
 $bCfg = New-Object System.Windows.Forms.Button; $bCfg.Text = "PREPARAR AMBIENTE WINDOWS"
@@ -23296,7 +23296,7 @@ function Copy-LinkDoBotao {
             return $false
         }
     }
-    Log-Message "SUCESSO" "Link copiado: $Nome - $Url"
+    Log-Message "SUCESSO" "Link copiado: $Nome"
     Show-DicaLinkBotao $Controle "Link copiado!" 1600
     return $true
 }
@@ -23808,7 +23808,7 @@ $bRam.Add_Click({ Show-LiberarMemoria })
 [void]$tbl.Controls.Add($bRam)
 
 # Mensagem de abertura: explica o programa para quem abre pela primeira vez
-Log-Message "INFO" "Preparador XMenu v5.85 - preparo e suporte de computadores com o sistema XMenu"
+Log-Message "INFO" "Preparador XMenu v5.86 - preparo e suporte de computadores com o sistema XMenu"
 foreach ($msgSenha in $Script:LogSenhaPendente) { Log-Message "INFO" $msgSenha }
 Log-Message "INFO" "Senha de abertura: acesso liberado"
 Log-Message "LOG" "==============================================================="
@@ -23821,7 +23821,8 @@ Log-Message "LOG" "  SUPORTE E DIAGNÓSTICO ...... impressoras, rede, SQL, backu
 Log-Message "LOG" "  BUSCAR ..................... digite parte do nome do botão para achar mais rápido (Ctrl+F)"
 Log-Message "LOG" "  Passe o mouse sobre um botão para ver o que ele faz antes de clicar."
 Log-Message "LOG" "---------------------------------------------------------------"
-Log-Message "LOG" "NOVO NA v5.85"
+Log-Message "LOG" "NOVO NA v5.86"
+Log-Message "SUCESSO" "  Log: não mostra mais links (fundo, links copiados, Links úteis e página do fabricante aparecem pelo nome; o totem pelo IP, sem http://) e nenhum endereço vira link clicável"
 Log-Message "SUCESSO" "  Fundos: novo papel de parede XMenu no Preparar ambiente; o fundo é baixado em segundo plano (a janela não trava) e, se o download falhar, o fundo atual fica"
 Log-Message "SUCESSO" "  Totem Chrome: ao criar o atalho, coloca o fundo do totem (imagem em pé, para a tela vertical)"
 Log-Message "SUCESSO" "  Preparar ambiente: não cria mais o atalho Suporte Xmenu na Área de Trabalho (o suporte está trocando de atalho; o novo vem numa próxima versão)"
