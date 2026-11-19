@@ -1,6 +1,6 @@
 ﻿# =============================================================================
 # PREPARADOR XMENU - VERSAO REVENDA
-# Baseado na v5.81
+# Baseado na v5.82
 # Alteracoes Revenda:
 #   - Wallpaper: fundo_revenda.png
 #   - Removido: Atalhos de Suporte e Pasta Netcontroll
@@ -3520,13 +3520,25 @@ function Show-XmlDownloader {
         New-ToolLabel $cardBusca "Série:" 32 51 9 -Cor $Script:UiSuave | Out-Null
         $cmbSerie = & $novaCombo $cardBusca 76 48 90 -Editavel
         New-ToolLabel $cardBusca "Notas:" 182 51 9 -Cor $Script:UiSuave | Out-Null
-        $txtNotas = & $novoCampo $cardBusca 232 48 300 "1-15,2000"
+        $txtNotas = & $novoCampo $cardBusca 232 48 300 ""
         # Multilinha so por dentro (sem quebra e na altura de uma linha): a caixa de uma linha guarda so a
         # primeira linha do que e colado, e a lista do contador vem uma faixa por linha. O $contaNotas
         # junta as linhas assim que o texto chega.
         $txtNotas.Multiline = $true
         $txtNotas.WordWrap = $false
         $txtNotas.Height = $cmbSerie.Height
+        # Exemplo dentro do campo vazio: busca de uma serie e de varias. Fica por cima e some quando
+        # se digita (o "1-15,2000" de antes era texto de verdade e tinha que ser apagado).
+        $lblNotasDica = New-Object System.Windows.Forms.Label
+        $lblNotasDica.Text = "ex.: 1-15,2000   ou   10: 1-5; 28: 7"
+        $lblNotasDica.AutoSize = $true
+        $lblNotasDica.Font = $txtNotas.Font
+        $lblNotasDica.ForeColor = [System.Drawing.Color]::FromArgb(105, 115, 135)
+        $lblNotasDica.BackColor = $txtNotas.BackColor
+        $lblNotasDica.Location = New-Object System.Drawing.Point(($txtNotas.Left + 2), ($txtNotas.Top + 3))
+        $lblNotasDica.Cursor = [System.Windows.Forms.Cursors]::IBeam
+        [void]$cardBusca.Controls.Add($lblNotasDica); $lblNotasDica.BringToFront()
+        $lblNotasDica.Add_Click({ $txtNotas.Focus() | Out-Null })
         $Script:XmlMultiSerie = $false
         $Script:XmlGrupos = @()
         $lblContagem = New-ToolLabel $cardBusca "" 546 51 9 -Cor $Script:UiVerde -W 390
@@ -3721,7 +3733,7 @@ function Show-XmlDownloader {
         # Campos do modo nao escolhido ficam desabilitados, nunca escondidos
         $atualizaModo = {
             $m1 = $rbSerie.Checked; $m2 = $rbPeriodo.Checked; $m3 = $rbChave.Checked; $m4 = $rbPedido.Checked
-            $cmbSerie.Enabled = $m1; $txtNotas.Enabled = $m1; $lblContagem.Visible = $m1
+            $cmbSerie.Enabled = $m1; $txtNotas.Enabled = $m1; $lblContagem.Visible = $m1; $lblNotasDica.Enabled = $m1
             $dtIni.Enabled = $m2; $dtFim.Enabled = $m2; $cmbSerie2.Enabled = $m2
             $txtChaves.Enabled = $m3
             $txtPedidos.Enabled = $m4
@@ -3750,11 +3762,11 @@ function Show-XmlDownloader {
                 }
                 return
             }
+            $lblNotasDica.Visible = ("$($txtNotas.Text)" -eq "")
             $bruto = "$($txtNotas.Text)".Trim()
             if ($bruto -eq "") {
-                # Campo vazio vira a propria explicacao de como se preenche
-                $lblContagem.ForeColor = $Script:UiSuave
-                $lblContagem.Text = "ex.:  1-15  |  1,5,9  |  várias séries: 10: 1-5; 28: 7"
+                # O exemplo das duas buscas ja aparece dentro do campo
+                $lblContagem.Text = ""
                 return
             }
             $r = ConvertFrom-SeriesNotas -Texto $bruto -SeriePadrao "$($cmbSerie.Text)"
@@ -22543,7 +22555,7 @@ $formWidth = if ($screen.Width -lt 1000) { 900 } else { 1000 }
 $formHeight = if ($screen.Height -lt 800) { 700 } else { 800 }
 
 $form = New-Object System.Windows.Forms.Form
-$form.Text = "Preparador XMenu – Suporte Técnico v5.81 - REVENDA"
+$form.Text = "Preparador XMenu – Suporte Técnico v5.82 - REVENDA"
 $form.Size = New-Object System.Drawing.Size($formWidth, $formHeight)
 $form.StartPosition = "CenterScreen"
 $form.BackColor = [System.Drawing.Color]::FromArgb(25, 25, 30); $form.ForeColor = 'White'
@@ -23704,7 +23716,7 @@ $bRam.Add_Click({ Show-LiberarMemoria })
 [void]$tbl.Controls.Add($bRam)
 
 # Mensagem de abertura: explica o programa para quem abre pela primeira vez
-Log-Message "INFO" "Preparador XMenu v5.81 - REVENDA - preparo e suporte de computadores com o sistema XMenu"
+Log-Message "INFO" "Preparador XMenu v5.82 - REVENDA - preparo e suporte de computadores com o sistema XMenu"
 foreach ($msgSenha in $Script:LogSenhaPendente) { Log-Message "INFO" $msgSenha }
 Log-Message "INFO" "Senha de abertura: acesso liberado"
 Log-Message "LOG" "==============================================================="
@@ -23717,7 +23729,8 @@ Log-Message "LOG" "  SUPORTE E DIAGNÓSTICO ...... impressoras, rede, SQL, backu
 Log-Message "LOG" "  BUSCAR ..................... digite parte do nome do botão para achar mais rápido (Ctrl+F)"
 Log-Message "LOG" "  Passe o mouse sobre um botão para ver o que ele faz antes de clicar."
 Log-Message "LOG" "---------------------------------------------------------------"
-Log-Message "LOG" "NOVO NA v5.81"
+Log-Message "LOG" "NOVO NA v5.82"
+Log-Message "SUCESSO" "  XMLs: o campo Notas abre vazio, com o exemplo das duas buscas dentro dele (1-15,2000 para uma série, 10: 1-5; 28: 7 para várias); o exemplo some quando se digita e não precisa mais ser apagado"
 Log-Message "SUCESSO" "  Busca de botões: nova caixa Buscar acima da lista, que filtra os botões enquanto digita (sem ligar para acento ou maiúscula; se nenhum nome bate, procura na descrição do botão); Ctrl+F vem para a busca, Esc limpa e Enter vai para o primeiro botão achado"
 Log-Message "SUCESSO" "  XMLs: busca em várias séries de uma vez, com a série antes das notas no campo Notas (10: 8704, 8841; 28: 14, 19-20); o CONFERIR SEQUÊNCIA, os faltantes e o nome do lote separam por série"
 Log-Message "SUCESSO" "  XMLs: dá para colar no campo Notas a lista de notas do contador (Inicial / Final / Série / Espécie): ela já vira o formato por série e as linhas de NF-e ficam de fora; colar uma lista de várias linhas não perde mais as linhas depois da primeira"
