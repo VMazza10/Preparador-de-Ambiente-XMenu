@@ -1,8 +1,8 @@
 ﻿# =============================================================================
 # PREPARADOR XMENU - VERSAO REVENDA
-# Baseado na v5.84
+# Baseado na v5.85
 # Alteracoes Revenda:
-#   - Wallpaper: fundo_revenda.png
+#   - Wallpaper: um dos 3 fundos de revenda (Fundos/revenda-1..3.jpg), sorteado a cada preparo
 #   - Removido: Atalhos de Suporte e Pasta Netcontroll
 #   - Layout: Botoes de Links movidos para Menu no Header (Altura Corrigida)
 # =============================================================================
@@ -21146,8 +21146,11 @@ function Show-TotemChrome {
         }
         $info = New-TotemChromeAtalho -Endereco $dadosTc.Url -Chrome $chrome -Inicializar:$dadosTc.Inicializar
         Log-Message "SUCESSO" "Totem Chrome: atalho criado para $($dadosTc.Url) em $($info.Atalhos -join '; ') (abre $($info.Lancador))"
+        # Fundo do totem: imagem em pe, para a tela vertical (falhar aqui nao desfaz o atalho)
+        $fundoTotem = Set-PapelDeParede -Url "$Script:RepoBase/Fundos/totem.png" -Arquivo "fundo-totem.png"
         if ($null -ne $Button) { Set-ButtonDone -Button $Button -Label "ATALHO CRIADO" }
-        [System.Windows.Forms.MessageBox]::Show("Pronto: o atalho Totem XMenu está na Área de Trabalho$(if ($dadosTc.Inicializar) { ' e abre sozinho quando o Windows inicia' }).`r`n`r`nEndereço: $($dadosTc.Url)`r`nPara sair do totem: Alt+F4.", $titulo, "OK", "Information") | Out-Null
+        $txtFundoTotem = $(if ($fundoTotem) { "`r`nFundo do totem aplicado." } else { "`r`nNão consegui colocar o fundo do totem (veja o Log)." })
+        [System.Windows.Forms.MessageBox]::Show("Pronto: o atalho Totem XMenu está na Área de Trabalho$(if ($dadosTc.Inicializar) { ' e abre sozinho quando o Windows inicia' }).`r`n`r`nEndereço: $($dadosTc.Url)`r`nPara sair do totem: Alt+F4.$txtFundoTotem", $titulo, "OK", "Information") | Out-Null
     }
     catch {
         Log-Message "ERRO" "Totem Chrome: não consegui criar o atalho - $($_.Exception.Message)"
@@ -22141,6 +22144,46 @@ function Confirm-PrepararAmbiente {
     return @{ TrocarFundo = $trocar; LogonAutomatico = $logonAuto }
 }
 
+# Papel de parede baixado da pasta Fundos do repositorio: no Preparar ambiente (Xmenu: um fundo; Revenda: um dos 3,
+# sorteado) e no Totem Chrome (fundo em pe, para a tela vertical). Baixa em segundo plano (internet lenta nao trava a
+# janela) para um arquivo a parte e so troca o fundo com o download completo; grava em TEMP\XmenuResources, que a
+# limpeza dos temporarios pula. Devolve $true quando aplicou.
+function Set-PapelDeParede {
+    param([string]$Url, [string]$Arquivo, [int]$LimiteSegundos = 60)
+    $pasta = Join-Path $env:TEMP "XmenuResources"
+    if (-not (Test-Path $pasta)) { New-Item $pasta -ItemType Directory -Force | Out-Null }
+    $destino = Join-Path $pasta $Arquivo
+    $baixando = "$destino.baixando"
+    $wc = New-Object System.Net.WebClient
+    try {
+        Log-Message "CMD" "COMANDO: baixar $Url"
+        $tarefa = $wc.DownloadFileTaskAsync($Url, $baixando)
+        $relogio = [System.Diagnostics.Stopwatch]::StartNew()
+        while (-not $tarefa.IsCompleted -and $relogio.Elapsed.TotalSeconds -lt $LimiteSegundos) {
+            [System.Windows.Forms.Application]::DoEvents()
+            Start-Sleep -Milliseconds 40
+        }
+        if (-not $tarefa.IsCompleted) { $wc.CancelAsync(); throw "o download passou de $LimiteSegundos s" }
+        if ($tarefa.IsFaulted) { throw $tarefa.Exception.GetBaseException() }
+        Move-Item -LiteralPath $baixando -Destination $destino -Force -ErrorAction Stop
+        Set-ItemProperty -Path "HKCU:\Control Panel\Desktop" -Name "WallpaperStyle" -Value "10" -Force
+        Set-ItemProperty -Path "HKCU:\Control Panel\Desktop" -Name "TileWallPaper" -Value "0" -Force
+        Set-ItemProperty -Path "HKCU:\Control Panel\Desktop" -Name "WallPaper" -Value $destino -Force
+        if (-not ('XMenuTools.WinAPI' -as [type])) {
+            Add-Type -MemberDefinition '[DllImport("user32.dll", CharSet=CharSet.Auto)] public static extern int SystemParametersInfo (UInt32 uiAction, UInt32 uiParam, string pvParam, UInt32 fWinIni);' -Name "WinAPI" -Namespace "XMenuTools"
+        }
+        [XMenuTools.WinAPI]::SystemParametersInfo(0x0014, 0, $destino, 3) | Out-Null
+        Log-Message "SUCESSO" "     Papel de parede aplicado: $Arquivo"
+        return $true
+    }
+    catch {
+        Log-Message "ERRO" "Falha no papel de parede ($Arquivo): $($_.Exception.Message)"
+        Remove-Item -LiteralPath $baixando -Force -ErrorAction SilentlyContinue
+        return $false
+    }
+    finally { $wc.Dispose() }
+}
+
 function Run-Config {
     # -TrocarFundo: aplica o papel de parede padrao XMenu (desmarcavel na confirmacao)
     param($Btn, [bool]$TrocarFundo = $true)
@@ -22341,29 +22384,14 @@ function Run-Config {
     [System.Windows.Forms.Application]::DoEvents()
     
     Log-Message "LOG" "6. PERSONALIZACAO REVENDA:"
-    $tempDir = Join-Path $env:TEMP "XmenuResources"
-    if (!(Test-Path $tempDir)) { New-Item $tempDir -ItemType Directory -Force | Out-Null }
-
-    # --- MODIFICACAO REVENDA: NOME DO ARQUIVO ALTERADO PARA 'fundo_revenda.png' ---
-    $wallPath = Join-Path $tempDir "fundo_revenda.png"
-
     if (-not $TrocarFundo) {
         Log-Message "INFO" "     Papel de parede: mantido o atual (desmarcado na confirmação)"
     }
     else {
-        Log-Message "LOG" "     Baixando e Definindo Wallpaper..."
-        try {
-            $wc = New-Object System.Net.WebClient
-            $wc.DownloadFile("$Script:RepoBase/fundo_revenda.png", $wallPath)
-            Set-ItemProperty -Path "HKCU:\Control Panel\Desktop" -Name "WallpaperStyle" -Value "10" -Force
-            Set-ItemProperty -Path "HKCU:\Control Panel\Desktop" -Name "TileWallPaper" -Value "0" -Force
-            Set-ItemProperty -Path "HKCU:\Control Panel\Desktop" -Name "WallPaper" -Value $wallPath -Force
-            if (-not ('XMenuTools.WinAPI' -as [type])) {
-                Add-Type -MemberDefinition '[DllImport("user32.dll", CharSet=CharSet.Auto)] public static extern int SystemParametersInfo (UInt32 uiAction, UInt32 uiParam, string pvParam, UInt32 fWinIni);' -Name "WinAPI" -Namespace "XMenuTools"
-            }
-            [XMenuTools.WinAPI]::SystemParametersInfo(0x0014, 0, $wallPath, 3) | Out-Null
-        }
-        catch { Log-Message "ERRO" "Falha no Wallpaper: $($_.Exception.Message)" }
+        # --- MODIFICACAO REVENDA: 3 fundos de revenda; cada preparo sorteia um (as lojas nao ficam todas iguais) ---
+        $nFundo = Get-Random -Minimum 1 -Maximum 4
+        Log-Message "LOG" "     Aplicando papel de parede da revenda (fundo $nFundo de 3, sorteado)..."
+        [void](Set-PapelDeParede -Url "$Script:RepoBase/Fundos/revenda-$nFundo.jpg" -Arquivo "fundo-revenda.jpg")
     }
     
     # --- MODIFICACAO REVENDA: BLOCO DE CRIACAO DE ATALHO SUPORTE REMOVIDO ---
@@ -22559,7 +22587,7 @@ $formWidth = if ($screen.Width -lt 1000) { 900 } else { 1000 }
 $formHeight = if ($screen.Height -lt 800) { 700 } else { 800 }
 
 $form = New-Object System.Windows.Forms.Form
-$form.Text = "Preparador XMenu – Suporte Técnico v5.84 - REVENDA"
+$form.Text = "Preparador XMenu – Suporte Técnico v5.85 - REVENDA"
 $form.Size = New-Object System.Drawing.Size($formWidth, $formHeight)
 $form.StartPosition = "CenterScreen"
 $form.BackColor = [System.Drawing.Color]::FromArgb(25, 25, 30); $form.ForeColor = 'White'
@@ -23472,7 +23500,7 @@ Add-Btn "TeamViewer com senha" "" "https://www.netcontroll.com.br/util/TeamViewe
 Add-Btn "AnyDesk" "" "https://download.anydesk.com/AnyDesk.exe" "AnyDesk.exe" -Help "Ferramenta de acesso remoto AnyDesk."
 Add-Btn "Google Chrome" "" "https://github.com/VMazza10/Preparador-de-Ambiente-XMenu/releases/download/Chrome/ChromeSetup.exe" "ChromeSetup.exe" -Help "Instalador online do navegador Google Chrome."
 Add-Btn "PDV EDGE (Criar Atalho)" "" "PDV-EDGE-SHORTCUT" "" -Color $colorBlue -Help "Cria na Área de Trabalho o atalho do NetPDV para abrir pelo Microsoft Edge em modo aplicativo/tela cheia."
-Add-Btn "Totem Chrome (Criar Atalho)" "" "TOTEM-CHROME" "" -Color $colorBlue -Help "Cria o atalho Totem XMenu: abre o totem (http://IP-do-servidor/TOTEM/) no Chrome em tela cheia, sem o aviso de restaurar páginas e sem zoom ou voltar página pelo toque. Pode abrir sozinho quando o Windows inicia e espera o servidor responder antes de abrir. Confere se o totem responde antes de criar."
+Add-Btn "Totem Chrome (Criar Atalho)" "" "TOTEM-CHROME" "" -Color $colorBlue -Help "Cria o atalho Totem XMenu: abre o totem (http://IP-do-servidor/TOTEM/) no Chrome em tela cheia, sem o aviso de restaurar páginas e sem zoom ou voltar página pelo toque. Pode abrir sozinho quando o Windows inicia e espera o servidor responder antes de abrir. Confere se o totem responde antes de criar e coloca o fundo do totem (imagem em pé, para a tela vertical)."
 Add-Btn "Revo Uninstaller" "" "https://download.revouninstaller.com/download/revosetup.exe" "revosetup.exe" -Help "Utilitário para desinstalação completa de programas e limpeza de restos."
 Add-Btn "TEF HUB Windows (x86 - sempre a versão atual)" "" "TEFHUB-X86" "" -Help "Consulta o GitHub oficial da Elgin no momento do clique e baixa a versão x86 mais recente do TEF HUB. Não precisa mais trocar o link na mão."
 Add-Btn "Advanced IP Scanner" "" "https://download.advanced-ip-scanner.com/download/files/Advanced_IP_Scanner_2.5.4594.1.exe" "Advanced_IP_Scanner.exe" -Help "Ferramenta de varredura de rede local Advanced IP Scanner."
@@ -23721,7 +23749,7 @@ $bRam.Add_Click({ Show-LiberarMemoria })
 [void]$tbl.Controls.Add($bRam)
 
 # Mensagem de abertura: explica o programa para quem abre pela primeira vez
-Log-Message "INFO" "Preparador XMenu v5.84 - REVENDA - preparo e suporte de computadores com o sistema XMenu"
+Log-Message "INFO" "Preparador XMenu v5.85 - REVENDA - preparo e suporte de computadores com o sistema XMenu"
 foreach ($msgSenha in $Script:LogSenhaPendente) { Log-Message "INFO" $msgSenha }
 Log-Message "INFO" "Senha de abertura: acesso liberado"
 Log-Message "LOG" "==============================================================="
@@ -23734,7 +23762,9 @@ Log-Message "LOG" "  SUPORTE E DIAGNÓSTICO ...... impressoras, rede, SQL, backu
 Log-Message "LOG" "  BUSCAR ..................... digite parte do nome do botão para achar mais rápido (Ctrl+F)"
 Log-Message "LOG" "  Passe o mouse sobre um botão para ver o que ele faz antes de clicar."
 Log-Message "LOG" "---------------------------------------------------------------"
-Log-Message "LOG" "NOVO NA v5.84"
+Log-Message "LOG" "NOVO NA v5.85"
+Log-Message "SUCESSO" "  Fundos: três papéis de parede novos de revenda, e cada preparo sorteia um (o Log diz qual saiu); o fundo é baixado em segundo plano (a janela não trava) e, se o download falhar, o fundo atual fica"
+Log-Message "SUCESSO" "  Totem Chrome: ao criar o atalho, coloca o fundo do totem (imagem em pé, para a tela vertical)"
 Log-Message "SUCESSO" "  Vídeos tutoriais: novo vídeo Como alterar o IP em terminais"
 Log-Message "SUCESSO" "  XMLs: o exemplo cinza do campo Notas fica dentro da caixa e não cobre mais a borda de baixo (aparecia um traço no fim do exemplo em alguns PCs)"
 Log-Message "SUCESSO" "  XMLs: o campo Notas abre vazio, com o exemplo das duas buscas dentro dele (1-15,2000 para uma série, 10: 1-5; 28: 7 para várias); o exemplo some quando se digita e não precisa mais ser apagado"
