@@ -1,5 +1,5 @@
 ﻿# =============================================================================
-# PREPARADOR XMENU v5.83
+# PREPARADOR XMENU v5.84
 # Visual: Dashboard Moderno
 # Correcoes:
 #   - CRITICO: Removido DoEvents do loop de evento de download (causava crash).
@@ -22641,7 +22641,7 @@ $formWidth = if ($screen.Width -lt 1200) { $screen.Width - 50 } else { 1200 }
 $formHeight = if ($screen.Height -lt 900) { $screen.Height - 50 } else { 900 }
 
 $form = New-Object System.Windows.Forms.Form
-$form.Text = "Preparador XMenu – Suporte Técnico v5.83"
+$form.Text = "Preparador XMenu – Suporte Técnico v5.84"
 $form.Size = New-Object System.Drawing.Size($formWidth, $formHeight)
 $form.StartPosition = "CenterScreen"
 $form.BackColor = [System.Drawing.Color]::FromArgb(25, 25, 30); $form.ForeColor = 'White'
@@ -23450,7 +23450,8 @@ function Open-VideosTutoriais {
         @{ Name = "Como ativar NFC-e OFF e ON"; Url = "$base/como-ativar-nfce-off-contingencia.mp4"; File = "XMENU - Como ativar NFC-e OFF e ON.mp4" },
         @{ Name = "Arquivos fiscais - passo a passo"; Url = "$base/arquivos-fiscais-passo-a-passo.mp4"; File = "Arquivos fiscais passo a passo.mp4" },
         @{ Name = "Como integrar produtos no iFood"; Url = "$base/como-integrar-produtos-ifood.mp4"; File = "Como integrar produtos no iFood - XMenu.mp4" },
-        @{ Name = "Como usar a API do XMenu"; Url = "$base/como-usar-api-xmenu.mp4"; File = "Como usar a API do XMenu.mp4" }
+        @{ Name = "Como usar a API do XMenu"; Url = "$base/como-usar-api-xmenu.mp4"; File = "Como usar a API do XMenu.mp4" },
+        @{ Name = "Como alterar o IP em terminais"; Url = "$base/como-alterar-ip-em-terminais.mp4"; File = "Como alterar o IP em terminais.mp4" }
     )
 
     $fVid = New-Object System.Windows.Forms.Form
@@ -23805,7 +23806,7 @@ $bRam.Add_Click({ Show-LiberarMemoria })
 [void]$tbl.Controls.Add($bRam)
 
 # Mensagem de abertura: explica o programa para quem abre pela primeira vez
-Log-Message "INFO" "Preparador XMenu v5.83 - preparo e suporte de computadores com o sistema XMenu"
+Log-Message "INFO" "Preparador XMenu v5.84 - preparo e suporte de computadores com o sistema XMenu"
 foreach ($msgSenha in $Script:LogSenhaPendente) { Log-Message "INFO" $msgSenha }
 Log-Message "INFO" "Senha de abertura: acesso liberado"
 Log-Message "LOG" "==============================================================="
@@ -23818,7 +23819,8 @@ Log-Message "LOG" "  SUPORTE E DIAGNÓSTICO ...... impressoras, rede, SQL, backu
 Log-Message "LOG" "  BUSCAR ..................... digite parte do nome do botão para achar mais rápido (Ctrl+F)"
 Log-Message "LOG" "  Passe o mouse sobre um botão para ver o que ele faz antes de clicar."
 Log-Message "LOG" "---------------------------------------------------------------"
-Log-Message "LOG" "NOVO NA v5.83"
+Log-Message "LOG" "NOVO NA v5.84"
+Log-Message "SUCESSO" "  Vídeos tutoriais: novo vídeo Como alterar o IP em terminais"
 Log-Message "SUCESSO" "  XMLs: o exemplo cinza do campo Notas fica dentro da caixa e não cobre mais a borda de baixo (aparecia um traço no fim do exemplo em alguns PCs)"
 Log-Message "SUCESSO" "  XMLs: o campo Notas abre vazio, com o exemplo das duas buscas dentro dele (1-15,2000 para uma série, 10: 1-5; 28: 7 para várias); o exemplo some quando se digita e não precisa mais ser apagado"
 Log-Message "SUCESSO" "  Busca de botões: nova caixa Buscar acima da lista, que filtra os botões enquanto digita (sem ligar para acento ou maiúscula; se nenhum nome bate, procura na descrição do botão); Ctrl+F vem para a busca, Esc limpa e Enter vai para o primeiro botão achado"
