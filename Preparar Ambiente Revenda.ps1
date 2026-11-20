@@ -1,6 +1,6 @@
 ﻿# =============================================================================
 # PREPARADOR XMENU - VERSAO REVENDA
-# Baseado na v5.89
+# Baseado na v5.90
 # Alteracoes Revenda:
 #   - Wallpaper: um dos 3 fundos de revenda (Fundos/revenda-1..3.jpg), sorteado a cada preparo
 #   - Removido: Atalhos de Suporte e Pasta Netcontroll
@@ -17527,10 +17527,15 @@ function Register-CorrecaoLpr {
     # Invoke-CorrecaoLprAuto, e a impressora volta sozinha quando o PC do LPD muda de IP. O script leva so as funcoes de LPR
     # copiadas deste Preparador (regravado a cada registro) e fica em Arquivos de Programas, que usuario comum nao altera:
     # quem editasse o script rodaria qualquer coisa como SYSTEM. Nao usa schtasks (com /mo ele recusa /tr com "start" solto).
-    param([string]$Pasta = (Join-Path $env:ProgramFiles "Preparador XMenu\CorrigirLpr"))
+    # -SeFaltar (abertura do Preparador, para os clientes que ja tinham LPR): so em PC com porta LPR, e so quando a tarefa
+    # nao existe ou o script dela e de outra versao do Preparador; ja instalada e igual, passa em silencio.
+    # -ArquivoTarefa: onde o Windows guarda a tarefa (conferir por ele e instantaneo; o teste troca).
+    param([string]$Pasta = (Join-Path $env:ProgramFiles "Preparador XMenu\CorrigirLpr"), [switch]$SeFaltar,
+        [string]$ArquivoTarefa = (Join-Path $env:windir "System32\Tasks\Preparador XMenu - Corrigir LPR"))
     $arqMacs = Join-Path $Pasta "lpr_mac_portas.json"
     $arqLog = Join-Path $Pasta "CorrigirLpr.log"
     try {
+        if ($SeFaltar -and @(@(Get-PortasLpr) + @(Get-PortasLprTcp)).Count -eq 0) { return }
         $cabecalho = @'
 # Gerado pelo Preparador XMenu para a tarefa "Preparador XMenu - Corrigir LPR" (SYSTEM). O Preparador regrava este
 # arquivo ao criar ou corrigir uma LPR: mudanca feita a mao se perde.
@@ -17553,8 +17558,9 @@ function Log-Message {
         'Get-QueueInstanceIdImpressora', 'Get-SobrasFilaImpressora', 'Invoke-RemoverDispositivoPnp', 'Remove-SobrasFilaImpressora', 'Invoke-CorrecaoLprAuto'
         foreach ($nomeFn in $funcoes) { $texto += "`r`nfunction $nomeFn {" + (Get-Command $nomeFn -CommandType Function -ErrorAction Stop).Definition + "}`r`n" }
         $texto += "`r`n[void](Invoke-CorrecaoLprAuto)`r`n"
-        if (-not (Test-Path -LiteralPath $Pasta)) { New-Item -ItemType Directory -Path $Pasta -Force | Out-Null }
         $script = Join-Path $Pasta "CorrigirLpr.ps1"
+        if ($SeFaltar -and (Test-Path -LiteralPath $ArquivoTarefa) -and (Test-Path -LiteralPath $script) -and [System.IO.File]::ReadAllText($script) -ceq $texto) { return }
+        if (-not (Test-Path -LiteralPath $Pasta)) { New-Item -ItemType Directory -Path $Pasta -Force | Out-Null }
         # Com BOM: sem ele o PowerShell 5.1 le os acentos errado
         [System.IO.File]::WriteAllText($script, $texto, (New-Object System.Text.UTF8Encoding($true)))
         # O MAC que o Preparador ja guardou vale desde a primeira vez (o PC do LPD pode ja estar fora do ar); o que a tarefa
@@ -22706,7 +22712,7 @@ $formWidth = if ($screen.Width -lt 1000) { 900 } else { 1000 }
 $formHeight = if ($screen.Height -lt 800) { 700 } else { 800 }
 
 $form = New-Object System.Windows.Forms.Form
-$form.Text = "Preparador XMenu – Suporte Técnico v5.89 - REVENDA"
+$form.Text = "Preparador XMenu – Suporte Técnico v5.90 - REVENDA"
 $form.Size = New-Object System.Drawing.Size($formWidth, $formHeight)
 $form.StartPosition = "CenterScreen"
 $form.BackColor = [System.Drawing.Color]::FromArgb(25, 25, 30); $form.ForeColor = 'White'
@@ -23868,7 +23874,7 @@ $bRam.Add_Click({ Show-LiberarMemoria })
 [void]$tbl.Controls.Add($bRam)
 
 # Mensagem de abertura: explica o programa para quem abre pela primeira vez
-Log-Message "INFO" "Preparador XMenu v5.89 - REVENDA - preparo e suporte de computadores com o sistema XMenu"
+Log-Message "INFO" "Preparador XMenu v5.90 - REVENDA - preparo e suporte de computadores com o sistema XMenu"
 foreach ($msgSenha in $Script:LogSenhaPendente) { Log-Message "INFO" $msgSenha }
 Log-Message "INFO" "Senha de abertura: acesso liberado"
 Log-Message "LOG" "==============================================================="
@@ -23881,7 +23887,8 @@ Log-Message "LOG" "  SUPORTE E DIAGNÓSTICO ...... impressoras, rede, SQL, backu
 Log-Message "LOG" "  BUSCAR ..................... digite parte do nome do botão para achar mais rápido (Ctrl+F)"
 Log-Message "LOG" "  Passe o mouse sobre um botão para ver o que ele faz antes de clicar."
 Log-Message "LOG" "---------------------------------------------------------------"
-Log-Message "LOG" "NOVO NA v5.89"
+Log-Message "LOG" "NOVO NA v5.90"
+Log-Message "SUCESSO" "  LPR: cliente que já tinha LPR ganha a tarefa 'Preparador XMenu - Corrigir LPR' só de abrir o Preparador (e ela se atualiza sozinha quando sai versão nova); PC sem LPR não muda nada"
 Log-Message "SUCESSO" "  LPR: ao criar ou corrigir a impressora LPR, o Preparador instala a tarefa 'Preparador XMenu - Corrigir LPR', que a cada 5 minutos (e ao ligar o PC) passa a porta para o IP novo do PC da impressora sozinha, sem ninguém clicar em CORRIGIR AGORA"
 Log-Message "SUCESSO" "  Totem Chrome: o atalho chama o Chrome direto, com o IP no Destino (para trocar o servidor: Propriedades do atalho > Destino), vai para a pasta Inicializar (shell:startup) e deixa os ícones da Área de Trabalho grandes, para o toque"
 Log-Message "SUCESSO" "  Downloads do fundo e do ícone do atendimento: em segundo plano, com limite de tempo, sem travar a janela"
@@ -24055,6 +24062,8 @@ $form.Add_Shown({
         $tLprInicio.Interval = 2000
         $tLprInicio.Add_Tick({
                 $this.Stop(); $this.Dispose()
+                # Cliente que ja tinha LPR ganha a tarefa que corrige a porta sozinha (e a atualiza quando o Preparador muda)
+                Register-CorrecaoLpr -SeFaltar
                 if (@([System.Windows.Forms.Application]::OpenForms).Count -gt 1 -or $Script:IsDownloading) { return }
                 $form.Cursor = [System.Windows.Forms.Cursors]::WaitCursor
                 $corrInicio = @{}
