@@ -1,5 +1,5 @@
 ﻿# =============================================================================
-# PREPARADOR XMENU v5.88
+# PREPARADOR XMENU v5.89
 # Visual: Dashboard Moderno
 # Correcoes:
 #   - CRITICO: Removido DoEvents do loop de evento de download (causava crash).
@@ -17509,6 +17509,99 @@ function Find-CorrecoesLprPorMac {
     return $correcoes
 }
 
+function Invoke-CorrecaoLprAuto {
+    # O que a tarefa "Preparador XMenu - Corrigir LPR" faz a cada vez (como SYSTEM, sem janela): o CORRIGIR AGORA sem
+    # ninguem clicar. Guarda o MAC do PC de cada porta LPR que responde e, quando a porta com impressora para porque o PC
+    # do LPD mudou de IP, passa a porta para o IP novo (so se ele responder no LPD). Devolve as portas que ficaram com o IP novo.
+    $corrigidas = @()
+    try {
+        $portas = @(@(Get-PortasLpr) + @(Get-PortasLprTcp) | Where-Object { "$($_.Servidor)" -ne "" })
+        if ($portas.Count -eq 0) { return $corrigidas }
+        $noAr = @(Test-PortaVarios -Ips @($portas | ForEach-Object { $_.Servidor } | Select-Object -Unique) -Porta 515 -TimeoutMs 1500)
+        # O MAC e guardado enquanto a porta funciona: e por ele que o PC e achado quando o IP mudar
+        $macs = Get-LprMacs
+        $tabela = @(ConvertFrom-TabelaArp -Linhas (arp -a))
+        foreach ($p in @($portas | Where-Object { $noAr -contains $_.Servidor })) {
+            $macVisto = @($tabela | Where-Object { $_.IP -eq $p.Servidor } | ForEach-Object { $_.Mac })
+            if ($macVisto.Count -gt 0 -and $macVisto[0] -ne "$($macs[$p.Porta])") {
+                Save-LprMac -Porta $p.Porta -Mac $macVisto[0]
+                Log-Message "INFO" "LPR: MAC do PC da porta $($p.Porta) guardado ($($macVisto[0]))"
+            }
+        }
+        if (@($portas | Where-Object { $noAr -notcontains $_.Servidor }).Count -eq 0) { return $corrigidas }
+        $correcoes = Find-CorrecoesLprPorMac
+        foreach ($porta in @($correcoes.Keys)) {
+            $ipNovo = "$($correcoes[$porta])"
+            try {
+                $macPorta = "$((Get-LprMacs)[$porta])"
+                $res = Update-PortaLprCompleto -Porta $porta -Servidor $ipNovo
+                Save-LprMac -Porta $res.Porta -Mac $macPorta -PortaAntiga $porta
+                $corrigidas += $res.Porta
+                Log-Message "SUCESSO" "LPR: porta $porta corrigida sozinha: agora imprime em $ipNovo (porta $($res.Porta), impressora(s): $(@($res.Impressoras) -join ', ')). $($res.Aviso)".Trim()
+                $rep = Remove-SobrasFilaImpressora -Impressoras @($res.Impressoras)
+                foreach ($rm in $rep.Removidas) { Log-Message "SUCESSO" "LPR: a impressora $($rm.Impressora) aparecia repetida no Windows; registro que sobrou apagado ($($rm.Id))" }
+                foreach ($fl in $rep.Falhas) { Log-Message "ERRO" "LPR: não consegui apagar o registro repetido da impressora $($fl.Impressora) ($($fl.Id)): $($fl.Motivo)" }
+            }
+            catch { Log-Message "ERRO" "LPR: não consegui passar a porta $porta para $ipNovo - $($_.Exception.Message)" }
+        }
+    }
+    catch { Log-Message "ERRO" "LPR: falha na correção automática - $($_.Exception.Message)" }
+    return $corrigidas
+}
+
+function Register-CorrecaoLpr {
+    # Tarefa "Preparador XMenu - Corrigir LPR" no PC que imprime pela LPR (SYSTEM, ao ligar o PC e a cada 5 minutos): roda o
+    # Invoke-CorrecaoLprAuto, e a impressora volta sozinha quando o PC do LPD muda de IP. O script leva so as funcoes de LPR
+    # copiadas deste Preparador (regravado a cada registro) e fica em Arquivos de Programas, que usuario comum nao altera:
+    # quem editasse o script rodaria qualquer coisa como SYSTEM. Nao usa schtasks (com /mo ele recusa /tr com "start" solto).
+    param([string]$Pasta = (Join-Path $env:ProgramFiles "Preparador XMenu\CorrigirLpr"))
+    $arqMacs = Join-Path $Pasta "lpr_mac_portas.json"
+    $arqLog = Join-Path $Pasta "CorrigirLpr.log"
+    try {
+        $cabecalho = @'
+# Gerado pelo Preparador XMenu para a tarefa "Preparador XMenu - Corrigir LPR" (SYSTEM). O Preparador regrava este
+# arquivo ao criar ou corrigir uma LPR: mudanca feita a mao se perde.
+Add-Type -AssemblyName System.Windows.Forms
+function Get-CaminhoLprMacs { return '#MACS#' }
+function Log-Message {
+    param($Tag, $Msg)
+    $arqLog = '#LOG#'
+    try {
+        if ((Test-Path -LiteralPath $arqLog) -and (Get-Item -LiteralPath $arqLog).Length -gt 1MB) { Move-Item -LiteralPath $arqLog -Destination "$arqLog.old" -Force }
+        Add-Content -LiteralPath $arqLog -Value "[$((Get-Date).ToString('dd/MM/yyyy HH:mm:ss'))] [$Tag] $Msg" -Encoding UTF8
+    }
+    catch {}
+}
+'@
+        $texto = $cabecalho.Replace('#MACS#', $arqMacs.Replace("'", "''")).Replace('#LOG#', $arqLog.Replace("'", "''"))
+        $funcoes = 'Get-PortasLpr', 'Get-PortasLprTcp', 'Get-NomesPortasMonitor', 'Set-PortaLprServidor', 'Set-PortaLprTcpServidor',
+        'Remove-PortaLprRegistro', 'Start-LpdAposSpooler', 'Update-PortaLprCompleto', 'Get-LprMacs', 'Save-LprMac', 'ConvertFrom-TabelaArp',
+        'Find-IpPorMac', 'Test-PortaVarios', 'Get-SubredesLocais', 'Invoke-AcordarRede', 'Find-CorrecoesLprPorMac', 'Get-FilasPnpImpressoras',
+        'Get-QueueInstanceIdImpressora', 'Get-SobrasFilaImpressora', 'Invoke-RemoverDispositivoPnp', 'Remove-SobrasFilaImpressora', 'Invoke-CorrecaoLprAuto'
+        foreach ($nomeFn in $funcoes) { $texto += "`r`nfunction $nomeFn {" + (Get-Command $nomeFn -CommandType Function -ErrorAction Stop).Definition + "}`r`n" }
+        $texto += "`r`n[void](Invoke-CorrecaoLprAuto)`r`n"
+        if (-not (Test-Path -LiteralPath $Pasta)) { New-Item -ItemType Directory -Path $Pasta -Force | Out-Null }
+        $script = Join-Path $Pasta "CorrigirLpr.ps1"
+        # Com BOM: sem ele o PowerShell 5.1 le os acentos errado
+        [System.IO.File]::WriteAllText($script, $texto, (New-Object System.Text.UTF8Encoding($true)))
+        # O MAC que o Preparador ja guardou vale desde a primeira vez (o PC do LPD pode ja estar fora do ar); o que a tarefa
+        # aprendeu sozinha fica por cima
+        $macsJuntos = Get-LprMacs
+        foreach ($kv in @((Get-LprMacs -Arquivo $arqMacs).GetEnumerator())) { $macsJuntos[$kv.Key] = $kv.Value }
+        [System.IO.File]::WriteAllText($arqMacs, ($macsJuntos | ConvertTo-Json), (New-Object System.Text.UTF8Encoding($false)))
+
+        $acao = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$script`""
+        # 1 minuto depois de ligar: antes disso a rede (e o PC do LPD) ainda nao subiu
+        $aoLigar = New-ScheduledTaskTrigger -AtStartup
+        $aoLigar.Delay = 'PT1M'
+        $gatilhos = @($aoLigar, (New-ScheduledTaskTrigger -Once -At (Get-Date) -RepetitionInterval (New-TimeSpan -Minutes 5)))
+        $conf = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Minutes 4)
+        Register-ScheduledTask -TaskName 'Preparador XMenu - Corrigir LPR' -Action $acao -Trigger $gatilhos -Settings $conf -User 'SYSTEM' -RunLevel Highest -Force -ErrorAction Stop | Out-Null
+        Log-Message "SUCESSO" "LPR: tarefa 'Preparador XMenu - Corrigir LPR' pronta: ao ligar o PC e a cada 5 minutos ela confere as portas LPR e, se o PC da impressora mudar de IP, passa a porta para o IP novo sozinha. O que ela fizer fica em $arqLog"
+    }
+    catch { Log-Message "ERRO" "LPR: não consegui criar a tarefa que corrige a porta LPR sozinha - $($_.Exception.Message)" }
+}
+
 function Show-PortasLpr {
     # Janela do PC de destino: lista as portas LPR, testa se o PC da impressora
     # responde e corrige a porta quando o IP dele mudou.
@@ -17741,6 +17834,8 @@ function Show-PortasLpr {
                 if ("$macFica" -eq "") { $macFica = $SelPorta.Mac }
                 if ("$macFica" -ne "") { Save-LprMac -Porta $resTroca.Porta -Mac $macFica -PortaAntiga $SelPorta.Porta }
                 Log-Message "SUCESSO" "LPR: porta $($SelPorta.Porta) agora aponta para $NovoIp ($($resTroca.Porta))"
+                # Da proxima vez que o IP mudar, a tarefa corrige sem precisar abrir o Preparador
+                Register-CorrecaoLpr
                 $mensagemFim = "Porta corrigida: agora imprime em $NovoIp (porta $($resTroca.Porta))."
                 if ($resTroca.Aviso -ne "") { $mensagemFim = $mensagemFim + " " + $resTroca.Aviso }
                 # trocar a porta as vezes deixa a impressora repetida nas Configuracoes do Windows: apaga o que sobrou
@@ -18075,6 +18170,7 @@ function Show-PortasLpr {
                 $resUsar = Set-ImpressoraNaPortaLpr -Impressora $escolhaUsar.Impressora -Servidor $PcUsar.IP -Fila $escolhaUsar.Fila
                 if ("$($PcUsar.Mac)" -ne "") { Save-LprMac -Porta $resUsar.Porta -Mac $PcUsar.Mac }
                 Log-Message "SUCESSO" "LPR: a impressora $($escolhaUsar.Impressora) agora imprime na porta $($resUsar.Porta) (antes: $($resUsar.PortaAntiga))$(if ($resUsar.AntigaRemovida) { '; a porta de antes ficou sem uso e foi removida' })"
+                Register-CorrecaoLpr
             }
             catch {
                 Log-Message "ERRO" "LPR: falha ao colocar a impressora $($escolhaUsar.Impressora) na porta $($PcUsar.IP):$($escolhaUsar.Fila) - $($_.Exception.Message)"
@@ -18477,6 +18573,7 @@ function Show-PortasLpr {
                     }
                     if ($criada.DriverInstalado) { Log-Message "INFO" "LPR: driver $($nova.Driver) instalado do repositório do Windows" }
                     Log-Message "SUCESSO" "LPR: impressora $($nova.Nome) criada na porta $($criada.Porta) com o driver $($nova.Driver)"
+                    Register-CorrecaoLpr
                 }
                 catch {
                     $msgErro = $_.Exception.Message
@@ -22713,7 +22810,7 @@ $formWidth = if ($screen.Width -lt 1200) { $screen.Width - 50 } else { 1200 }
 $formHeight = if ($screen.Height -lt 900) { $screen.Height - 50 } else { 900 }
 
 $form = New-Object System.Windows.Forms.Form
-$form.Text = "Preparador XMenu – Suporte Técnico v5.88"
+$form.Text = "Preparador XMenu – Suporte Técnico v5.89"
 $form.Size = New-Object System.Drawing.Size($formWidth, $formHeight)
 $form.StartPosition = "CenterScreen"
 $form.BackColor = [System.Drawing.Color]::FromArgb(25, 25, 30); $form.ForeColor = 'White'
@@ -23878,7 +23975,7 @@ $bRam.Add_Click({ Show-LiberarMemoria })
 [void]$tbl.Controls.Add($bRam)
 
 # Mensagem de abertura: explica o programa para quem abre pela primeira vez
-Log-Message "INFO" "Preparador XMenu v5.88 - preparo e suporte de computadores com o sistema XMenu"
+Log-Message "INFO" "Preparador XMenu v5.89 - preparo e suporte de computadores com o sistema XMenu"
 foreach ($msgSenha in $Script:LogSenhaPendente) { Log-Message "INFO" $msgSenha }
 Log-Message "INFO" "Senha de abertura: acesso liberado"
 Log-Message "LOG" "==============================================================="
@@ -23891,7 +23988,8 @@ Log-Message "LOG" "  SUPORTE E DIAGNÓSTICO ...... impressoras, rede, SQL, backu
 Log-Message "LOG" "  BUSCAR ..................... digite parte do nome do botão para achar mais rápido (Ctrl+F)"
 Log-Message "LOG" "  Passe o mouse sobre um botão para ver o que ele faz antes de clicar."
 Log-Message "LOG" "---------------------------------------------------------------"
-Log-Message "LOG" "NOVO NA v5.88"
+Log-Message "LOG" "NOVO NA v5.89"
+Log-Message "SUCESSO" "  LPR: ao criar ou corrigir a impressora LPR, o Preparador instala a tarefa 'Preparador XMenu - Corrigir LPR', que a cada 5 minutos (e ao ligar o PC) passa a porta para o IP novo do PC da impressora sozinha, sem ninguém clicar em CORRIGIR AGORA"
 Log-Message "SUCESSO" "  Totem Chrome: o atalho chama o Chrome direto, com o IP no Destino (para trocar o servidor: Propriedades do atalho > Destino), vai para a pasta Inicializar (shell:startup) e deixa os ícones da Área de Trabalho grandes, para o toque"
 Log-Message "SUCESSO" "  Preparar ambiente: novo atalho Atendimento XMenu na Área de Trabalho, com o ícone do chat; abre o atendimento como aplicativo no Chrome (ou no Edge) e tira o atalho antigo Suporte Xmenu"
 Log-Message "SUCESSO" "  Downloads do fundo e do ícone do atendimento: em segundo plano, com limite de tempo, sem travar a janela"
