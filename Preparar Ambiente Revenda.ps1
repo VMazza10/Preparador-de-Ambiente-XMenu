@@ -1,6 +1,6 @@
 ﻿# =============================================================================
 # PREPARADOR XMENU - VERSAO REVENDA
-# Baseado na v5.87
+# Baseado na v5.88
 # Alteracoes Revenda:
 #   - Wallpaper: um dos 3 fundos de revenda (Fundos/revenda-1..3.jpg), sorteado a cada preparo
 #   - Removido: Atalhos de Suporte e Pasta Netcontroll
@@ -20945,9 +20945,9 @@ function Install-PdvEdgeShortcut {
 
 # -----------------------------------------------------------------------------
 # TOTEM NO CHROME (TELA CHEIA)
-# O totem web (http://servidor/TOTEM/) roda no Chrome em modo quiosque. O atalho chama o AbrirTotem.cmd, que espera o
-# servidor responder antes de abrir o Chrome: o totem que liga antes do servidor (queda de energia) ficaria na tela de
-# erro, e o Chrome so tenta de novo depois de 1, 5 e 10 minutos.
+# O totem web (http://servidor/TOTEM/) roda no Chrome em modo quiosque. O atalho chama o chrome.exe direto, com o
+# endereco no Destino: quando o IP do servidor muda, o tecnico troca nas Propriedades do atalho. (Ate a v5.87 o atalho
+# chamava um AbrirTotem.cmd que esperava o servidor responder, mas trocar o IP dentro dele dava trabalho.)
 # -----------------------------------------------------------------------------
 function Get-ChromeExecutable {
     # Chrome instalado para todos (Program Files), so para o usuario (AppData) ou onde o Windows registrou
@@ -20958,42 +20958,20 @@ function Get-ChromeExecutable {
 }
 
 function New-TotemChromeAtalho {
-    # Grava o AbrirTotem.cmd e o atalho "Totem XMenu" na Area de Trabalho de todos e, com -Inicializar, na pasta
-    # Inicializar do usuario logado (sem -Inicializar, tira de la o atalho que o Preparador tinha posto).
-    # Os caminhos so mudam no teste.
+    # Cria o atalho "Totem XMenu" na Area de Trabalho de todos e, com -Inicializar, na pasta Inicializar (shell:startup)
+    # do usuario logado; sem -Inicializar, tira de la o atalho que o Preparador tinha posto. O atalho chama o chrome.exe
+    # direto, com o endereco no Destino. Os caminhos so mudam no teste.
     param([string]$Endereco, [string]$Chrome, [switch]$Inicializar,
         [string]$PastaLancador = "C:\Netcontroll\TotemChrome", [string]$AreaTrabalho = "", [string]$PastaInicializar = "")
-    # Aspas e % quebrariam o .cmd
+    # Aspas quebrariam o Destino do atalho
     if ($Endereco -notmatch '^https?://[^\s"%/]+(/[^\s"%]*)?$') { throw "endereço inválido: $Endereco" }
     if ($AreaTrabalho -eq "") { $AreaTrabalho = [Environment]::GetFolderPath('CommonDesktopDirectory') }
     if ($PastaInicializar -eq "") { $PastaInicializar = Get-PastaInicializarUsuario }
     # Opcoes conferidas no codigo do Chromium (11/2026): --hide-crash-restore-bubble tira o "Restaurar paginas?" depois
     # de queda de energia, --disable-pinch tira o zoom de pinca e OverscrollHistoryNavigation desligado tira o voltar
     # pagina arrastando o dedo. O --disable-session-crashed-bubble e o --overscroll-history-navigation=0 sairam do Chrome.
-    $opcoes = '--profile-directory="Default" --kiosk --app="%URL%" --no-first-run --no-default-browser-check --hide-crash-restore-bubble --disable-pinch --disable-features=OverscrollHistoryNavigation'
-    $conteudo = (@(
-            '@echo off',
-            'rem Criado pelo Preparador XMenu: abre o totem no Chrome em tela cheia (para sair: Alt+F4).',
-            'rem Espera o servidor responder (ate uns 5 minutos) para o totem nao abrir na tela de erro.',
-            "set `"URL=$Endereco`"",
-            'if not exist "%SystemRoot%\System32\curl.exe" goto abrir',
-            'set /a tentativas=0',
-            ':esperar',
-            '"%SystemRoot%\System32\curl.exe" -s -f -o nul -m 3 "%URL%" && goto abrir',
-            'set /a tentativas+=1',
-            'if %tentativas% geq 40 goto abrir',
-            'ping -n 6 127.0.0.1 >nul',
-            'goto esperar',
-            ':abrir',
-            "start `"`" `"$Chrome`" $opcoes"
-        ) -join "`r`n") + "`r`n"
-    New-Item -ItemType Directory -Path $PastaLancador -Force | Out-Null
-    $cmd = Join-Path $PastaLancador "AbrirTotem.cmd"
-    # Sem BOM (o cmd leria o BOM como lixo); caminho com acento vai na pagina de codigo do prompt
-    $codCmd = [System.Text.Encoding]::ASCII
-    if ($conteudo -match '[^\x00-\x7F]') { $codCmd = [System.Text.Encoding]::GetEncoding([System.Globalization.CultureInfo]::CurrentCulture.TextInfo.OEMCodePage) }
-    [System.IO.File]::WriteAllText($cmd, $conteudo, $codCmd)
-    if ([System.IO.File]::ReadAllText($cmd, $codCmd) -ne $conteudo) { throw "o $cmd gravado não ficou igual" }
+    # So o essencial: as Propriedades do atalho so deixam editar o Destino (caminho + opcoes) ate 259 caracteres.
+    $opcoes = "--profile-directory=`"Default`" --kiosk --app=`"$Endereco`" --no-first-run --hide-crash-restore-bubble --disable-pinch --disable-features=OverscrollHistoryNavigation"
 
     $shell = New-Object -ComObject WScript.Shell
     $atalhos = @()
@@ -21002,15 +20980,33 @@ function New-TotemChromeAtalho {
         if (-not (Test-Path -LiteralPath $pasta)) { New-Item -ItemType Directory -Path $pasta -Force | Out-Null }
         $lnkPath = Join-Path $pasta "Totem XMenu.lnk"
         $lnk = $shell.CreateShortcut($lnkPath)
-        $lnk.TargetPath = $cmd
-        $lnk.WorkingDirectory = $PastaLancador
-        $lnk.WindowStyle = 7   # a janela preta da espera fica minimizada
+        $lnk.TargetPath = $Chrome
+        $lnk.Arguments = $opcoes
+        $lnk.WorkingDirectory = Split-Path -Parent $Chrome
+        $lnk.WindowStyle = 1
         $lnk.IconLocation = "$Chrome,0"
         $lnk.Save()
         $atalhos += $lnkPath
     }
     if (-not $Inicializar -and (Test-Path -LiteralPath $noInicializar)) { Remove-Item -LiteralPath $noInicializar -Force }
-    return [pscustomobject]@{ Lancador = $cmd; Atalhos = $atalhos }
+    # O AbrirTotem.cmd das versoes anteriores nao e mais usado (os atalhos acima substituem os que chamavam ele)
+    $cmdAntigo = Join-Path $PastaLancador "AbrirTotem.cmd"
+    if (Test-Path -LiteralPath $cmdAntigo) { Remove-Item -LiteralPath $cmdAntigo -Force -ErrorAction SilentlyContinue }
+    return [pscustomobject]@{ Destino = "`"$Chrome`" $opcoes"; Atalhos = $atalhos }
+}
+
+function Set-IconesGrandesAreaTrabalho {
+    # Icones grandes na Area de Trabalho (Exibir > Icones grandes), para o toque no totem. O Explorer so le o tamanho
+    # ao abrir e grava o dele ao fechar normalmente: grava o valor e fecha o Explorer a forca (assim ele nao sobrescreve),
+    # e ele abre de novo ja com os icones grandes. Vale para o usuario que esta rodando o Preparador.
+    # -Chave e -SemReiniciar so mudam no teste.
+    param([int]$Tamanho = 96, [string]$Chave = "HKCU:\Software\Microsoft\Windows\Shell\Bags\1\Desktop", [switch]$SemReiniciar)
+    if (-not (Test-Path $Chave)) { New-Item -Path $Chave -Force | Out-Null }
+    Set-ItemProperty -Path $Chave -Name "IconSize" -Value $Tamanho -Type DWord -Force -ErrorAction Stop
+    if ($SemReiniciar) { return }
+    Stop-Process -Name explorer -Force -ErrorAction SilentlyContinue
+    Wait-UI 2
+    if (-not (Get-Process explorer -ErrorAction SilentlyContinue)) { Start-Process explorer.exe }
 }
 
 function Show-TotemChrome {
@@ -21023,11 +21019,19 @@ function Show-TotemChrome {
         [System.Windows.Forms.MessageBox]::Show("O Google Chrome não está instalado neste PC.`r`n`r`nInstale pelo botão Google Chrome (EXTERNOS) e clique de novo.", $titulo, "OK", "Warning") | Out-Null
         return
     }
-    # Reconfigurando: volta o endereco que ja estava; senao, a faixa de IP deste PC (o tecnico so completa o final)
+    # Reconfigurando: volta o endereco que ja estava (no atalho; nas versoes antigas, no AbrirTotem.cmd); senao, a faixa
+    # de IP deste PC (o tecnico so completa o final)
     $inicial = ""
     try {
-        $existente = [System.IO.File]::ReadAllText("C:\Netcontroll\TotemChrome\AbrirTotem.cmd")
-        if ($existente -match 'set "URL=([^"\r\n]+)"') { $inicial = $Matches[1] }
+        $lnkAtual = Join-Path ([Environment]::GetFolderPath('CommonDesktopDirectory')) "Totem XMenu.lnk"
+        if (Test-Path -LiteralPath $lnkAtual) {
+            $argsAtual = (New-Object -ComObject WScript.Shell).CreateShortcut($lnkAtual).Arguments
+            if ($argsAtual -match '--app="([^"]+)"') { $inicial = $Matches[1] }
+        }
+        if ($inicial -eq "") {
+            $existente = [System.IO.File]::ReadAllText("C:\Netcontroll\TotemChrome\AbrirTotem.cmd")
+            if ($existente -match 'set "URL=([^"\r\n]+)"') { $inicial = $Matches[1] }
+        }
     }
     catch {}
     if ($inicial -eq "") {
@@ -21067,7 +21071,7 @@ function Show-TotemChrome {
     $txtIpTc.Add_TextChanged({ $lblUrlTc.Text = "Endereço: $(& $montarUrl)" })
     $lblUrlTc.Text = "Endereço: $(& $montarUrl)"
     $chkIniTc = New-Object System.Windows.Forms.CheckBox
-    $chkIniTc.Text = "Abrir sozinho quando o Windows iniciar (espera o servidor responder)"
+    $chkIniTc.Text = "Abrir sozinho quando o Windows iniciar (pasta Inicializar)"
     $chkIniTc.Location = New-Object System.Drawing.Point(20, 170)
     $chkIniTc.Size = New-Object System.Drawing.Size(450, 24)
     $chkIniTc.ForeColor = $Script:UiTexto
@@ -21145,12 +21149,22 @@ function Show-TotemChrome {
             }
         }
         $info = New-TotemChromeAtalho -Endereco $dadosTc.Url -Chrome $chrome -Inicializar:$dadosTc.Inicializar
-        Log-Message "SUCESSO" "Totem Chrome: atalho criado para $($dadosTc.Url -replace '^(?i)https?://', '') em $($info.Atalhos -join '; ') (abre $($info.Lancador))"
+        Log-Message "SUCESSO" "Totem Chrome: atalho criado para $($dadosTc.Url -replace '^(?i)https?://', '') em $($info.Atalhos -join '; ') (chama o Chrome direto; o IP fica no Destino do atalho)"
+        if ($info.Destino.Length -gt 259) { Log-Message "INFO" "Totem Chrome: o Destino do atalho ficou com $($info.Destino.Length) caracteres; as Propriedades do Windows só deixam editar até 259" }
         # Fundo do totem: imagem em pe, para a tela vertical (falhar aqui nao desfaz o atalho)
         $fundoTotem = Set-PapelDeParede -Url "$Script:RepoBase/Fundos/totem.png" -Arquivo "fundo-totem.png"
+        # Icones grandes para o toque (reinicia o Explorer)
+        $iconesTotem = $false
+        try {
+            Set-IconesGrandesAreaTrabalho
+            $iconesTotem = $true
+            Log-Message "SUCESSO" "Totem Chrome: ícones da Área de Trabalho em tamanho grande (Explorer reiniciado)"
+        }
+        catch { Log-Message "ERRO" "Totem Chrome: não consegui aumentar os ícones da Área de Trabalho - $($_.Exception.Message)" }
         if ($null -ne $Button) { Set-ButtonDone -Button $Button -Label "ATALHO CRIADO" }
         $txtFundoTotem = $(if ($fundoTotem) { "`r`nFundo do totem aplicado." } else { "`r`nNão consegui colocar o fundo do totem (veja o Log)." })
-        [System.Windows.Forms.MessageBox]::Show("Pronto: o atalho Totem XMenu está na Área de Trabalho$(if ($dadosTc.Inicializar) { ' e abre sozinho quando o Windows inicia' }).`r`n`r`nEndereço: $($dadosTc.Url)`r`nPara sair do totem: Alt+F4.$txtFundoTotem", $titulo, "OK", "Information") | Out-Null
+        $txtIconesTotem = $(if ($iconesTotem) { "`r`nÍcones da Área de Trabalho em tamanho grande." } else { "`r`nNão consegui aumentar os ícones (veja o Log)." })
+        [System.Windows.Forms.MessageBox]::Show("Pronto: o atalho Totem XMenu está na Área de Trabalho$(if ($dadosTc.Inicializar) { ' e abre sozinho quando o Windows inicia (pasta Inicializar)' }).`r`n`r`nEndereço: $($dadosTc.Url)`r`nPara trocar o IP depois: botão direito no atalho > Propriedades > Destino.`r`nPara sair do totem: Alt+F4.`r`n$txtFundoTotem$txtIconesTotem", $titulo, "OK", "Information") | Out-Null
     }
     catch {
         Log-Message "ERRO" "Totem Chrome: não consegui criar o atalho - $($_.Exception.Message)"
@@ -22595,7 +22609,7 @@ $formWidth = if ($screen.Width -lt 1000) { 900 } else { 1000 }
 $formHeight = if ($screen.Height -lt 800) { 700 } else { 800 }
 
 $form = New-Object System.Windows.Forms.Form
-$form.Text = "Preparador XMenu – Suporte Técnico v5.87 - REVENDA"
+$form.Text = "Preparador XMenu – Suporte Técnico v5.88 - REVENDA"
 $form.Size = New-Object System.Drawing.Size($formWidth, $formHeight)
 $form.StartPosition = "CenterScreen"
 $form.BackColor = [System.Drawing.Color]::FromArgb(25, 25, 30); $form.ForeColor = 'White'
@@ -23508,7 +23522,7 @@ Add-Btn "TeamViewer com senha" "" "https://www.netcontroll.com.br/util/TeamViewe
 Add-Btn "AnyDesk" "" "https://download.anydesk.com/AnyDesk.exe" "AnyDesk.exe" -Help "Ferramenta de acesso remoto AnyDesk."
 Add-Btn "Google Chrome" "" "https://github.com/VMazza10/Preparador-de-Ambiente-XMenu/releases/download/Chrome/ChromeSetup.exe" "ChromeSetup.exe" -Help "Instalador online do navegador Google Chrome."
 Add-Btn "PDV EDGE (Criar Atalho)" "" "PDV-EDGE-SHORTCUT" "" -Color $colorBlue -Help "Cria na Área de Trabalho o atalho do NetPDV para abrir pelo Microsoft Edge em modo aplicativo/tela cheia."
-Add-Btn "Totem Chrome (Criar Atalho)" "" "TOTEM-CHROME" "" -Color $colorBlue -Help "Cria o atalho Totem XMenu: abre o totem (http://IP-do-servidor/TOTEM/) no Chrome em tela cheia, sem o aviso de restaurar páginas e sem zoom ou voltar página pelo toque. Pode abrir sozinho quando o Windows inicia e espera o servidor responder antes de abrir. Confere se o totem responde antes de criar e coloca o fundo do totem (imagem em pé, para a tela vertical)."
+Add-Btn "Totem Chrome (Criar Atalho)" "" "TOTEM-CHROME" "" -Color $colorBlue -Help "Cria o atalho Totem XMenu: abre o totem (http://IP-do-servidor/TOTEM/) no Chrome em tela cheia, sem o aviso de restaurar páginas e sem zoom ou voltar página pelo toque. Pode abrir sozinho quando o Windows inicia (pasta Inicializar). O IP fica no próprio atalho: para trocar, Propriedades > Destino. Confere se o totem responde antes de criar, coloca o fundo do totem (imagem em pé, para a tela vertical) e deixa os ícones da Área de Trabalho grandes, para o toque."
 Add-Btn "Revo Uninstaller" "" "https://download.revouninstaller.com/download/revosetup.exe" "revosetup.exe" -Help "Utilitário para desinstalação completa de programas e limpeza de restos."
 Add-Btn "TEF HUB Windows (x86 - sempre a versão atual)" "" "TEFHUB-X86" "" -Help "Consulta o GitHub oficial da Elgin no momento do clique e baixa a versão x86 mais recente do TEF HUB. Não precisa mais trocar o link na mão."
 Add-Btn "Advanced IP Scanner" "" "https://download.advanced-ip-scanner.com/download/files/Advanced_IP_Scanner_2.5.4594.1.exe" "Advanced_IP_Scanner.exe" -Help "Ferramenta de varredura de rede local Advanced IP Scanner."
@@ -23757,7 +23771,7 @@ $bRam.Add_Click({ Show-LiberarMemoria })
 [void]$tbl.Controls.Add($bRam)
 
 # Mensagem de abertura: explica o programa para quem abre pela primeira vez
-Log-Message "INFO" "Preparador XMenu v5.87 - REVENDA - preparo e suporte de computadores com o sistema XMenu"
+Log-Message "INFO" "Preparador XMenu v5.88 - REVENDA - preparo e suporte de computadores com o sistema XMenu"
 foreach ($msgSenha in $Script:LogSenhaPendente) { Log-Message "INFO" $msgSenha }
 Log-Message "INFO" "Senha de abertura: acesso liberado"
 Log-Message "LOG" "==============================================================="
@@ -23770,7 +23784,8 @@ Log-Message "LOG" "  SUPORTE E DIAGNÓSTICO ...... impressoras, rede, SQL, backu
 Log-Message "LOG" "  BUSCAR ..................... digite parte do nome do botão para achar mais rápido (Ctrl+F)"
 Log-Message "LOG" "  Passe o mouse sobre um botão para ver o que ele faz antes de clicar."
 Log-Message "LOG" "---------------------------------------------------------------"
-Log-Message "LOG" "NOVO NA v5.87"
+Log-Message "LOG" "NOVO NA v5.88"
+Log-Message "SUCESSO" "  Totem Chrome: o atalho chama o Chrome direto, com o IP no Destino (para trocar o servidor: Propriedades do atalho > Destino), vai para a pasta Inicializar (shell:startup) e deixa os ícones da Área de Trabalho grandes, para o toque"
 Log-Message "SUCESSO" "  Downloads do fundo e do ícone do atendimento: em segundo plano, com limite de tempo, sem travar a janela"
 Log-Message "SUCESSO" "  Log: não mostra mais links (fundo, links copiados, Links úteis e página do fabricante aparecem pelo nome; o totem pelo IP, sem http://) e nenhum endereço vira link clicável"
 Log-Message "SUCESSO" "  Fundos: três papéis de parede novos de revenda, e cada preparo sorteia um (o Log diz qual saiu); o fundo é baixado em segundo plano (a janela não trava) e, se o download falhar, o fundo atual fica"
