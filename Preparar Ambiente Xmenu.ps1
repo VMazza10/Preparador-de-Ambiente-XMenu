@@ -1,5 +1,5 @@
 ﻿# =============================================================================
-# PREPARADOR XMENU v5.90
+# PREPARADOR XMENU v5.91
 # Visual: Dashboard Moderno
 # Correcoes:
 #   - CRITICO: Removido DoEvents do loop de evento de download (causava crash).
@@ -22816,7 +22816,7 @@ $formWidth = if ($screen.Width -lt 1200) { $screen.Width - 50 } else { 1200 }
 $formHeight = if ($screen.Height -lt 900) { $screen.Height - 50 } else { 900 }
 
 $form = New-Object System.Windows.Forms.Form
-$form.Text = "Preparador XMenu – Suporte Técnico v5.90"
+$form.Text = "Preparador XMenu – Suporte Técnico v5.91"
 $form.Size = New-Object System.Drawing.Size($formWidth, $formHeight)
 $form.StartPosition = "CenterScreen"
 $form.BackColor = [System.Drawing.Color]::FromArgb(25, 25, 30); $form.ForeColor = 'White'
@@ -23626,7 +23626,8 @@ function Open-VideosTutoriais {
         @{ Name = "Arquivos fiscais - passo a passo"; Url = "$base/arquivos-fiscais-passo-a-passo.mp4"; File = "Arquivos fiscais passo a passo.mp4" },
         @{ Name = "Como integrar produtos no iFood"; Url = "$base/como-integrar-produtos-ifood.mp4"; File = "Como integrar produtos no iFood - XMenu.mp4" },
         @{ Name = "Como usar a API do XMenu"; Url = "$base/como-usar-api-xmenu.mp4"; File = "Como usar a API do XMenu.mp4" },
-        @{ Name = "Como alterar o IP em terminais"; Url = "$base/como-alterar-ip-em-terminais.mp4"; File = "Como alterar o IP em terminais.mp4" }
+        @{ Name = "Como alterar o IP em terminais"; Url = "$base/como-alterar-ip-em-terminais.mp4"; File = "Como alterar o IP em terminais.mp4" },
+        @{ Name = "Cadastro de produto por cópia"; Url = "$base/cadastro-de-produto-por-copia.mp4"; File = "Cadastro de produto por cópia - XMenu.mp4" }
     )
 
     $fVid = New-Object System.Windows.Forms.Form
@@ -23981,7 +23982,7 @@ $bRam.Add_Click({ Show-LiberarMemoria })
 [void]$tbl.Controls.Add($bRam)
 
 # Mensagem de abertura: explica o programa para quem abre pela primeira vez
-Log-Message "INFO" "Preparador XMenu v5.90 - preparo e suporte de computadores com o sistema XMenu"
+Log-Message "INFO" "Preparador XMenu v5.91 - preparo e suporte de computadores com o sistema XMenu"
 foreach ($msgSenha in $Script:LogSenhaPendente) { Log-Message "INFO" $msgSenha }
 Log-Message "INFO" "Senha de abertura: acesso liberado"
 Log-Message "LOG" "==============================================================="
@@ -23994,7 +23995,8 @@ Log-Message "LOG" "  SUPORTE E DIAGNÓSTICO ...... impressoras, rede, SQL, backu
 Log-Message "LOG" "  BUSCAR ..................... digite parte do nome do botão para achar mais rápido (Ctrl+F)"
 Log-Message "LOG" "  Passe o mouse sobre um botão para ver o que ele faz antes de clicar."
 Log-Message "LOG" "---------------------------------------------------------------"
-Log-Message "LOG" "NOVO NA v5.90"
+Log-Message "LOG" "NOVO NA v5.91"
+Log-Message "SUCESSO" "  Vídeos tutoriais: novo vídeo Cadastro de produto por cópia"
 Log-Message "SUCESSO" "  LPR: cliente que já tinha LPR ganha a tarefa 'Preparador XMenu - Corrigir LPR' só de abrir o Preparador (e ela se atualiza sozinha quando sai versão nova); PC sem LPR não muda nada"
 Log-Message "SUCESSO" "  LPR: ao criar ou corrigir a impressora LPR, o Preparador instala a tarefa 'Preparador XMenu - Corrigir LPR', que a cada 5 minutos (e ao ligar o PC) passa a porta para o IP novo do PC da impressora sozinha, sem ninguém clicar em CORRIGIR AGORA"
 Log-Message "SUCESSO" "  Totem Chrome: o atalho chama o Chrome direto, com o IP no Destino (para trocar o servidor: Propriedades do atalho > Destino), vai para a pasta Inicializar (shell:startup) e deixa os ícones da Área de Trabalho grandes, para o toque"
