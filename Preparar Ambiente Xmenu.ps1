@@ -1,5 +1,5 @@
 ﻿# =============================================================================
-# PREPARADOR XMENU v5.91
+# PREPARADOR XMENU v5.92
 # Visual: Dashboard Moderno
 # Correcoes:
 #   - CRITICO: Removido DoEvents do loop de evento de download (causava crash).
@@ -16533,7 +16533,8 @@ function Update-PortaLprCompleto {
     # antiga removida. Tambem corrige o nome da porta que ja aponta para o IP certo mas ficou com o IP velho no nome.
     # Se ja existir uma porta com o nome novo no OUTRO tipo, ou se o Windows nao deixar mover alguma impressora, so troca
     # o IP da porta antiga, que imprime do mesmo jeito com o nome velho.
-    # Devolve hashtable: Porta / Impressoras / Aviso. Os -Hive/-Caminho trocam as chaves do registro (testes).
+    # Devolve a porta corrigida, as impressoras, a fila, o servidor anterior e um aviso quando houver.
+    # Os -Hive/-Caminho trocam as chaves do registro (testes).
     param([string]$Porta, [string]$Servidor,
         [string]$HiveTcp = 'LocalMachine', [string]$CaminhoTcp = 'SYSTEM\CurrentControlSet\Control\Print\Monitors\Standard TCP/IP Port\Ports',
         [string]$HiveLpr = 'LocalMachine', [string]$CaminhoLpr = 'SYSTEM\CurrentControlSet\Control\Print\Monitors\LPR Port\Ports')
@@ -16543,6 +16544,7 @@ function Update-PortaLprCompleto {
     $ehTcp = ($portaTcp.Count -gt 0)
     if ($ehTcp) {
         $filaAtual = "$($portaTcp[0].Fila)"
+        $servidorAnterior = "$($portaTcp[0].Servidor)"
         $nomesMesmoTipo = @(Get-NomesPortasMonitor -Hive $HiveTcp -Caminho $CaminhoTcp)
         $nomesOutroTipo = @(Get-NomesPortasMonitor -Hive $HiveLpr -Caminho $CaminhoLpr)
     }
@@ -16550,6 +16552,7 @@ function Update-PortaLprCompleto {
         $portaLpr = @(Get-PortasLpr -Hive $HiveLpr -Caminho $CaminhoLpr | Where-Object { $_.Porta -eq $Porta })
         if ($portaLpr.Count -eq 0) { throw "A porta $Porta não existe mais neste PC." }
         $filaAtual = "$($portaLpr[0].Fila)"
+        $servidorAnterior = "$($portaLpr[0].Servidor)"
         $nomesMesmoTipo = @(Get-NomesPortasMonitor -Hive $HiveLpr -Caminho $CaminhoLpr)
         $nomesOutroTipo = @(Get-NomesPortasMonitor -Hive $HiveTcp -Caminho $CaminhoTcp)
     }
@@ -16565,20 +16568,22 @@ function Update-PortaLprCompleto {
         else { Remove-PortaLprRegistro -Porta $NomeApagar -Hive $HiveLpr -Caminho $CaminhoLpr }
     }
 
+    $res = @{ Porta = $Porta; Impressoras = $impressoras; Fila = $filaAtual; ServidorAnterior = $servidorAnterior; Aviso = "" }
     $novoNome = $Servidor + ":" + $filaAtual
     if ($novoNome -ne $Porta -and $nomesOutroTipo -contains $novoNome) {
         # o spooler nao aceita duas portas com o mesmo nome
         [void](& $trocaLpr -SoOIp)
         Restart-Service -Name Spooler -Force -ErrorAction Stop
         Start-LpdAposSpooler
-        return @{ Porta = $Porta; Impressoras = $impressoras; Aviso = "Já existe outra porta chamada ${novoNome}: esta manteve o nome $Porta, mas já aponta para $Servidor." }
+        $res.Aviso = "Já existe outra porta chamada ${novoNome}: esta manteve o nome $Porta, mas já aponta para $Servidor."
+        return $res
     }
     # a porta com o nome novo pode ter sobrado de uma troca antiga: e reaproveitada e nunca apagada no desfazer
     $jaExistia = ($novoNome -ne $Porta -and $nomesMesmoTipo -contains $novoNome)
     $nova = & $trocaLpr
     Restart-Service -Name Spooler -Force -ErrorAction Stop
     Start-LpdAposSpooler
-    $res = @{ Porta = $nova; Impressoras = $impressoras; Aviso = "" }
+    $res.Porta = $nova
     if ($nova -eq $Porta) { return $res }
 
     $movidas = @()
@@ -17471,52 +17476,106 @@ function Find-CorrecoesLprPorMac {
     # Conferencia ao abrir Impressoras: porta LPR com impressora que parou de responder e tem o MAC do PC guardado.
     # Procura o PC pelo MAC e devolve Porta -> IP novo so das que respondem no LPD no IP novo (o que a janela LPR
     # oferece corrigir). So consulta: nao mexe em porta nem impressora. Sem LPR parada, nem procura na rede.
+    param([object[]]$PortasParadas, [hashtable]$Macs, [switch]$Silencioso)
     $correcoes = @{}
     $portaLpd = 515
     if ($Script:LprPorta) { $portaLpd = [int]$Script:LprPorta }
     try {
-        # Do mais barato para o mais caro (roda na abertura do Preparador): registro, arquivo dos MACs, teste do LPD
-        # (quem responde volta na hora) e so no fim a lista de impressoras do Windows, que e a parte lenta
-        $portas = @(@(Get-PortasLpr) + @(Get-PortasLprTcp))
-        if ($portas.Count -eq 0) { return $correcoes }
-        $macs = Get-LprMacs
-        $comMac = @($portas | Where-Object { "$($_.Servidor)" -ne "" -and $macs.ContainsKey($_.Porta) })
-        if ($comMac.Count -eq 0) { return $correcoes }
-        $noAr = @(Test-PortaVarios -Ips @($comMac | ForEach-Object { $_.Servidor } | Select-Object -Unique) -Porta $portaLpd -TimeoutMs 1200)
-        $semResposta = @($comMac | Where-Object { $noAr -notcontains $_.Servidor })
-        if ($semResposta.Count -eq 0) { return $correcoes }
-        # Porta sem impressora nao imprime nada: nao conta como parada
-        $impressorasPc = @()
-        try { $impressorasPc = @(Get-Printer -ErrorAction Stop) } catch {}
-        $paradas = @($semResposta | Where-Object { $pt = $_.Porta; @($impressorasPc | Where-Object { $_.PortName -eq $pt }).Count -gt 0 })
+        if ($null -eq $PortasParadas) {
+            # Na abertura do Preparador, consulta o registro e testa o LPD antes de carregar as impressoras.
+            $portas = @(@(Get-PortasLpr) + @(Get-PortasLprTcp))
+            if ($portas.Count -eq 0) { return $correcoes }
+            $Macs = Get-LprMacs
+            $comMac = @($portas | Where-Object { "$($_.Servidor)" -ne "" -and $Macs.ContainsKey($_.Porta) })
+            if ($comMac.Count -eq 0) { return $correcoes }
+            $noAr = @(Test-PortaVarios -Ips @($comMac | ForEach-Object { $_.Servidor } | Select-Object -Unique) -Porta $portaLpd -TimeoutMs 1200)
+            $semResposta = @($comMac | Where-Object { $noAr -notcontains $_.Servidor })
+            if ($semResposta.Count -eq 0) { return $correcoes }
+            $emUso = @()
+            try { $emUso = @(Get-Printer -ErrorAction Stop | ForEach-Object { $_.PortName }) } catch {}
+            $PortasParadas = @($semResposta | Where-Object { $emUso -contains $_.Porta })
+        }
+        if ($null -eq $Macs) { $Macs = Get-LprMacs }
+        $paradas = @($PortasParadas | Where-Object { $Macs.ContainsKey($_.Porta) })
         if ($paradas.Count -eq 0) { return $correcoes }
-        Log-Message "INFO" "Impressoras: $($paradas.Count) impressora(s) LPR parada(s) com o MAC do PC guardado; procurando o PC pelo MAC"
+        if (-not $Silencioso) { Log-Message "INFO" "Impressoras: $($paradas.Count) impressora(s) LPR parada(s) com o MAC do PC guardado; procurando o PC pelo MAC" }
         Invoke-AcordarRede -Subredes (Get-SubredesLocais)
         $tabela = @(ConvertFrom-TabelaArp -Linhas (arp -a))
         foreach ($pa in $paradas) {
-            $macPa = "$($macs[$pa.Porta])"
+            $macPa = "$($Macs[$pa.Porta])"
             $candIp = @(Find-IpPorMac -Mac $macPa -Tabela $tabela | Where-Object { $_ -ne $pa.Servidor })
             $respIp = @()
             if ($candIp.Count -gt 0) { $respIp = @(Test-PortaVarios -Ips $candIp -Porta $portaLpd -TimeoutMs 1200) }
             if ($respIp.Count -gt 0) {
                 $correcoes[$pa.Porta] = "$($respIp[0])"
-                Log-Message "INFO" "Impressoras: o PC da porta $($pa.Porta) (MAC $macPa) agora está no IP $($respIp[0]) e responde no LPD"
+                if (-not $Silencioso) { Log-Message "INFO" "Impressoras: o PC da porta $($pa.Porta) (MAC $macPa) agora está no IP $($respIp[0]) e responde no LPD" }
             }
-            else { Log-Message "INFO" "Impressoras: não achei o PC da porta $($pa.Porta) (MAC $macPa) respondendo em outro IP" }
+            elseif (-not $Silencioso) { Log-Message "INFO" "Impressoras: não achei o PC da porta $($pa.Porta) (MAC $macPa) respondendo em outro IP" }
         }
     }
     catch { Log-Message "ERRO" "Impressoras: falha ao conferir as LPR paradas - $($_.Exception.Message)" }
     return $correcoes
 }
 
+function Write-LogMonitorLpr {
+    param([string]$Pasta, [string]$Prefixo, [string]$Tag, [string]$Mensagem)
+    $agora = Get-Date
+    $arquivo = Join-Path $Pasta ('{0}_{1:yyyy-MM-dd}.log' -f $Prefixo, $agora)
+    $linha = '[{0:dd/MM/yyyy HH:mm:ss}] [{1}] {2}' -f $agora, $Tag, ($Mensagem -replace '\b(?:[a-z][a-z0-9+.-]*://|www\.)\S+', '[link omitido]' -replace '\s*[\r\n]+\s*', ' ')
+    if (-not (Test-Path -LiteralPath $Pasta -PathType Container)) {
+        New-Item -ItemType Directory -Path $Pasta -Force -ErrorAction Stop | Out-Null
+    }
+    if ((Test-Path -LiteralPath $arquivo) -and (Get-Item -LiteralPath $arquivo -ErrorAction Stop).Length -ge 1MB) {
+        Move-Item -LiteralPath $arquivo -Destination "$arquivo.old" -Force -ErrorAction Stop
+    }
+    Add-Content -LiteralPath $arquivo -Value $linha -Encoding UTF8 -ErrorAction Stop
+}
+
+function Clear-LogsAntigosMonitorLpr {
+    param([string[]]$Pastas)
+    $limite = (Get-Date).AddDays(-30)
+    foreach ($pasta in $Pastas) {
+        if (-not (Test-Path -LiteralPath $pasta -PathType Container)) { continue }
+        foreach ($arquivo in @(Get-ChildItem -LiteralPath $pasta -File -Filter '*.log*' -ErrorAction Stop)) {
+            if ($arquivo.Name -match '^(?:(?:Trocas-IP|Monitor)_\d{4}-\d{2}-\d{2}|CorrigirLpr)\.log(?:\.old)?$' -and $arquivo.LastWriteTime -lt $limite) {
+                Remove-Item -LiteralPath $arquivo.FullName -ErrorAction Stop
+            }
+        }
+    }
+}
+
+function Update-EstadoMonitorLpr {
+    param([string]$Arquivo, [string[]]$SemResposta = @(), [string[]]$NoAr = @())
+    $anteriores = @()
+    $existe = Test-Path -LiteralPath $Arquivo -PathType Leaf
+    if ($existe) { $anteriores = [System.IO.File]::ReadAllLines($Arquivo) }
+    $novos = @($SemResposta | Where-Object { $anteriores -notcontains $_ })
+    $encerrados = @($anteriores | Where-Object { $SemResposta -notcontains $_ })
+    if ($novos.Count -eq 0 -and $encerrados.Count -eq 0) { return }
+
+    # A tarefa roda em processos diferentes. Troca o arquivo de uma vez para preservar o estado entre rodadas.
+    $temporario = "$Arquivo.tmp"
+    [System.IO.File]::WriteAllLines($temporario, $SemResposta)
+    if ($existe) { [System.IO.File]::Replace($temporario, $Arquivo, [NullString]::Value) }
+    else { [System.IO.File]::Move($temporario, $Arquivo) }
+    foreach ($ip in $novos) { Log-Message "AVISO" "LPR: o IP $ip parou de responder na porta 515." }
+    foreach ($ip in $encerrados) {
+        if ($NoAr -contains $ip) { Log-Message "INFO" "LPR: o IP $ip voltou a responder na porta 515." }
+    }
+}
+
 function Invoke-CorrecaoLprAuto {
     # O que a tarefa "Preparador XMenu - Corrigir LPR" faz a cada vez (como SYSTEM, sem janela): o CORRIGIR AGORA sem
     # ninguem clicar. Guarda o MAC do PC de cada porta LPR que responde e, quando a porta com impressora para porque o PC
     # do LPD mudou de IP, passa a porta para o IP novo (so se ele responder no LPD). Devolve as portas que ficaram com o IP novo.
+    param([string]$ArquivoEstado, [string]$PastaTrocas)
     $corrigidas = @()
     try {
         $portas = @(@(Get-PortasLpr) + @(Get-PortasLprTcp) | Where-Object { "$($_.Servidor)" -ne "" })
-        if ($portas.Count -eq 0) { return $corrigidas }
+        if ($portas.Count -eq 0) {
+            Update-EstadoMonitorLpr -Arquivo $ArquivoEstado
+            return $corrigidas
+        }
         $noAr = @(Test-PortaVarios -Ips @($portas | ForEach-Object { $_.Servidor } | Select-Object -Unique) -Porta 515 -TimeoutMs 1500)
         # O MAC e guardado enquanto a porta funciona: e por ele que o PC e achado quando o IP mudar
         $macs = Get-LprMacs
@@ -17525,25 +17584,46 @@ function Invoke-CorrecaoLprAuto {
             $macVisto = @($tabela | Where-Object { $_.IP -eq $p.Servidor } | ForEach-Object { $_.Mac })
             if ($macVisto.Count -gt 0 -and $macVisto[0] -ne "$($macs[$p.Porta])") {
                 Save-LprMac -Porta $p.Porta -Mac $macVisto[0]
-                Log-Message "INFO" "LPR: MAC do PC da porta $($p.Porta) guardado ($($macVisto[0]))"
             }
         }
-        if (@($portas | Where-Object { $noAr -notcontains $_.Servidor }).Count -eq 0) { return $corrigidas }
-        $correcoes = Find-CorrecoesLprPorMac
+        $paradas = @($portas | Where-Object { $noAr -notcontains $_.Servidor })
+        if ($paradas.Count -gt 0) {
+            $emUso = @(Get-Printer -ErrorAction Stop | ForEach-Object { $_.PortName })
+            $paradas = @($paradas | Where-Object { $emUso -contains $_.Porta })
+        }
+        $correcoes = Find-CorrecoesLprPorMac -PortasParadas $paradas -Macs $macs -Silencioso
+        $portasCorrigidas = @{}
         foreach ($porta in @($correcoes.Keys)) {
             $ipNovo = "$($correcoes[$porta])"
+            $macPorta = "$($macs[$porta])"
             try {
-                $macPorta = "$((Get-LprMacs)[$porta])"
                 $res = Update-PortaLprCompleto -Porta $porta -Servidor $ipNovo
+            }
+            catch {
+                Log-Message "ERRO" "LPR: não consegui passar a porta $porta para $ipNovo - $($_.Exception.Message)"
+                continue
+            }
+            $portasCorrigidas[$porta] = $true
+            $corrigidas += $res.Porta
+            if ($res.ServidorAnterior -ne $ipNovo) {
+                $evento = "Impressora(s): $($res.Impressoras -join ', ') | Fila LPR: $($res.Fila) | IP: $($res.ServidorAnterior) -> $ipNovo | MAC: $macPorta"
+                try { Write-LogMonitorLpr -Pasta $PastaTrocas -Prefixo 'Trocas-IP' -Tag 'TROCA DE IP' -Mensagem $evento }
+                catch { Log-Message "ERRO" "LPR: não consegui gravar no histórico de trocas ($($_.Exception.Message)). Troca aplicada | $evento" }
+            }
+            if ($res.Aviso) { Log-Message "AVISO" "LPR: $($res.Aviso)" }
+            try {
                 Save-LprMac -Porta $res.Porta -Mac $macPorta -PortaAntiga $porta
-                $corrigidas += $res.Porta
-                Log-Message "SUCESSO" "LPR: porta $porta corrigida sozinha: agora imprime em $ipNovo (porta $($res.Porta), impressora(s): $(@($res.Impressoras) -join ', ')). $($res.Aviso)".Trim()
+            }
+            catch { Log-Message "ERRO" "LPR: não consegui guardar o MAC da porta $($res.Porta) - $($_.Exception.Message)" }
+            try {
                 $rep = Remove-SobrasFilaImpressora -Impressoras @($res.Impressoras)
                 foreach ($rm in $rep.Removidas) { Log-Message "SUCESSO" "LPR: a impressora $($rm.Impressora) aparecia repetida no Windows; registro que sobrou apagado ($($rm.Id))" }
                 foreach ($fl in $rep.Falhas) { Log-Message "ERRO" "LPR: não consegui apagar o registro repetido da impressora $($fl.Impressora) ($($fl.Id)): $($fl.Motivo)" }
             }
-            catch { Log-Message "ERRO" "LPR: não consegui passar a porta $porta para $ipNovo - $($_.Exception.Message)" }
+            catch { Log-Message "ERRO" "LPR: falha ao conferir filas repetidas na porta $($res.Porta) - $($_.Exception.Message)" }
         }
+        $ipsSemResposta = @($paradas | Where-Object { -not $portasCorrigidas.ContainsKey($_.Porta) } | ForEach-Object { $_.Servidor } | Sort-Object -Unique)
+        Update-EstadoMonitorLpr -Arquivo $ArquivoEstado -SemResposta $ipsSemResposta -NoAr $noAr
     }
     catch { Log-Message "ERRO" "LPR: falha na correção automática - $($_.Exception.Message)" }
     return $corrigidas
@@ -17560,34 +17640,41 @@ function Register-CorrecaoLpr {
     param([string]$Pasta = (Join-Path $env:ProgramFiles "Preparador XMenu\CorrigirLpr"), [switch]$SeFaltar,
         [string]$ArquivoTarefa = (Join-Path $env:windir "System32\Tasks\Preparador XMenu - Corrigir LPR"))
     $arqMacs = Join-Path $Pasta "lpr_mac_portas.json"
-    $arqLog = Join-Path $Pasta "CorrigirLpr.log"
+    $pastaLogMonitor = Join-Path $Pasta 'Logs\Monitor'
+    $pastaLogTrocas = Join-Path $Pasta 'Logs\Trocas de IP'
     try {
         if ($SeFaltar -and @(@(Get-PortasLpr) + @(Get-PortasLprTcp)).Count -eq 0) { return }
         $cabecalho = @'
 # Gerado pelo Preparador XMenu para a tarefa "Preparador XMenu - Corrigir LPR" (SYSTEM). O Preparador regrava este
 # arquivo ao criar ou corrigir uma LPR: mudanca feita a mao se perde.
 Add-Type -AssemblyName System.Windows.Forms
+$Script:PastaLogMonitor = '#LOGMONITOR#'
+$Script:PastaLogTrocas = '#LOGTROCAS#'
 function Get-CaminhoLprMacs { return '#MACS#' }
 function Log-Message {
     param($Tag, $Msg)
-    $arqLog = '#LOG#'
-    try {
-        if ((Test-Path -LiteralPath $arqLog) -and (Get-Item -LiteralPath $arqLog).Length -gt 1MB) { Move-Item -LiteralPath $arqLog -Destination "$arqLog.old" -Force }
-        Add-Content -LiteralPath $arqLog -Value "[$((Get-Date).ToString('dd/MM/yyyy HH:mm:ss'))] [$Tag] $Msg" -Encoding UTF8
-    }
-    catch {}
+    try { Write-LogMonitorLpr -Pasta $Script:PastaLogMonitor -Prefixo 'Monitor' -Tag $Tag -Mensagem $Msg }
+    catch { Write-Warning 'LPR: falha ao gravar o log do monitor.' }
 }
 '@
-        $texto = $cabecalho.Replace('#MACS#', $arqMacs.Replace("'", "''")).Replace('#LOG#', $arqLog.Replace("'", "''"))
+        $texto = $cabecalho.Replace('#MACS#', $arqMacs.Replace("'", "''")).Replace('#LOGMONITOR#', $pastaLogMonitor.Replace("'", "''")).Replace('#LOGTROCAS#', $pastaLogTrocas.Replace("'", "''"))
         $funcoes = 'Get-PortasLpr', 'Get-PortasLprTcp', 'Get-NomesPortasMonitor', 'Set-PortaLprServidor', 'Set-PortaLprTcpServidor',
         'Remove-PortaLprRegistro', 'Start-LpdAposSpooler', 'Update-PortaLprCompleto', 'Get-LprMacs', 'Save-LprMac', 'ConvertFrom-TabelaArp',
         'Find-IpPorMac', 'Test-PortaVarios', 'Get-SubredesLocais', 'Invoke-AcordarRede', 'Find-CorrecoesLprPorMac', 'Get-FilasPnpImpressoras',
-        'Get-QueueInstanceIdImpressora', 'Get-SobrasFilaImpressora', 'Invoke-RemoverDispositivoPnp', 'Remove-SobrasFilaImpressora', 'Invoke-CorrecaoLprAuto'
+        'Get-QueueInstanceIdImpressora', 'Get-SobrasFilaImpressora', 'Invoke-RemoverDispositivoPnp', 'Remove-SobrasFilaImpressora',
+        'Write-LogMonitorLpr', 'Clear-LogsAntigosMonitorLpr', 'Update-EstadoMonitorLpr', 'Invoke-CorrecaoLprAuto'
         foreach ($nomeFn in $funcoes) { $texto += "`r`nfunction $nomeFn {" + (Get-Command $nomeFn -CommandType Function -ErrorAction Stop).Definition + "}`r`n" }
-        $texto += "`r`n[void](Invoke-CorrecaoLprAuto)`r`n"
+        $texto += @'
+
+try { Clear-LogsAntigosMonitorLpr -Pastas @($Script:PastaLogMonitor, $Script:PastaLogTrocas, $PSScriptRoot) }
+catch { Log-Message 'ERRO' "LPR: falha ao limpar os logs antigos - $($_.Exception.Message)" }
+[void](Invoke-CorrecaoLprAuto -ArquivoEstado (Join-Path $PSScriptRoot 'LprSemResposta.txt') -PastaTrocas $Script:PastaLogTrocas)
+'@
         $script = Join-Path $Pasta "CorrigirLpr.ps1"
         if ($SeFaltar -and (Test-Path -LiteralPath $ArquivoTarefa) -and (Test-Path -LiteralPath $script) -and [System.IO.File]::ReadAllText($script) -ceq $texto) { return }
-        if (-not (Test-Path -LiteralPath $Pasta)) { New-Item -ItemType Directory -Path $Pasta -Force | Out-Null }
+        foreach ($pastaLog in @($pastaLogMonitor, $pastaLogTrocas)) {
+            New-Item -ItemType Directory -Path $pastaLog -Force -ErrorAction Stop | Out-Null
+        }
         # Com BOM: sem ele o PowerShell 5.1 le os acentos errado
         [System.IO.File]::WriteAllText($script, $texto, (New-Object System.Text.UTF8Encoding($true)))
         # O MAC que o Preparador ja guardou vale desde a primeira vez (o PC do LPD pode ja estar fora do ar); o que a tarefa
@@ -17603,7 +17690,7 @@ function Log-Message {
         $gatilhos = @($aoLigar, (New-ScheduledTaskTrigger -Once -At (Get-Date) -RepetitionInterval (New-TimeSpan -Minutes 5)))
         $conf = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Minutes 4)
         Register-ScheduledTask -TaskName 'Preparador XMenu - Corrigir LPR' -Action $acao -Trigger $gatilhos -Settings $conf -User 'SYSTEM' -RunLevel Highest -Force -ErrorAction Stop | Out-Null
-        Log-Message "SUCESSO" "LPR: tarefa 'Preparador XMenu - Corrigir LPR' pronta: ao ligar o PC e a cada 5 minutos ela confere as portas LPR e, se o PC da impressora mudar de IP, passa a porta para o IP novo sozinha. O que ela fizer fica em $arqLog"
+        Log-Message "SUCESSO" "LPR: tarefa 'Preparador XMenu - Corrigir LPR' pronta. Histórico de IPs em $pastaLogTrocas. Diagnóstico em $pastaLogMonitor."
     }
     catch { Log-Message "ERRO" "LPR: não consegui criar a tarefa que corrige a porta LPR sozinha - $($_.Exception.Message)" }
 }
@@ -22816,7 +22903,7 @@ $formWidth = if ($screen.Width -lt 1200) { $screen.Width - 50 } else { 1200 }
 $formHeight = if ($screen.Height -lt 900) { $screen.Height - 50 } else { 900 }
 
 $form = New-Object System.Windows.Forms.Form
-$form.Text = "Preparador XMenu – Suporte Técnico v5.91"
+$form.Text = "Preparador XMenu – Suporte Técnico v5.92"
 $form.Size = New-Object System.Drawing.Size($formWidth, $formHeight)
 $form.StartPosition = "CenterScreen"
 $form.BackColor = [System.Drawing.Color]::FromArgb(25, 25, 30); $form.ForeColor = 'White'
@@ -23982,7 +24069,7 @@ $bRam.Add_Click({ Show-LiberarMemoria })
 [void]$tbl.Controls.Add($bRam)
 
 # Mensagem de abertura: explica o programa para quem abre pela primeira vez
-Log-Message "INFO" "Preparador XMenu v5.91 - preparo e suporte de computadores com o sistema XMenu"
+Log-Message "INFO" "Preparador XMenu v5.92 - preparo e suporte de computadores com o sistema XMenu"
 foreach ($msgSenha in $Script:LogSenhaPendente) { Log-Message "INFO" $msgSenha }
 Log-Message "INFO" "Senha de abertura: acesso liberado"
 Log-Message "LOG" "==============================================================="
@@ -23995,7 +24082,8 @@ Log-Message "LOG" "  SUPORTE E DIAGNÓSTICO ...... impressoras, rede, SQL, backu
 Log-Message "LOG" "  BUSCAR ..................... digite parte do nome do botão para achar mais rápido (Ctrl+F)"
 Log-Message "LOG" "  Passe o mouse sobre um botão para ver o que ele faz antes de clicar."
 Log-Message "LOG" "---------------------------------------------------------------"
-Log-Message "LOG" "NOVO NA v5.91"
+Log-Message "LOG" "NOVO NA v5.92"
+Log-Message "SUCESSO" "  LPR: histórico de trocas de IP por dia, diagnóstico sem avisos repetidos e limpeza automática após 30 dias"
 Log-Message "SUCESSO" "  Vídeos tutoriais: novo vídeo Cadastro de produto por cópia"
 Log-Message "SUCESSO" "  LPR: cliente que já tinha LPR ganha a tarefa 'Preparador XMenu - Corrigir LPR' só de abrir o Preparador (e ela se atualiza sozinha quando sai versão nova); PC sem LPR não muda nada"
 Log-Message "SUCESSO" "  LPR: ao criar ou corrigir a impressora LPR, o Preparador instala a tarefa 'Preparador XMenu - Corrigir LPR', que a cada 5 minutos (e ao ligar o PC) passa a porta para o IP novo do PC da impressora sozinha, sem ninguém clicar em CORRIGIR AGORA"
