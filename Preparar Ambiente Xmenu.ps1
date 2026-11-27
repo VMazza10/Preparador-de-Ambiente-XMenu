@@ -1,5 +1,5 @@
 ﻿# =============================================================================
-# PREPARADOR XMENU v5.98
+# PREPARADOR XMENU v5.99
 # Visual: Dashboard Moderno
 # Correcoes:
 #   - CRITICO: Removido DoEvents do loop de evento de download (causava crash).
@@ -3477,10 +3477,11 @@ OUTER APPLY (
     }
     $ordem = if ($Colunas.Movimentacao -contains 'IDParceiro') { 'M.IDParceiro, ' } else { '' }
     $requisitosCaixa = @('IDParceiro','GUIDPedido','IDFormaPagamento','Valor')
-    if (@($requisitosCaixa | Where-Object { $Colunas.Caixa -notcontains $_ }).Count -eq 0 -and
-        $Colunas.Movimentacao -contains 'IDParceiro') {
-        $vinculoCaixa = 'CX.GUIDPedido = M.GUIDPedido'
-        if ($Colunas.Movimentacao -contains 'GUIDPedidoReal') { $vinculoCaixa = "($vinculoCaixa OR CX.GUIDPedido = M.GUIDPedidoReal)" }
+    $temCaixa = $Colunas.Movimentacao -contains 'IDParceiro' -and
+        @($requisitosCaixa | Where-Object { $Colunas.Caixa -notcontains $_ }).Count -eq 0
+    $temCaixaEntrega = $temEntrega -and $tabelaEntrega -eq 'Entregas' -and $colsEntrega -contains 'IDParceiro' -and
+        @($requisitosCaixa | Where-Object { $Colunas.EntregasCaixa -notcontains $_ }).Count -eq 0
+    if ($temCaixa -or $temCaixaEntrega) {
         $nomeForma = "N'Código ' + CONVERT(nvarchar(30), CX.IDFormaPagamento)"
         $joinForma = ''
         if ($Colunas.FormasDePagamento -contains 'ID' -and $Colunas.FormasDePagamento -contains 'Nome') {
@@ -3488,19 +3489,32 @@ OUTER APPLY (
             if ($Colunas.FormasDePagamento -contains 'IDParceiro') { $joinForma += ' AND FP.IDParceiro = CX.IDParceiro' }
             $nomeForma = "COALESCE(NULLIF(LTRIM(RTRIM(FP.Nome)), ''), $nomeForma)"
         }
-        $campos.Add(@"
-COALESCE(NULLIF(STUFF((
+        $listarPagamentos = {
+            param([string]$Tabela, [string]$Vinculo)
+            @"
+NULLIF(STUFF((
     SELECT N' | ' + $nomeForma + COALESCE(N': R$ ' + REPLACE(CONVERT(nvarchar(40), CAST(CX.Valor AS decimal(19,2))), '.', ','), '')
-    FROM dbo.Caixa AS CX
+    FROM dbo.[$Tabela] AS CX
     $joinForma
-    WHERE CX.IDParceiro = M.IDParceiro
-      AND ($vinculoCaixa)
+    WHERE ($Vinculo)
       AND NULLIF(LTRIM(RTRIM(CX.GUIDPedido)), '') IS NOT NULL
       AND CX.GUIDPedido <> '00000000-0000-0000-0000-000000000000'
     ORDER BY CX.IDFormaPagamento, CX.Valor
     FOR XML PATH(''), TYPE
-).value('.', 'nvarchar(max)'), 1, 3, ''), ''), N'Nenhum pagamento vinculado encontrado no Caixa') AS [Formas de pagamento registradas]
-"@)
+).value('.', 'nvarchar(max)'), 1, 3, ''), '')
+"@
+        }
+        $pagamento = 'NULL'
+        if ($temCaixa) {
+            $chaveCaixa = 'CX.GUIDPedido = M.GUIDPedido'
+            if ($Colunas.Movimentacao -contains 'GUIDPedidoReal') { $chaveCaixa += ' OR CX.GUIDPedido = M.GUIDPedidoReal' }
+            $pagamento = & $listarPagamentos 'Caixa' "CX.IDParceiro = M.IDParceiro AND ($chaveCaixa)"
+        }
+        if ($temCaixaEntrega) {
+            $pagamentoEntrega = & $listarPagamentos 'EntregasCaixa' 'CX.IDParceiro = E.IDParceiro AND CX.GUIDPedido = E.GUID'
+            $pagamento = "CASE WHEN E.ID IS NOT NULL THEN $pagamentoEntrega ELSE $pagamento END"
+        }
+        $campos.Add("COALESCE($pagamento, N'Nenhum pagamento vinculado encontrado') AS [Formas de pagamento registradas]")
     }
     $ramos = [System.Collections.Generic.List[string]]::new()
     if ($temEntregaPendente) {
@@ -3516,7 +3530,7 @@ COALESCE(NULLIF(STUFF((
         $nome = if ($Colunas.StatusMesa -contains 'NomeBalcao') { ', S.NomeBalcao' } else { '' }
         $joins.Add(@"
 OUTER APPLY (
-    SELECT TOP (1) S.Tipo, S.DataFechamento$nome
+    SELECT TOP (1) 1 AS Encontrado, S.Tipo, S.DataFechamento$nome
     FROM dbo.StatusMesa AS S
     WHERE M.Mesa = -9999
       AND S.IDParceiro = M.IDParceiro
@@ -3526,7 +3540,21 @@ OUTER APPLY (
 ) AS StatusBalcao
 "@)
         if ($nome) { $campos.Add('StatusBalcao.NomeBalcao AS [Nome no status de balcão]') }
-        $ramos.Add('WHEN M.Mesa = -9999 THEN CASE WHEN StatusBalcao.Tipo = 1 AND StatusBalcao.DataFechamento IS NULL THEN 1 ELSE 0 END')
+        $pendenteSemStatus = [System.Collections.Generic.List[string]]::new()
+        $pendenteSemStatus.Add('StatusBalcao.Encontrado IS NULL')
+        $pendenteSemStatus.Add("M.GUIDBalcao <> '00000000-0000-0000-0000-000000000000'")
+        $pendenteSemStatus.Add('COALESCE(M.IDPedido, 0) <= 0')
+        if ($Colunas.Movimentacao -contains 'IDPedidoReal') { $pendenteSemStatus.Add('COALESCE(M.IDPedidoReal, 0) <= 0') }
+        if ($Colunas.Pedidos -contains 'GUIDBalcao' -and $Colunas.Pedidos -contains 'IDParceiro') {
+            $sinaisFechamento = [System.Collections.Generic.List[string]]::new()
+            if ($Colunas.Pedidos -contains 'Finalizado') { $sinaisFechamento.Add('PB.Finalizado = 1') }
+            if ($Colunas.Pedidos -contains 'Cancelado') { $sinaisFechamento.Add('PB.Cancelado = 1') }
+            if ($Colunas.Pedidos -contains 'DataFechamento') { $sinaisFechamento.Add('PB.DataFechamento IS NOT NULL') }
+            if ($sinaisFechamento.Count) {
+                $pendenteSemStatus.Add("NOT EXISTS (SELECT 1 FROM dbo.Pedidos AS PB WHERE PB.IDParceiro = M.IDParceiro AND PB.GUIDBalcao = M.GUIDBalcao AND ($($sinaisFechamento -join ' OR ')))")
+            }
+        }
+        $ramos.Add("WHEN M.Mesa = -9999 THEN CASE WHEN (StatusBalcao.Tipo = 1 AND StatusBalcao.DataFechamento IS NULL) OR ($($pendenteSemStatus -join ' AND ')) THEN 1 ELSE 0 END")
     }
     if ($temStatusMesa) {
         $mesa = [System.Collections.Generic.List[string]]::new()
@@ -3677,6 +3705,12 @@ function Write-MovimentacaoAbertaTxt {
             $Saida.WriteLine()
             $Saida.WriteLine('================================================================')
             $Saida.WriteLine($cabecalho)
+            if ($categoria -eq 'Entrega' -and
+                -not (& $lerTexto 'Entrega - Endereco') -and
+                -not (& $lerTexto 'Rua cadastrada') -and
+                -not (& $lerTexto 'Entrega - EnderecoSolicitadoEntregaFacil')) {
+                $Saida.WriteLine('>>> RETIRADA BALCÃO <<<')
+            }
             $data = & $lerTexto 'Entrega - DataRegistro'
             if (-not $data) { $data = & $lerTexto 'Data e hora' }
             if ($data) { $Saida.WriteLine("Registrado em $data") }
@@ -3725,7 +3759,7 @@ function Export-MovimentacaoAberta {
             $cmd.CommandText = @'
 SELECT TABLE_NAME, COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS
 WHERE TABLE_SCHEMA = 'dbo'
-  AND TABLE_NAME IN ('Movimentacao','Produtos','SubGrupos','LocalImpressao','Entregas','EntregasRecebidas','Pedidos','StatusMesa','Clientes','ClientesRuas','Ruas','Bairros','ClientesTelefones','Caixa','FormasDePagamento')
+  AND TABLE_NAME IN ('Movimentacao','Produtos','SubGrupos','LocalImpressao','Entregas','EntregasRecebidas','Pedidos','StatusMesa','Clientes','ClientesRuas','Ruas','Bairros','ClientesTelefones','Caixa','EntregasCaixa','FormasDePagamento')
 '@
             $colunas = @{}
             $leitor = $cmd.ExecuteReader()
@@ -23658,7 +23692,7 @@ $formWidth = if ($screen.Width -lt 1200) { $screen.Width - 50 } else { 1200 }
 $formHeight = if ($screen.Height -lt 900) { $screen.Height - 50 } else { 900 }
 
 $form = New-Object System.Windows.Forms.Form
-$form.Text = "Preparador XMenu – Suporte Técnico v5.98"
+$form.Text = "Preparador XMenu – Suporte Técnico v5.99"
 $form.Size = New-Object System.Drawing.Size($formWidth, $formHeight)
 $form.StartPosition = "CenterScreen"
 $form.BackColor = [System.Drawing.Color]::FromArgb(25, 25, 30); $form.ForeColor = 'White'
@@ -24833,7 +24867,7 @@ $bRam.Add_Click({ Show-LiberarMemoria })
 [void]$tbl.Controls.Add($bRam)
 
 # Mensagem de abertura: explica o programa para quem abre pela primeira vez
-Log-Message "INFO" "Preparador XMenu v5.98 - preparo e suporte de computadores com o sistema XMenu"
+Log-Message "INFO" "Preparador XMenu v5.99 - preparo e suporte de computadores com o sistema XMenu"
 foreach ($msgSenha in $Script:LogSenhaPendente) { Log-Message "INFO" $msgSenha }
 Log-Message "INFO" "Senha de abertura: acesso liberado"
 Log-Message "LOG" "==============================================================="
@@ -24846,7 +24880,10 @@ Log-Message "LOG" "  SUPORTE E DIAGNÓSTICO ...... impressoras, rede, SQL, backu
 Log-Message "LOG" "  BUSCAR ..................... digite parte do nome do botão para achar mais rápido (Ctrl+F)"
 Log-Message "LOG" "  Passe o mouse sobre um botão para ver o que ele faz antes de clicar."
 Log-Message "LOG" "---------------------------------------------------------------"
-Log-Message "LOG" "NOVO NA v5.98"
+Log-Message "LOG" "NOVO NA v5.99"
+Log-Message "SUCESSO" "  Movimentação aberta: pagamentos de entregas abertas são consultados na tabela EntregasCaixa"
+Log-Message "SUCESSO" "  Movimentação aberta: inclui balcão pendente sem registro na StatusMesa quando não há vínculo com pedido nem evidência de fechamento"
+Log-Message "SUCESSO" "  Movimentação aberta: entrega sem endereço aparece em destaque como RETIRADA BALCÃO"
 Log-Message "SUCESSO" "  Movimentação aberta: TXT para relançamento com dados do pedido agrupados e sem códigos internos"
 Log-Message "SUCESSO" "  Exportação: inclui entregas e balcões pendentes, telefone vinculado e formas de pagamento gravadas no Caixa"
 Log-Message "SUCESSO" "  Exportar movimentação: seleção de bancos e usuários SQL, exibição opcional da senha e comando no Log"
