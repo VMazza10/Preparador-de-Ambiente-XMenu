@@ -1,6 +1,6 @@
 ﻿# =============================================================================
 # PREPARADOR XMENU - VERSAO REVENDA
-# Baseado na v5.93
+# Baseado na v5.94
 # Alteracoes Revenda:
 #   - Wallpaper: um dos 3 fundos de revenda (Fundos/revenda-1..3.jpg), sorteado a cada preparo
 #   - Removido: Atalhos de Suporte e Pasta Netcontroll
@@ -20041,11 +20041,23 @@ COLA RÁPIDA - INSTALAR VIA LPR
     }
 }
 
+function Write-RelatorioPing {
+    param([string]$Linha)
+    if (-not $Script:PingLogPath) { return }
+    try { Add-Content -LiteralPath $Script:PingLogPath -Value $Linha -Encoding UTF8 -ErrorAction Stop }
+    catch {
+        $Script:PingLogPath = ""
+        $aviso = "Não foi possível gravar o relatório de ping na Área de Trabalho."
+        $Script:PingRtb.AppendText("$aviso`n")
+        Log-Message 'ERRO' $aviso
+    }
+}
+
 function Show-PingTester {
     param([string]$InitialIP = "")
 
     if ($null -ne $Script:PingForm -and -not $Script:PingForm.IsDisposed) {
-        if ($InitialIP) { $Script:PingTxtIP.Text = $InitialIP }
+        if ($InitialIP -and -not $Script:PingTimerObj.Enabled) { $Script:PingTxtIP.Text = $InitialIP }
         $Script:PingForm.Activate()
         return
     }
@@ -20058,6 +20070,10 @@ function Show-PingTester {
     $Script:PingEnviados = 0
     $Script:PingRecebidos = 0
     $Script:PingLogPath = ""
+    $Script:PingEnvio = $null
+    $Script:PingCliente = $null
+    $Script:PingAlvo = ""
+    $Script:PingIntervalo = 1000
     $Script:PingInicial = $InitialIP
 
     $f = New-ToolForm "Teste de Ping" 720 640
@@ -20099,10 +20115,10 @@ function Show-PingTester {
     }
     catch {}
 
-    $bAt1 = New-ToolButton $f "Gateway" 82 86 120 28 $Script:UiCinza { $Script:PingTxtIP.Text = $Script:PingGw } "Testa o roteador da rede local"
-    $bAt2 = New-ToolButton $f "Google DNS" 210 86 120 28 $Script:UiCinza { $Script:PingTxtIP.Text = "8.8.8.8" } "Testa a internet (8.8.8.8)"
-    $bAt3 = New-ToolButton $f "NetControll" 338 86 140 28 $Script:UiCinza { $Script:PingTxtIP.Text = "adm2.netcontroll.com.br" } "Testa o servidor NetControll"
-    $bAt4 = New-ToolButton $f "Site (DNS)" 486 86 120 28 $Script:UiCinza { $Script:PingTxtIP.Text = "google.com" } "Testa resolucao de nomes"
+    $bAt1 = New-ToolButton $f "Gateway" 82 86 120 28 $Script:UiCinza { if (-not $Script:PingTimerObj.Enabled) { $Script:PingTxtIP.Text = $Script:PingGw } } "Testa o roteador da rede local"
+    $bAt2 = New-ToolButton $f "Google DNS" 210 86 120 28 $Script:UiCinza { if (-not $Script:PingTimerObj.Enabled) { $Script:PingTxtIP.Text = "8.8.8.8" } } "Testa a internet (8.8.8.8)"
+    $bAt3 = New-ToolButton $f "NetControll" 338 86 140 28 $Script:UiCinza { if (-not $Script:PingTimerObj.Enabled) { $Script:PingTxtIP.Text = "adm2.netcontroll.com.br" } } "Testa o servidor NetControll"
+    $bAt4 = New-ToolButton $f "Site (DNS)" 486 86 120 28 $Script:UiCinza { if (-not $Script:PingTimerObj.Enabled) { $Script:PingTxtIP.Text = "google.com" } } "Testa resolucao de nomes"
     foreach ($bb in @($bAt1, $bAt2, $bAt3, $bAt4)) {
         $bb.Font = New-Object System.Drawing.Font("Segoe UI", 8.5, [System.Drawing.FontStyle]::Bold)
     }
@@ -20186,11 +20202,12 @@ function Show-PingTester {
     [void]$f.Controls.Add($Script:PingRtb)
 
     $Script:PingChkLog = New-Object System.Windows.Forms.CheckBox
-    $Script:PingChkLog.Text = "Salvar log na Area de Trabalho"
+    $Script:PingChkLog.Text = "Salvar relatório na Área de Trabalho"
     $Script:PingChkLog.Location = New-Object System.Drawing.Point(20, 558)
     $Script:PingChkLog.AutoSize = $true
     $Script:PingChkLog.ForeColor = $Script:UiTexto
     $Script:PingChkLog.Anchor = 'Bottom,Left'
+    $Script:PingChkLog.Checked = $true
     [void]$f.Controls.Add($Script:PingChkLog)
 
     $Script:PingAtualizarCartoes = {
@@ -20224,15 +20241,25 @@ function Show-PingTester {
     }
 
     $Script:PingTimerObj = New-Object System.Windows.Forms.Timer
-    $Script:PingTimerObj.Interval = 1000
+    $Script:PingTimerObj.Interval = 100
 
     $Script:PingTimerObj.Add_Tick({
-            $alvo = $Script:PingTxtIP.Text.Trim()
-            if ([string]::IsNullOrEmpty($alvo)) { return }
-
-            $pingObj = New-Object System.Net.NetworkInformation.Ping
+            $alvo = $Script:PingAlvo
             $resp = $null
-            try { $resp = $pingObj.Send($alvo, 1200) } catch {}
+            if ($null -eq $Script:PingEnvio) {
+                if ([datetime]::UtcNow -lt $Script:PingProximo) { return }
+                $Script:PingProximo = [datetime]::UtcNow.AddMilliseconds($Script:PingIntervalo)
+                try {
+                    $Script:PingEnvio = $Script:PingCliente.SendPingAsync($alvo, 1200)
+                    return
+                }
+                catch {}
+            }
+            else {
+                if (-not $Script:PingEnvio.IsCompleted) { return }
+                try { $resp = $Script:PingEnvio.GetAwaiter().GetResult() } catch {}
+                $Script:PingEnvio = $null
+            }
             $hora = Get-Date -Format "HH:mm:ss"
             $Script:PingEnviados++
 
@@ -20263,21 +20290,32 @@ function Show-PingTester {
             & $Script:PingAtualizarCartoes
 
             if ($Script:PingChkLog.Checked -and $Script:PingLogPath -ne "") {
-                $msg.Trim() | Out-File $Script:PingLogPath -Append -Encoding utf8
+                Write-RelatorioPing -Linha $msg.Trim()
             }
         })
 
+    $Script:PingFinalizar = {
+        $Script:PingTimerObj.Stop()
+        $Script:PingCliente.Dispose()
+        $Script:PingCliente = $null
+        $Script:PingEnvio = $null
+        $perdidos = $Script:PingEnviados - $Script:PingRecebidos
+        $resumo = "Enviados: $($Script:PingEnviados) | Recebidos: $($Script:PingRecebidos) | Perdidos: $perdidos"
+        $Script:PingRtb.SelectionColor = $Script:UiSuave
+        $Script:PingRtb.AppendText("--- Teste encerrado. $resumo ---`n")
+        Write-RelatorioPing -Linha "$(Get-Date -Format 'dd/MM/yyyy HH:mm:ss') | $resumo"
+        Log-Message 'INFO' "Ping de $($Script:PingAlvo) encerrado. $resumo"
+    }
+
     $Script:PingBtnRun.Add_Click({
             if ($Script:PingTimerObj.Enabled) {
-                $Script:PingTimerObj.Stop()
+                & $Script:PingFinalizar
                 $Script:PingBtnRun.Text = "INICIAR"
                 $Script:PingBtnRun.BackColor = $Script:UiAzul
                 $Script:PingBtnRun.Invalidate()
                 $Script:PingTxtIP.Enabled = $true
                 $Script:PingCmbInt.Enabled = $true
                 $Script:PingChkLog.Enabled = $true
-                $Script:PingRtb.SelectionColor = $Script:UiSuave
-                $Script:PingRtb.AppendText("--- Parado. Enviados: $($Script:PingEnviados) | Recebidos: $($Script:PingRecebidos) | Perdidos: $($Script:PingEnviados - $Script:PingRecebidos) ---`n")
             }
             else {
                 $alvo = $Script:PingTxtIP.Text.Trim()
@@ -20286,10 +20324,10 @@ function Show-PingTester {
                     return
                 }
                 switch ($Script:PingCmbInt.SelectedIndex) {
-                    0 { $Script:PingTimerObj.Interval = 500 }
-                    1 { $Script:PingTimerObj.Interval = 1000 }
-                    2 { $Script:PingTimerObj.Interval = 2000 }
-                    3 { $Script:PingTimerObj.Interval = 5000 }
+                    0 { $Script:PingIntervalo = 500 }
+                    1 { $Script:PingIntervalo = 1000 }
+                    2 { $Script:PingIntervalo = 2000 }
+                    3 { $Script:PingIntervalo = 5000 }
                 }
                 $Script:PingEnviados = 0
                 $Script:PingRecebidos = 0
@@ -20301,18 +20339,26 @@ function Show-PingTester {
                 $Script:PingCmbInt.Enabled = $false
                 $Script:PingChkLog.Enabled = $false
 
+                $Script:PingAlvo = $alvo
+                $Script:PingLogPath = ""
                 if ($Script:PingChkLog.Checked) {
-                    $Script:PingLogPath = Join-Path $Script:DesktopPath "PingLog_$($alvo.Replace('.', '_').Replace(':', '_'))_$(Get-Date -Format 'yyyyMMdd_HHmm').txt"
-                    "--- Log de ping para $alvo iniciado em $(Get-Date) ---" | Out-File $Script:PingLogPath -Encoding utf8
-                    $Script:PingRtb.SelectionColor = $Script:UiSuave
-                    $Script:PingRtb.AppendText(">> Gravando em: $Script:PingLogPath`n")
+                    $nomeSeguro = $alvo -replace '[^a-zA-Z0-9._-]', '_'
+                    $id = [guid]::NewGuid().ToString('N').Substring(0, 8)
+                    $Script:PingLogPath = Join-Path $Script:DesktopPath "PingLog_$($nomeSeguro.Substring(0, [Math]::Min(60, $nomeSeguro.Length)))_$(Get-Date -Format 'yyyyMMdd_HHmmss')_$id.txt"
+                    Write-RelatorioPing -Linha "--- Teste de ping para $alvo iniciado em $(Get-Date -Format 'dd/MM/yyyy HH:mm:ss') ---"
+                    if ($Script:PingLogPath) {
+                        $Script:PingRtb.AppendText(">> Gravando em: $Script:PingLogPath`n")
+                        Log-Message 'INFO' "Relatório de ping: $Script:PingLogPath"
+                    }
                 }
-                else { $Script:PingLogPath = "" }
+                $Script:PingCliente = New-Object System.Net.NetworkInformation.Ping
+                $Script:PingProximo = [datetime]::UtcNow
                 $Script:PingTimerObj.Start()
             }
         })
 
     New-ToolButton $f "LIMPAR" 300 552 120 32 $Script:UiCinza {
+        if ($Script:PingTimerObj.Enabled) { return }
         $Script:PingRtb.Clear()
         $Script:PingHist.Clear()
         $Script:PingEnviados = 0
@@ -20347,6 +20393,7 @@ Tempo:     minimo $mn ms | medio $([Math]::Round($med, 1)) ms | maximo $mx ms
                 $r = [System.Windows.Forms.MessageBox]::Show("O teste esta rodando. Deseja parar e fechar?", "Confirmar",
                     [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Question)
                 if ($r -eq [System.Windows.Forms.DialogResult]::No) { $e.Cancel = $true; return }
+                & $Script:PingFinalizar
             }
             try { $Script:PingTimerObj.Stop(); $Script:PingTimerObj.Dispose() } catch {}
             $Script:PingForm = $null
@@ -22947,7 +22994,7 @@ $formWidth = if ($screen.Width -lt 1000) { 900 } else { 1000 }
 $formHeight = if ($screen.Height -lt 800) { 700 } else { 800 }
 
 $form = New-Object System.Windows.Forms.Form
-$form.Text = "Preparador XMenu – Suporte Técnico v5.93 - REVENDA"
+$form.Text = "Preparador XMenu – Suporte Técnico v5.94 - REVENDA"
 $form.Size = New-Object System.Drawing.Size($formWidth, $formHeight)
 $form.StartPosition = "CenterScreen"
 $form.BackColor = [System.Drawing.Color]::FromArgb(25, 25, 30); $form.ForeColor = 'White'
@@ -23992,10 +24039,10 @@ $bScan.Add_Click({ Show-PrinterScanner })
 [void]$tbl.Controls.Add($bScan)
 
 $bPingT = New-Object System.Windows.Forms.Button; $bPingT.Height = 50; $bPingT.Dock = 'Top'
-$bPingT.Text = "Teste de Ping Contínuo (com Log)"; $bPingT.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
+$bPingT.Text = "Pingar IP e Salvar na Área de Trabalho"; $bPingT.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
 $bPingT.Cursor = 'Hand'
 Format-SupportBtn $bPingT $colorDiag
-$Script:ToolTip.SetToolTip($bPingT, "Executa 'Test-Connection' continuamente para o IP alvo, permitindo monitorar perdas de pacotes com log local.")
+$Script:ToolTip.SetToolTip($bPingT, "Testa o IP ou nome informado e salva automaticamente o relatório na Área de Trabalho.")
 $bPingT.Add_Click({ Show-PingTester })
 [void]$tbl.Controls.Add($bPingT)
 
@@ -24110,7 +24157,7 @@ $bRam.Add_Click({ Show-LiberarMemoria })
 [void]$tbl.Controls.Add($bRam)
 
 # Mensagem de abertura: explica o programa para quem abre pela primeira vez
-Log-Message "INFO" "Preparador XMenu v5.93 - REVENDA - preparo e suporte de computadores com o sistema XMenu"
+Log-Message "INFO" "Preparador XMenu v5.94 - REVENDA - preparo e suporte de computadores com o sistema XMenu"
 foreach ($msgSenha in $Script:LogSenhaPendente) { Log-Message "INFO" $msgSenha }
 Log-Message "INFO" "Senha de abertura: acesso liberado"
 Log-Message "LOG" "==============================================================="
@@ -24123,7 +24170,8 @@ Log-Message "LOG" "  SUPORTE E DIAGNÓSTICO ...... impressoras, rede, SQL, backu
 Log-Message "LOG" "  BUSCAR ..................... digite parte do nome do botão para achar mais rápido (Ctrl+F)"
 Log-Message "LOG" "  Passe o mouse sobre um botão para ver o que ele faz antes de clicar."
 Log-Message "LOG" "---------------------------------------------------------------"
-Log-Message "LOG" "NOVO NA v5.93"
+Log-Message "LOG" "NOVO NA v5.94"
+Log-Message "SUCESSO" "  Ping: botão Pingar IP em Suporte e Diagnóstico salva automaticamente o relatório na Área de Trabalho"
 Log-Message "SUCESSO" "  LPR: botões para ver o histórico de IP e conferir o nome da fila no computador da impressora"
 Log-Message "SUCESSO" "  LPR: histórico de trocas de IP por dia, diagnóstico sem avisos repetidos e limpeza automática após 30 dias"
 Log-Message "SUCESSO" "  Vídeos tutoriais: novo vídeo Cadastro de produto por cópia"
