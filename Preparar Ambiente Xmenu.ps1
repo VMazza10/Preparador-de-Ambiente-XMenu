@@ -1,5 +1,5 @@
 ﻿# =============================================================================
-# PREPARADOR XMENU v5.97
+# PREPARADOR XMENU v5.98
 # Visual: Dashboard Moderno
 # Correcoes:
 #   - CRITICO: Removido DoEvents do loop de evento de download (causava crash).
@@ -3582,6 +3582,56 @@ function Write-MovimentacaoAbertaTxt {
         $codigos[$nome] = $i
         if ($nome -eq 'IDParceiro') { $loja = $i }
     }
+    $camposPedido = [ordered]@{
+        'Cliente informado na entrega' = 'Cliente informado'
+        'Cliente cadastrado' = 'Cliente cadastrado'
+        NomeCliente = 'Cliente'
+        'Telefone da entrega' = 'Telefone'
+        'Entrega - Telefone' = 'Telefone informado'
+        'Entrega - Endereco' = 'Endereço informado'
+        'Rua cadastrada' = 'Rua'
+        'Entrega - Numero' = 'Número informado'
+        'Endereço cadastrado - Numero' = 'Número'
+        'Entrega - Complemento' = 'Complemento informado'
+        'Endereço cadastrado - Complemento' = 'Complemento'
+        'Entrega - Bairro' = 'Bairro informado'
+        'Bairro cadastrado' = 'Bairro'
+        'Entrega - EnderecoSolicitadoEntregaFacil' = 'Endereço solicitado'
+        'Entrega - Observacao' = 'Observação da entrega'
+        'Entrega - DeliveryMode' = 'Modalidade'
+        'Entrega - HorarioAgendamento' = 'Horário agendado'
+        'Entrega - TempoEntrega' = 'Prazo de entrega (min)'
+        'Entrega - DataSaida' = 'Saída para entrega'
+        'Entrega - DataHoraEntrega' = 'Data e hora da entrega'
+        'Entrega - DataRetorno' = 'Retorno da entrega'
+        'Entrega - Taxa' = 'Taxa de entrega'
+        'Entrega - Troco' = 'Troco informado'
+        'Entrega - ValorDesconto' = 'Desconto da entrega'
+        'ValorDescontoBalcao' = 'Desconto do balcão'
+        'Formas de pagamento registradas' = 'Pagamento'
+    }
+    $camposItem = [ordered]@{
+        Quantidade = 'Quantidade'
+        'Preço unitário' = 'Preço unitário'
+        'Valor do item' = 'Subtotal do item'
+        ValorTotalAdicionais = 'Valor dos adicionais'
+        ValorDescontoItem = 'Desconto do item'
+        Desconto = 'Desconto informado'
+        ValorServico = 'Serviço informado'
+        Observacao = 'Observação do item'
+        OBS = 'Observação do item'
+    }
+    $omitirZero = @('Entrega - Troco','Entrega - ValorDesconto','ValorDescontoBalcao',
+        'ValorTotalAdicionais','ValorDescontoItem','Desconto','ValorServico')
+    $lerTexto = {
+        param([string]$Campo)
+        if (-not $codigos.ContainsKey($Campo) -or $Leitor.IsDBNull($codigos[$Campo])) { return }
+        $valor = $Leitor.GetValue($codigos[$Campo])
+        if ($Campo -in $omitirZero -and $valor -eq 0) { return }
+        $texto = if ($valor -is [datetime]) { $valor.ToString('dd/MM/yyyy HH:mm:ss', $cultura) } else { [Convert]::ToString($valor, $cultura) }
+        if (-not [string]::IsNullOrWhiteSpace($texto)) { ($texto -replace '\r?\n|\r', ' / ').Trim() }
+    }
+    $dadosExibidos = [System.Collections.Generic.HashSet[string]]::new()
     $grupo = $null
     $total = 0
     while ($Leitor.Read()) {
@@ -3592,7 +3642,7 @@ function Write-MovimentacaoAbertaTxt {
         $temNumeroEntrega = $codigos.ContainsKey('Entrega') -and -not $Leitor.IsDBNull($codigos.Entrega)
         if ($temNumeroEntrega -or $numeroMesa -eq '-8888') {
             $categoria = 'Entrega'
-            if ($temNumeroEntrega) { $identificador = " | Entrega $($Leitor.GetValue($codigos.Entrega))" }
+            if ($temNumeroEntrega) { $identificador = "Entrega $($Leitor.GetValue($codigos.Entrega))" }
         }
         else {
             $nomeBalcao = if ($codigos.ContainsKey('NomeBalcao')) { "$($Leitor.GetValue($codigos.NomeBalcao))".Trim() } else { '' }
@@ -3609,28 +3659,46 @@ function Write-MovimentacaoAbertaTxt {
             }
             elseif ($numeroMesa -match '^[1-9]\d*$') {
                 $categoria = 'Mesa'
-                $identificador = " | Mesa $numeroMesa"
+                $identificador = "Mesa $numeroMesa"
             }
         }
         $numeroPedido = "$($Leitor.GetValue($pedido))".Trim()
         $cabecalho = $categoria
-        if ($numeroPedido -and $numeroPedido -ne "0") { $cabecalho += " | Pedido $numeroPedido" }
-        $cabecalho += $identificador
-        if ($loja -ge 0) { $cabecalho += " | Loja $($Leitor.GetValue($loja))" }
+        if ($temNumeroEntrega -or $categoria -eq 'Mesa') { $cabecalho = $identificador }
+        else { $cabecalho += $identificador }
+        if ($numeroPedido -and $numeroPedido -ne "0" -and (-not $temNumeroEntrega -or $numeroPedido -ne "$($Leitor.GetValue($codigos.Entrega))")) {
+            $cabecalho += " | Pedido $numeroPedido"
+        }
         $chave = "$cabecalho | $numeroMesa | $($Leitor.GetValue($guidPedido)) | $guidBalcao"
+        if ($loja -ge 0) { $chave += " | $($Leitor.GetValue($loja))" }
         if ($grupo -ne $chave) {
             $grupo = $chave
+            $dadosExibidos.Clear()
             $Saida.WriteLine()
             $Saida.WriteLine('================================================================')
             $Saida.WriteLine($cabecalho)
+            $data = & $lerTexto 'Entrega - DataRegistro'
+            if (-not $data) { $data = & $lerTexto 'Data e hora' }
+            if ($data) { $Saida.WriteLine("Registrado em $data") }
+        }
+        foreach ($campo in $camposPedido.Keys) {
+            $texto = & $lerTexto $campo
+            if ($texto -and $dadosExibidos.Add("$($camposPedido[$campo]): $texto")) {
+                $Saida.WriteLine("$($camposPedido[$campo]): $texto")
+            }
         }
         $Saida.WriteLine()
-        for ($i = 0; $i -lt $Leitor.FieldCount; $i++) {
-            if ($Leitor.IsDBNull($i)) { continue }
-            $valor = $Leitor.GetValue($i)
-            $texto = if ($valor -is [datetime]) { $valor.ToString('dd/MM/yyyy HH:mm:ss', $cultura) } else { [Convert]::ToString($valor, $cultura) }
-            if (-not [string]::IsNullOrWhiteSpace($texto)) {
-                $Saida.WriteLine(('{0}: {1}' -f $Leitor.GetName($i), ($texto -replace '\r?\n|\r', ' / ')))
+        $produto = & $lerTexto 'Produto'
+        $codigoProduto = & $lerTexto 'Código do produto'
+        if ($produto -and $codigoProduto) { $Saida.WriteLine("$produto (código $codigoProduto)") }
+        elseif ($produto) { $Saida.WriteLine($produto) }
+        elseif ($codigoProduto) { $Saida.WriteLine("Produto código $codigoProduto") }
+        else { $Saida.WriteLine('Produto sem identificação') }
+        $detalhesItem = [System.Collections.Generic.HashSet[string]]::new()
+        foreach ($campo in $camposItem.Keys) {
+            $texto = & $lerTexto $campo
+            if ($texto -and $detalhesItem.Add("$($camposItem[$campo]): $texto")) {
+                $Saida.WriteLine("  $($camposItem[$campo]): $texto")
             }
         }
         $total++
@@ -23590,7 +23658,7 @@ $formWidth = if ($screen.Width -lt 1200) { $screen.Width - 50 } else { 1200 }
 $formHeight = if ($screen.Height -lt 900) { $screen.Height - 50 } else { 900 }
 
 $form = New-Object System.Windows.Forms.Form
-$form.Text = "Preparador XMenu – Suporte Técnico v5.97"
+$form.Text = "Preparador XMenu – Suporte Técnico v5.98"
 $form.Size = New-Object System.Drawing.Size($formWidth, $formHeight)
 $form.StartPosition = "CenterScreen"
 $form.BackColor = [System.Drawing.Color]::FromArgb(25, 25, 30); $form.ForeColor = 'White'
@@ -24765,7 +24833,7 @@ $bRam.Add_Click({ Show-LiberarMemoria })
 [void]$tbl.Controls.Add($bRam)
 
 # Mensagem de abertura: explica o programa para quem abre pela primeira vez
-Log-Message "INFO" "Preparador XMenu v5.97 - preparo e suporte de computadores com o sistema XMenu"
+Log-Message "INFO" "Preparador XMenu v5.98 - preparo e suporte de computadores com o sistema XMenu"
 foreach ($msgSenha in $Script:LogSenhaPendente) { Log-Message "INFO" $msgSenha }
 Log-Message "INFO" "Senha de abertura: acesso liberado"
 Log-Message "LOG" "==============================================================="
@@ -24778,7 +24846,8 @@ Log-Message "LOG" "  SUPORTE E DIAGNÓSTICO ...... impressoras, rede, SQL, backu
 Log-Message "LOG" "  BUSCAR ..................... digite parte do nome do botão para achar mais rápido (Ctrl+F)"
 Log-Message "LOG" "  Passe o mouse sobre um botão para ver o que ele faz antes de clicar."
 Log-Message "LOG" "---------------------------------------------------------------"
-Log-Message "LOG" "NOVO NA v5.97"
+Log-Message "LOG" "NOVO NA v5.98"
+Log-Message "SUCESSO" "  Movimentação aberta: TXT para relançamento com dados do pedido agrupados e sem códigos internos"
 Log-Message "SUCESSO" "  Exportação: inclui entregas e balcões pendentes, telefone vinculado e formas de pagamento gravadas no Caixa"
 Log-Message "SUCESSO" "  Exportar movimentação: seleção de bancos e usuários SQL, exibição opcional da senha e comando no Log"
 Log-Message "SUCESSO" "  SQL: exporta a movimentação aberta em TXT para a Área de Trabalho"
