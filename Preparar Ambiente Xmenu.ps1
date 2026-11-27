@@ -1,5 +1,5 @@
 ﻿# =============================================================================
-# PREPARADOR XMENU v5.94
+# PREPARADOR XMENU v5.95
 # Visual: Dashboard Moderno
 # Correcoes:
 #   - CRITICO: Removido DoEvents do loop de evento de download (causava crash).
@@ -3365,6 +3365,266 @@ function Enable-PreenchedorAsync {
         return $false
     }
 }
+function Get-ConsultaMovimentacaoAberta {
+    param([hashtable]$Colunas)
+    $campos = [System.Collections.Generic.List[string]]::new()
+    $joins = [System.Collections.Generic.List[string]]::new()
+    $campos.AddRange([string[]]@(
+        'M.ID AS [Item]', 'M.IDProduto AS [Código do produto]', 'P.Nome AS [Produto]',
+        'M.Qtde AS [Quantidade]', 'M.Preco AS [Preço unitário]',
+        'CAST(M.Qtde * M.Preco AS decimal(19,2)) AS [Valor do item]',
+        'M.Mesa AS [Mesa]', 'M.MesaOriginal AS [Mesa original]', 'M.DataHoraVenda AS [Data e hora]',
+        'M.IDPedido AS [Pedido]', 'M.GUIDPedido AS [GUID do pedido]'
+    ))
+    $ligar = {
+        param($Tabela, $Alias, $Origem, $AliasOrigem, $Condicao)
+        $sql = "LEFT JOIN dbo.[$Tabela] $Alias ON $Condicao"
+        if ($Colunas[$Tabela] -contains 'IDParceiro' -and $Colunas[$Origem] -contains 'IDParceiro') {
+            $sql += " AND $Alias.IDParceiro = $AliasOrigem.IDParceiro"
+        }
+        $joins.Add($sql)
+    }
+    & $ligar Produtos P Movimentacao M 'P.ID = M.IDProduto'
+    if ($Colunas.Produtos -contains 'IDSubgrupo' -and $Colunas.SubGrupos -contains 'Nome' -and $Colunas.SubGrupos -contains 'ID') {
+        & $ligar SubGrupos S Produtos P 'S.ID = P.IDSubgrupo'
+        $campos.Add('S.Nome AS [Subgrupo]')
+    }
+    if ($Colunas.Produtos -contains 'IDLocalImpressao' -and $Colunas.LocalImpressao -contains 'Nome' -and $Colunas.LocalImpressao -contains 'ID') {
+        & $ligar LocalImpressao L Produtos P 'L.ID = P.IDLocalImpressao'
+        $campos.Add('L.Nome AS [Local de impressão]')
+    }
+    foreach ($col in 'IDParceiro','Terminal','Operador','Observacao','Desconto','NomeCliente','NomeBalcao','GUIDBalcao','OBS') {
+        if ($Colunas.Movimentacao -contains $col) { $campos.Add("M.[$col]") }
+    }
+    if ($Colunas.Pedidos -contains 'GUID' -and $Colunas.Pedidos -contains 'NomeBalcao') {
+        $guidPedidoValido = "PD.GUID = M.GUIDPedido AND NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(100), M.GUIDPedido))), '') IS NOT NULL AND CONVERT(nvarchar(100), M.GUIDPedido) <> '00000000-0000-0000-0000-000000000000'"
+        & $ligar Pedidos PD Movimentacao M $guidPedidoValido
+        $campos.Add('PD.NomeBalcao AS [Nome no pedido de balcão]')
+    }
+    $tabelaEntrega = 'Entregas'
+    if ($Colunas.Entregas -notcontains 'GUID' -or $Colunas.Entregas -notcontains 'ID') { $tabelaEntrega = 'EntregasRecebidas' }
+    $colsEntrega = $Colunas[$tabelaEntrega]
+    if ($colsEntrega -contains 'GUID' -and $colsEntrega -contains 'ID') {
+        $guid = "E.GUID = M.GUIDPedido AND NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(100), M.GUIDPedido))), '') IS NOT NULL AND CONVERT(nvarchar(100), M.GUIDPedido) <> '00000000-0000-0000-0000-000000000000'"
+        & $ligar $tabelaEntrega E Movimentacao M $guid
+        $campos.Add('E.ID AS [Entrega]')
+        foreach ($col in 'NomeCliente','Recebido','Troco','Taxa','DataRegistro','Endereco','Numero','Complemento','Bairro','Observacao','Telefone') {
+            if ($colsEntrega -contains $col) { $campos.Add("E.[$col] AS [Entrega - $col]") }
+        }
+        $cliente = if ($colsEntrega -contains 'GUIDCliente' -and $Colunas.Clientes -contains 'GUID') {
+            "C.GUID = E.GUIDCliente AND NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(100), E.GUIDCliente))), '') IS NOT NULL AND CONVERT(nvarchar(100), E.GUIDCliente) <> '00000000-0000-0000-0000-000000000000'"
+        } elseif ($colsEntrega -contains 'IDCliente' -and $Colunas.Clientes -contains 'ID') { 'C.ID = E.IDCliente AND E.IDCliente > 0' }
+        if ($cliente -and $Colunas.Clientes -contains 'Nome') {
+            & $ligar Clientes C $tabelaEntrega E $cliente
+            $campos.Add('C.Nome AS [Cliente cadastrado]')
+        }
+        if ($colsEntrega -contains 'IDClienteRua' -and $Colunas.ClientesRuas -contains 'ID') {
+            & $ligar ClientesRuas CR $tabelaEntrega E 'CR.ID = E.IDClienteRua AND E.IDClienteRua > 0'
+            foreach ($col in 'Numero','Complemento') {
+                if ($Colunas.ClientesRuas -contains $col) { $campos.Add("CR.[$col] AS [Endereço cadastrado - $col]") }
+            }
+            if ($Colunas.ClientesRuas -contains 'IDRua' -and $Colunas.Ruas -contains 'ID' -and $Colunas.Ruas -contains 'Nome') {
+                & $ligar Ruas R ClientesRuas CR 'R.ID = CR.IDRua'
+                $campos.Add('R.Nome AS [Rua cadastrada]')
+                if ($Colunas.Ruas -contains 'IDBairro' -and $Colunas.Bairros -contains 'ID' -and $Colunas.Bairros -contains 'Nome') {
+                    & $ligar Bairros B Ruas R 'B.ID = R.IDBairro'
+                    $campos.Add('B.Nome AS [Bairro cadastrado]')
+                }
+            }
+        }
+    }
+    $ordem = if ($Colunas.Movimentacao -contains 'IDParceiro') { 'M.IDParceiro, ' } else { '' }
+    $ordemBalcao = if ($Colunas.Movimentacao -contains 'GUIDBalcao') { ', M.GUIDBalcao' } else { '' }
+    @"
+SELECT $($campos -join ', ')
+FROM dbo.Movimentacao M
+$($joins -join [Environment]::NewLine)
+WHERE M.Finalizado = 0 AND M.Deletado = 0
+ORDER BY $($ordem)M.Mesa, M.IDPedido, M.GUIDPedido$ordemBalcao, M.DataHoraVenda, M.ID
+"@
+}
+
+function Write-MovimentacaoAbertaTxt {
+    param([System.Data.IDataReader]$Leitor, [System.IO.TextWriter]$Saida, [string]$Banco)
+    $cultura = [Globalization.CultureInfo]::GetCultureInfo('pt-BR')
+    $Saida.WriteLine('MOVIMENTAÇÃO ABERTA PARA RELANÇAMENTO')
+    $Saida.WriteLine(('Exportado em {0:dd/MM/yyyy HH:mm:ss} | Banco {1}' -f (Get-Date), $Banco))
+    $Saida.WriteLine('Itens em aberto e não excluídos. Dados de cliente e entrega aparecem quando vinculados ao item.')
+    $mesa = $Leitor.GetOrdinal('Mesa')
+    $pedido = $Leitor.GetOrdinal('Pedido')
+    $guidPedido = $Leitor.GetOrdinal('GUID do pedido')
+    $loja = -1
+    $codigos = @{}
+    for ($i = 0; $i -lt $Leitor.FieldCount; $i++) {
+        $nome = $Leitor.GetName($i)
+        $codigos[$nome] = $i
+        if ($nome -eq 'IDParceiro') { $loja = $i }
+    }
+    $grupo = $null
+    $total = 0
+    while ($Leitor.Read()) {
+        $guidBalcao = ''
+        $categoria = 'Tipo não identificado'
+        $identificador = ''
+        $numeroMesa = "$($Leitor.GetValue($mesa))".Trim()
+        if ($codigos.ContainsKey('Entrega') -and -not $Leitor.IsDBNull($codigos.Entrega)) {
+            $categoria = 'Entrega'
+            $identificador = " | Entrega $($Leitor.GetValue($codigos.Entrega))"
+        }
+        else {
+            $nomeBalcao = if ($codigos.ContainsKey('NomeBalcao')) { "$($Leitor.GetValue($codigos.NomeBalcao))".Trim() } else { '' }
+            if (-not $nomeBalcao -and $codigos.ContainsKey('Nome no pedido de balcão')) {
+                $nomeBalcao = "$($Leitor.GetValue($codigos['Nome no pedido de balcão']))".Trim()
+            }
+            $guidBalcao = if ($codigos.ContainsKey('GUIDBalcao')) { "$($Leitor.GetValue($codigos.GUIDBalcao))".Trim() } else { '' }
+            if ($nomeBalcao -or ($guidBalcao -and $guidBalcao -ne [guid]::Empty.ToString()) -or $numeroMesa -match '^balc[aã]o$') {
+                $categoria = 'Balcão'
+                if ($nomeBalcao) { $identificador = " | $nomeBalcao" }
+            }
+            elseif ($numeroMesa -match '^[1-9]\d*$') {
+                $categoria = 'Mesa'
+                $identificador = " | Mesa $numeroMesa"
+            }
+        }
+        $cabecalho = "$categoria | Pedido $($Leitor.GetValue($pedido))$identificador"
+        if ($loja -ge 0) { $cabecalho += " | Loja $($Leitor.GetValue($loja))" }
+        $chave = "$cabecalho | $numeroMesa | $($Leitor.GetValue($guidPedido)) | $guidBalcao"
+        if ($grupo -ne $chave) {
+            $grupo = $chave
+            $Saida.WriteLine()
+            $Saida.WriteLine('================================================================')
+            $Saida.WriteLine($cabecalho)
+        }
+        $Saida.WriteLine()
+        for ($i = 0; $i -lt $Leitor.FieldCount; $i++) {
+            if ($Leitor.IsDBNull($i)) { continue }
+            $valor = $Leitor.GetValue($i)
+            $texto = if ($valor -is [datetime]) { $valor.ToString('dd/MM/yyyy HH:mm:ss', $cultura) } else { [Convert]::ToString($valor, $cultura) }
+            if (-not [string]::IsNullOrWhiteSpace($texto)) {
+                $Saida.WriteLine(('{0}: {1}' -f $Leitor.GetName($i), ($texto -replace '\r?\n|\r', ' / ')))
+            }
+        }
+        $total++
+    }
+    $Saida.WriteLine()
+    $Saida.WriteLine("Total de itens exportados: $total")
+    return $total
+}
+
+function Export-MovimentacaoAberta {
+    param([string]$Conexao, [string]$Banco, [string]$Arquivo)
+    $ErrorActionPreference = 'Stop'
+    $sql = [System.Data.SqlClient.SqlConnection]::new($Conexao)
+    $temporario = "$Arquivo.tmp"
+    try {
+        $sql.Open()
+        $cmd = $sql.CreateCommand()
+        try {
+            $cmd.CommandTimeout = 120
+            $cmd.CommandText = @'
+SELECT TABLE_NAME, COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS
+WHERE TABLE_SCHEMA = 'dbo'
+  AND TABLE_NAME IN ('Movimentacao','Produtos','SubGrupos','LocalImpressao','Entregas','EntregasRecebidas','Pedidos','Clientes','ClientesRuas','Ruas','Bairros')
+'@
+            $colunas = @{}
+            $leitor = $cmd.ExecuteReader()
+            try {
+                while ($leitor.Read()) {
+                    $tabela = $leitor.GetString(0)
+                    if (-not $colunas.ContainsKey($tabela)) { $colunas[$tabela] = [System.Collections.Generic.List[string]]::new() }
+                    $colunas[$tabela].Add($leitor.GetString(1))
+                }
+            }
+            finally { $leitor.Dispose() }
+            $cmd.CommandText = Get-ConsultaMovimentacaoAberta $colunas
+            $leitor = $cmd.ExecuteReader()
+            try {
+                $saida = [System.IO.StreamWriter]::new($temporario, $false, [System.Text.UTF8Encoding]::new($true))
+                try { $total = Write-MovimentacaoAbertaTxt -Leitor $leitor -Saida $saida -Banco $Banco }
+                finally { $saida.Dispose() }
+            }
+            finally { $leitor.Dispose() }
+            [System.IO.File]::Move($temporario, $Arquivo)
+            return $total
+        }
+        finally { $cmd.Dispose() }
+    }
+    finally {
+        $sql.Dispose()
+        if ([System.IO.File]::Exists($temporario)) { [System.IO.File]::Delete($temporario) }
+    }
+}
+
+function Show-ExportarMovimentacaoAberta {
+    $f = New-ToolForm 'Exportar movimentação aberta' 510 285
+    $f.MaximizeBox = $false
+    $campos = @{}
+    $y = 20
+    foreach ($entrada in @(
+        @{ Nome = 'Servidor'; Valor = 'localhost' }
+        @{ Nome = 'Banco'; Valor = 'netwebpdv' }
+        @{ Nome = 'Usuário'; Valor = (Get-SqlUsuarioSalvo) }
+        @{ Nome = 'Senha'; Valor = (Get-SqlSenhaSalva) }
+    )) {
+        New-ToolLabel $f $entrada.Nome 20 $y 9 -W 85 | Out-Null
+        $campo = New-Object System.Windows.Forms.TextBox
+        $campo.SetBounds(110, $y, 365, 24)
+        $campo.UseSystemPasswordChar = ($entrada.Nome -eq 'Senha')
+        $campo.Text = $entrada.Valor
+        $f.Controls.Add($campo)
+        $campos[$entrada.Nome] = $campo
+        $y += 32
+    }
+    $status = New-ToolLabel $f 'O TXT será salvo na Área de Trabalho.' 20 150 9 -W 455
+    $status.Height = 45
+    $exportar = New-ToolButton $f 'EXPORTAR PARA A ÁREA DE TRABALHO' 20 198 340 34 $Script:UiAzul $null
+    $f.AcceptButton = $exportar
+    $f.Add_FormClosing({ param($s, $e) if ($s.Tag) { $e.Cancel = $true } })
+    $exportar.Add_Click({
+            $servidor = $campos.Servidor.Text.Trim()
+            $banco = $campos.Banco.Text.Trim()
+            if (-not $servidor -or -not $banco) { $status.Text = 'Preencha o servidor e o banco.'; return }
+            $f.Tag = $true
+            $exportar.Enabled = $false
+            foreach ($campo in $campos.Values) { $campo.Enabled = $false }
+            $status.Text = 'Consultando o SQL e preparando o relatório...'
+            $ps = [PowerShell]::Create()
+            try {
+                $cs = New-SqlTextoConexao -Servidor $servidor -Senha $campos.Senha.Text -Banco $banco -Usuario $campos['Usuário'].Text
+                $sufixo = [guid]::NewGuid().ToString('N').Substring(0, 8)
+                $arquivo = Join-Path $Script:DesktopPath "Movimentacao_Aberta_$(Get-Date -Format 'yyyyMMdd_HHmmss')_$sufixo.txt"
+                foreach ($nome in 'Get-ConsultaMovimentacaoAberta','Write-MovimentacaoAbertaTxt','Export-MovimentacaoAberta') {
+                    $def = (Get-Command $nome -CommandType Function -ErrorAction Stop).Definition
+                    [void]$ps.AddScript("function $nome {$def}").AddStatement()
+                }
+                [void]$ps.AddCommand('Export-MovimentacaoAberta').AddArgument($cs).AddArgument($banco).AddArgument($arquivo)
+                Log-Message 'INFO' 'Movimentação aberta: exportação iniciada.'
+                $espera = $ps.BeginInvoke()
+                while (-not $espera.IsCompleted) {
+                    [System.Windows.Forms.Application]::DoEvents()
+                    Start-Sleep -Milliseconds 40
+                }
+                $total = $ps.EndInvoke($espera)[0]
+                $status.Text = "$total item(ns) exportado(s). TXT salvo na Área de Trabalho."
+                Log-Message 'SUCESSO' "Movimentação aberta: $total item(ns) exportado(s) em $arquivo"
+                try { Start-Process notepad.exe -ArgumentList ('"{0}"' -f $arquivo) -ErrorAction Stop }
+                catch { Log-Message 'INFO' 'Movimentação aberta: abra o TXT na Área de Trabalho.' }
+            }
+            catch {
+                $status.Text = 'Não foi possível exportar. Consulte o Log.'
+                Log-Message 'ERRO' "Movimentação aberta: $($_.Exception.GetBaseException().Message)"
+            }
+            finally {
+                $ps.Dispose()
+                foreach ($campo in $campos.Values) { $campo.Enabled = $true }
+                $exportar.Enabled = $true
+                $f.Tag = $null
+            }
+        })
+    try { [void]$f.ShowDialog($Script:MainForm) }
+    finally { $f.Dispose() }
+}
+
 function Show-XmlDownloader {
     try {
         if ($null -ne $Script:XmlForm -and -not $Script:XmlForm.IsDisposed) {
@@ -23098,7 +23358,7 @@ $formWidth = if ($screen.Width -lt 1200) { $screen.Width - 50 } else { 1200 }
 $formHeight = if ($screen.Height -lt 900) { $screen.Height - 50 } else { 900 }
 
 $form = New-Object System.Windows.Forms.Form
-$form.Text = "Preparador XMenu – Suporte Técnico v5.94"
+$form.Text = "Preparador XMenu – Suporte Técnico v5.95"
 $form.Size = New-Object System.Drawing.Size($formWidth, $formHeight)
 $form.StartPosition = "CenterScreen"
 $form.BackColor = [System.Drawing.Color]::FromArgb(25, 25, 30); $form.ForeColor = 'White'
@@ -24079,6 +24339,14 @@ Add-SupportSpacer   # fecha a linha do grupo azul
 # Mostarda no mesmo tom fechado do verde e do vermelho, para o texto branco seguir legivel
 $colorSql = [System.Drawing.Color]::FromArgb(125, 95, 15)
 
+$bMovAberta = New-Object System.Windows.Forms.Button; $bMovAberta.Height = 50; $bMovAberta.Dock = 'Top'
+$bMovAberta.Text = "Exportar Movimentação Aberta"
+$bMovAberta.Cursor = 'Hand'
+Format-SupportBtn $bMovAberta $colorSql
+$Script:ToolTip.SetToolTip($bMovAberta, "Salva um TXT na Área de Trabalho com os itens em aberto, mesas, pedidos e dados de entrega disponíveis.")
+$bMovAberta.Add_Click({ Show-ExportarMovimentacaoAberta })
+[void]$tbl.Controls.Add($bMovAberta)
+
 $bXml = New-Object System.Windows.Forms.Button; $bXml.Height = 50; $bXml.Dock = 'Top'
 $bXml.Text = "Baixar XMLs NFC-e"
 $bXml.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
@@ -24264,7 +24532,7 @@ $bRam.Add_Click({ Show-LiberarMemoria })
 [void]$tbl.Controls.Add($bRam)
 
 # Mensagem de abertura: explica o programa para quem abre pela primeira vez
-Log-Message "INFO" "Preparador XMenu v5.94 - preparo e suporte de computadores com o sistema XMenu"
+Log-Message "INFO" "Preparador XMenu v5.95 - preparo e suporte de computadores com o sistema XMenu"
 foreach ($msgSenha in $Script:LogSenhaPendente) { Log-Message "INFO" $msgSenha }
 Log-Message "INFO" "Senha de abertura: acesso liberado"
 Log-Message "LOG" "==============================================================="
@@ -24277,7 +24545,8 @@ Log-Message "LOG" "  SUPORTE E DIAGNÓSTICO ...... impressoras, rede, SQL, backu
 Log-Message "LOG" "  BUSCAR ..................... digite parte do nome do botão para achar mais rápido (Ctrl+F)"
 Log-Message "LOG" "  Passe o mouse sobre um botão para ver o que ele faz antes de clicar."
 Log-Message "LOG" "---------------------------------------------------------------"
-Log-Message "LOG" "NOVO NA v5.94"
+Log-Message "LOG" "NOVO NA v5.95"
+Log-Message "SUCESSO" "  SQL: exporta a movimentação aberta em TXT para a Área de Trabalho"
 Log-Message "SUCESSO" "  Ping: botão Pingar IP em Suporte e Diagnóstico salva automaticamente o relatório na Área de Trabalho"
 Log-Message "SUCESSO" "  LPR: botões para ver o histórico de IP e conferir o nome da fila no computador da impressora"
 Log-Message "SUCESSO" "  LPR: histórico de trocas de IP por dia, diagnóstico sem avisos repetidos e limpeza automática após 30 dias"
