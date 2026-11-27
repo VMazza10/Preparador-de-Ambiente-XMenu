@@ -1,6 +1,6 @@
 ﻿# =============================================================================
 # PREPARADOR XMENU - VERSAO REVENDA
-# Baseado na v5.92
+# Baseado na v5.93
 # Alteracoes Revenda:
 #   - Wallpaper: um dos 3 fundos de revenda (Fundos/revenda-1..3.jpg), sorteado a cada preparo
 #   - Removido: Atalhos de Suporte e Pasta Netcontroll
@@ -17668,6 +17668,124 @@ catch { Log-Message 'ERRO' "LPR: falha ao limpar os logs antigos - $($_.Exceptio
     catch { Log-Message "ERRO" "LPR: não consegui criar a tarefa que corrige a porta LPR sozinha - $($_.Exception.Message)" }
 }
 
+function Get-HistoricoIpLpr {
+    param([string]$Pasta, [string]$Fila, [string]$Mac, [string]$Servidor)
+    if (-not (Test-Path -LiteralPath $Pasta -PathType Container)) { return }
+    $cultura = [Globalization.CultureInfo]::InvariantCulture
+    foreach ($arquivo in @(Get-ChildItem -LiteralPath $Pasta -File -Filter 'Trocas-IP_*.log*' -ErrorAction Stop)) {
+        if ($arquivo.Name -notmatch '^Trocas-IP_\d{4}-\d{2}-\d{2}\.log(?:\.old)?$') { continue }
+        foreach ($linha in (Get-Content -LiteralPath $arquivo.FullName -Encoding UTF8 -ErrorAction Stop)) {
+            if ($linha -notmatch '^\[(?<Data>\d{2}/\d{2}/\d{4} \d{2}:\d{2}:\d{2})\] \[TROCA DE IP\] Impressora\(s\): .*? \| Fila LPR: (?<Fila>.*?) \| IP: (?<De>.*?) -> (?<Para>.*?) \| MAC: (?<Mac>.*)$') { continue }
+            if ($Matches.Fila -ne $Fila) { continue }
+            if ($Mac) {
+                if (($Matches.Mac -replace '[:-]', '') -ne ($Mac -replace '[:-]', '')) { continue }
+            }
+            elseif ($Servidor -ne $Matches.De -and $Servidor -ne $Matches.Para) { continue }
+            $data = [datetime]::MinValue
+            if ([datetime]::TryParseExact($Matches.Data, 'dd/MM/yyyy HH:mm:ss', $cultura, [Globalization.DateTimeStyles]::None, [ref]$data)) {
+                [pscustomobject]@{ Data = $data; Linha = $linha }
+            }
+        }
+    }
+}
+
+function Show-RelatorioLpr {
+    param($Dono, [string]$Titulo, [string]$Texto, [string]$Pasta, [scriptblock]$AoAbrir)
+    $janela = New-ToolForm $Titulo 720 390
+    $campo = New-Object System.Windows.Forms.TextBox
+    $campo.Multiline = $true
+    $campo.ReadOnly = $true
+    $campo.ScrollBars = 'Vertical'
+    $campo.Dock = 'Fill'
+    $campo.BackColor = $Script:UiCartao
+    $campo.ForeColor = $Script:UiTexto
+    $campo.Text = $Texto
+    $janela.Controls.Add($campo)
+    if ($Pasta) {
+        $rodape = New-Object System.Windows.Forms.Panel
+        $rodape.Dock = 'Bottom'
+        $rodape.Height = 48
+        $janela.Controls.Add($rodape)
+        $janela.Tag = $Pasta
+        $abrir = New-ToolButton $janela 'ABRIR PASTA DOS LOGS' 10 7 210 34 $Script:UiAzul $null
+        $rodape.Controls.Add($abrir)
+        $abrir.Enabled = Test-Path -LiteralPath $Pasta -PathType Container
+        $abrir.Add_Click({
+                $pastaLogs = $this.FindForm().Tag
+                try { Start-Process explorer.exe -ArgumentList ('"{0}"' -f $pastaLogs) -ErrorAction Stop }
+                catch { Log-Message 'ERRO' 'LPR: falha ao abrir a pasta do histórico de IP.' }
+            })
+    }
+    try {
+        if ($AoAbrir) { & $AoAbrir $janela $campo }
+        [void]$janela.ShowDialog($Dono)
+    }
+    finally { $janela.Dispose() }
+}
+
+function Get-ResultadoFilaLpr {
+    param([string]$Fila, [string[]]$Compartilhadas)
+    if ($Compartilhadas -contains $Fila) { return 'Foi encontrada uma impressora compartilhada com o nome configurado.' }
+    if ($Compartilhadas.Count -eq 0) { return 'Nenhuma impressora compartilhada apareceu na consulta.' }
+    return 'O nome configurado não apareceu entre as impressoras compartilhadas.'
+}
+
+function Show-ConferenciaFilaLpr {
+    param($Dono, $Porta)
+    $consulta = {
+        param($Janela, $Campo)
+        $ps = [PowerShell]::Create()
+        [void]$ps.AddScript({
+                param($Servidor)
+                Get-Printer -ComputerName $Servidor -ErrorAction Stop |
+                    Where-Object { $_.Shared -and $_.ShareName } |
+                    ForEach-Object { $_.ShareName } | Sort-Object -Unique
+            }).AddArgument($Porta.Servidor)
+        try { $espera = $ps.BeginInvoke() }
+        catch { $ps.Dispose(); throw }
+        $timer = New-Object System.Windows.Forms.Timer
+        $timer.Interval = 150
+        $timer.Tag = @{
+            Ps = $ps; Espera = $espera; Campo = $Campo; Fila = $Porta.Fila
+            Cabecalho = "Computador: $($Porta.Servidor)\r\nFila configurada: $($Porta.Fila)".Replace('\r\n', [Environment]::NewLine)
+            Limite = [datetime]::UtcNow.AddSeconds(12); Cancelando = $false
+        }
+        $timer.Add_Tick({
+                $dados = $this.Tag
+                if (-not $dados.Espera.IsCompleted) {
+                    if ($dados.Cancelando -or [datetime]::UtcNow -lt $dados.Limite) { return }
+                    $dados.Cancelando = $true
+                    if (-not $dados.Campo.IsDisposed) {
+                        $dados.Campo.AppendText([Environment]::NewLine + 'A consulta excedeu 12 segundos. Confira se o computador permite consultar as impressoras remotamente.')
+                    }
+                    Log-Message 'INFO' 'LPR: a consulta ao compartilhamento da impressora excedeu o tempo limite.'
+                    [void]$dados.Ps.BeginStop($null, $null)
+                    return
+                }
+                $this.Stop()
+                try {
+                    $nomes = @($dados.Ps.EndInvoke($dados.Espera) | ForEach-Object { [string]$_ })
+                    if ($dados.Cancelando) { return }
+                    $resultado = Get-ResultadoFilaLpr -Fila $dados.Fila -Compartilhadas $nomes
+                    $texto = $dados.Cabecalho + [Environment]::NewLine * 2 + $resultado
+                    if ($nomes.Count) { $texto += [Environment]::NewLine * 2 + "Nomes de compartilhamento publicados:" + [Environment]::NewLine + ($nomes -join [Environment]::NewLine) }
+                    Log-Message 'INFO' "LPR: $($dados.Cabecalho -replace '\r?\n', ' | ') | $resultado"
+                    if (-not $dados.Campo.IsDisposed) { $dados.Campo.Text = $texto }
+                }
+                catch {
+                    if (-not $dados.Cancelando) {
+                        $resultado = 'O Windows não conseguiu consultar as impressoras desse computador. Confira o acesso remoto e as permissões.'
+                        Log-Message 'INFO' "LPR: $resultado"
+                        if (-not $dados.Campo.IsDisposed) { $dados.Campo.Text = $dados.Cabecalho + [Environment]::NewLine * 2 + $resultado }
+                    }
+                }
+                finally { $dados.Ps.Dispose(); $this.Dispose() }
+            })
+        $timer.Start()
+    }
+    Show-RelatorioLpr -Dono $Dono -Titulo 'Conferir fila LPR' -Texto 'Consultando as impressoras compartilhadas no computador selecionado...' -AoAbrir $consulta
+}
+
 function Show-PortasLpr {
     # Janela do PC de destino: lista as portas LPR, testa se o PC da impressora
     # responde e corrige a porta quando o IP dele mudou.
@@ -17687,9 +17805,37 @@ function Show-PortasLpr {
         New-ToolLabel $f "LPR COMPARTILHADA DESTE COMPUTADOR" 20 14 12 -Negrito | Out-Null
         New-ToolLabel $f "Quando o IP do PC com a impressora USB muda, a porta para de imprimir. Aqui você acha o PC de novo e corrige a porta, sem refazer a impressora." 20 42 9 -Cor $Script:UiSuave -W 830 | Out-Null
 
+        $btnHistoricoIp = New-ToolButton $f 'VER HISTÓRICO DE IP' 20 68 190 32 $Script:UiAzul $null
+        $btnConferirFila = New-ToolButton $f 'CONFERIR FILA LPR' 220 68 180 32 $Script:UiCinza $null
+        $btnHistoricoIp.Add_Click({
+                if ($Script:LprOcupado -or $lvLpr.SelectedItems.Count -eq 0) { return }
+                $porta = $lvLpr.SelectedItems[0].Tag
+                $pasta = Join-Path $env:ProgramFiles 'Preparador XMenu\CorrigirLpr\Logs\Trocas de IP'
+                try {
+                    $eventos = @(Get-HistoricoIpLpr -Pasta $pasta -Fila $porta.Fila -Mac $porta.Mac -Servidor $porta.Servidor | Sort-Object Data -Descending)
+                    $texto = "Fila LPR: $($porta.Fila)" + [Environment]::NewLine * 2
+                    if ($eventos.Count) { $texto += $eventos.Linha -join [Environment]::NewLine }
+                    else { $texto += 'Nenhuma troca de IP registrada para esta fila.' }
+                    Log-Message 'INFO' "LPR: histórico da fila $($porta.Fila) consultado ($($eventos.Count) troca(s))."
+                    Show-RelatorioLpr -Dono $f -Titulo 'Histórico de IP' -Texto $texto -Pasta $pasta
+                }
+                catch {
+                    Log-Message 'ERRO' 'LPR: falha ao ler o histórico de IP.'
+                    & $statusLpr 'Não foi possível ler o histórico de IP.' $Script:UiVermelho
+                }
+            })
+        $btnConferirFila.Add_Click({
+                if ($Script:LprOcupado -or $lvLpr.SelectedItems.Count -eq 0) { return }
+                try { Show-ConferenciaFilaLpr -Dono $f -Porta $lvLpr.SelectedItems[0].Tag }
+                catch {
+                    Log-Message 'ERRO' 'LPR: falha ao iniciar a conferência da fila.'
+                    & $statusLpr 'Não foi possível iniciar a conferência da fila.' $Script:UiVermelho
+                }
+            })
+
         $lvLpr = New-Object System.Windows.Forms.ListView
-        $lvLpr.Location = New-Object System.Drawing.Point(20, 74)
-        $lvLpr.Size = New-Object System.Drawing.Size(824, 264)
+        $lvLpr.Location = New-Object System.Drawing.Point(20, 108)
+        $lvLpr.Size = New-Object System.Drawing.Size(824, 230)
         $lvLpr.Anchor = 'Top,Left,Right,Bottom'
         $lvLpr.MultiSelect = $false
         Format-ToolListView $lvLpr
@@ -17756,6 +17902,8 @@ function Show-PortasLpr {
         $atualizaBotoesLpr = {
             $selLpr = $null
             if ($lvLpr.SelectedItems.Count -gt 0) { $selLpr = $lvLpr.SelectedItems[0].Tag }
+            $btnHistoricoIp.Enabled = ($null -ne $selLpr -and -not $Script:LprOcupado)
+            $btnConferirFila.Enabled = ($null -ne $selLpr -and $selLpr.Servidor -and $selLpr.Fila -and -not $Script:LprOcupado)
             $btnLprMac.Enabled = ($null -ne $selLpr -and "$($selLpr.Mac)" -ne "" -and -not $Script:LprOcupado)
             $btnLprTrocar.Enabled = ($null -ne $selLpr -and -not $Script:LprOcupado)
             $btnLprTeste.Enabled = ($null -ne $selLpr -and -not $Script:LprOcupado)
@@ -22799,7 +22947,7 @@ $formWidth = if ($screen.Width -lt 1000) { 900 } else { 1000 }
 $formHeight = if ($screen.Height -lt 800) { 700 } else { 800 }
 
 $form = New-Object System.Windows.Forms.Form
-$form.Text = "Preparador XMenu – Suporte Técnico v5.92 - REVENDA"
+$form.Text = "Preparador XMenu – Suporte Técnico v5.93 - REVENDA"
 $form.Size = New-Object System.Drawing.Size($formWidth, $formHeight)
 $form.StartPosition = "CenterScreen"
 $form.BackColor = [System.Drawing.Color]::FromArgb(25, 25, 30); $form.ForeColor = 'White'
@@ -23962,7 +24110,7 @@ $bRam.Add_Click({ Show-LiberarMemoria })
 [void]$tbl.Controls.Add($bRam)
 
 # Mensagem de abertura: explica o programa para quem abre pela primeira vez
-Log-Message "INFO" "Preparador XMenu v5.92 - REVENDA - preparo e suporte de computadores com o sistema XMenu"
+Log-Message "INFO" "Preparador XMenu v5.93 - REVENDA - preparo e suporte de computadores com o sistema XMenu"
 foreach ($msgSenha in $Script:LogSenhaPendente) { Log-Message "INFO" $msgSenha }
 Log-Message "INFO" "Senha de abertura: acesso liberado"
 Log-Message "LOG" "==============================================================="
@@ -23975,7 +24123,8 @@ Log-Message "LOG" "  SUPORTE E DIAGNÓSTICO ...... impressoras, rede, SQL, backu
 Log-Message "LOG" "  BUSCAR ..................... digite parte do nome do botão para achar mais rápido (Ctrl+F)"
 Log-Message "LOG" "  Passe o mouse sobre um botão para ver o que ele faz antes de clicar."
 Log-Message "LOG" "---------------------------------------------------------------"
-Log-Message "LOG" "NOVO NA v5.92"
+Log-Message "LOG" "NOVO NA v5.93"
+Log-Message "SUCESSO" "  LPR: botões para ver o histórico de IP e conferir o nome da fila no computador da impressora"
 Log-Message "SUCESSO" "  LPR: histórico de trocas de IP por dia, diagnóstico sem avisos repetidos e limpeza automática após 30 dias"
 Log-Message "SUCESSO" "  Vídeos tutoriais: novo vídeo Cadastro de produto por cópia"
 Log-Message "SUCESSO" "  LPR: cliente que já tinha LPR ganha a tarefa 'Preparador XMenu - Corrigir LPR' só de abrir o Preparador (e ela se atualiza sozinha quando sai versão nova); PC sem LPR não muda nada"
