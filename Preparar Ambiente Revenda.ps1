@@ -1,6 +1,6 @@
 ﻿# =============================================================================
 # PREPARADOR XMENU - VERSAO REVENDA
-# Baseado na v5.95
+# Baseado na v5.96
 # Alteracoes Revenda:
 #   - Wallpaper: um dos 3 fundos de revenda (Fundos/revenda-1..3.jpg), sorteado a cada preparo
 #   - Removido: Atalhos de Suporte e Pasta Netcontroll
@@ -3433,12 +3433,46 @@ function Get-ConsultaMovimentacaoAberta {
         }
     }
     $ordem = if ($Colunas.Movimentacao -contains 'IDParceiro') { 'M.IDParceiro, ' } else { '' }
+    $filtro = 'M.Finalizado = 0'
+    $requisitosStatus = @('IDParceiro','Mesa','Tipo','DataFechamento','dataRegistro')
+    if (@($requisitosStatus | Where-Object { $Colunas.StatusMesa -notcontains $_ }).Count -eq 0 -and
+        $Colunas.Movimentacao -contains 'IDParceiro') {
+        $mesa = [System.Collections.Generic.List[string]]::new()
+        $mesa.Add('M.Mesa > 0')
+        if ($colsEntrega -contains 'GUID' -and $colsEntrega -contains 'ID') { $mesa.Add('E.ID IS NULL') }
+        if ($Colunas.Movimentacao -contains 'NomeBalcao') {
+            $mesa.Add("NULLIF(LTRIM(RTRIM(M.NomeBalcao)), '') IS NULL")
+        }
+        if ($Colunas.Movimentacao -contains 'GUIDBalcao') {
+            $mesa.Add("(M.GUIDBalcao IS NULL OR M.GUIDBalcao = '00000000-0000-0000-0000-000000000000')")
+        }
+        if ($Colunas.Pedidos -contains 'GUID' -and $Colunas.Pedidos -contains 'NomeBalcao') {
+            $mesa.Add("NULLIF(LTRIM(RTRIM(PD.NomeBalcao)), '') IS NULL")
+        }
+        $ehMesa = $mesa -join ' AND '
+        # Uma venda posterior ao registro de fechamento pertence a uma nova abertura.
+        $filtro = @"
+CASE
+    WHEN ($ehMesa) THEN
+        CASE WHEN EXISTS (
+            SELECT 1
+            FROM dbo.StatusMesa AS SM
+            WHERE SM.IDParceiro = M.IDParceiro AND SM.Mesa = M.Mesa
+              AND SM.Tipo = 2 AND SM.DataFechamento IS NOT NULL
+              AND (M.DataHoraVenda IS NULL OR M.DataHoraVenda <= SM.dataRegistro OR
+                   M.DataHoraVenda < DATEADD(second, 1, SM.DataFechamento))
+        ) THEN 0 ELSE 1 END
+    WHEN M.Finalizado = 0 THEN 1
+    ELSE 0
+END = 1
+"@
+    }
     $ordemBalcao = if ($Colunas.Movimentacao -contains 'GUIDBalcao') { ', M.GUIDBalcao' } else { '' }
     @"
 SELECT $($campos -join ', ')
 FROM dbo.Movimentacao M
 $($joins -join [Environment]::NewLine)
-WHERE M.Finalizado = 0 AND M.Deletado = 0
+WHERE M.Deletado = 0 AND ($filtro)
 ORDER BY $($ordem)M.Mesa, M.IDPedido, M.GUIDPedido$ordemBalcao, M.DataHoraVenda, M.ID
 "@
 }
@@ -3507,14 +3541,18 @@ function Write-MovimentacaoAbertaTxt {
     }
     $Saida.WriteLine()
     $Saida.WriteLine("Total de itens exportados: $total")
+    if ($total -eq 0) {
+        $Saida.WriteLine('Nenhum item correspondeu ao filtro de movimentação aberta neste banco.')
+        $Saida.WriteLine('Se o PDV exibir mesas abertas, confira se este é o banco consultado pelo PDV.')
+    }
     return $total
 }
 
 function Export-MovimentacaoAberta {
-    param([string]$Conexao, [string]$Banco, [string]$Arquivo)
+    param([string]$Conexao, [string]$Banco, [string]$Arquivo, [hashtable]$Execucao)
     $ErrorActionPreference = 'Stop'
     $sql = [System.Data.SqlClient.SqlConnection]::new($Conexao)
-    $temporario = "$Arquivo.tmp"
+    $temporario = "$Arquivo.$([guid]::NewGuid().ToString('N')).tmp"
     try {
         $sql.Open()
         $cmd = $sql.CreateCommand()
@@ -3523,7 +3561,7 @@ function Export-MovimentacaoAberta {
             $cmd.CommandText = @'
 SELECT TABLE_NAME, COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS
 WHERE TABLE_SCHEMA = 'dbo'
-  AND TABLE_NAME IN ('Movimentacao','Produtos','SubGrupos','LocalImpressao','Entregas','EntregasRecebidas','Pedidos','Clientes','ClientesRuas','Ruas','Bairros')
+  AND TABLE_NAME IN ('Movimentacao','Produtos','SubGrupos','LocalImpressao','Entregas','EntregasRecebidas','Pedidos','StatusMesa','Clientes','ClientesRuas','Ruas','Bairros')
 '@
             $colunas = @{}
             $leitor = $cmd.ExecuteReader()
@@ -3536,6 +3574,7 @@ WHERE TABLE_SCHEMA = 'dbo'
             }
             finally { $leitor.Dispose() }
             $cmd.CommandText = Get-ConsultaMovimentacaoAberta $colunas
+            $Execucao.Consulta = $cmd.CommandText
             $leitor = $cmd.ExecuteReader()
             try {
                 $saida = [System.IO.StreamWriter]::new($temporario, $false, [System.Text.UTF8Encoding]::new($true))
@@ -3555,7 +3594,7 @@ WHERE TABLE_SCHEMA = 'dbo'
 }
 
 function Show-ExportarMovimentacaoAberta {
-    $f = New-ToolForm 'Exportar movimentação aberta' 510 285
+    $f = New-ToolForm 'Exportar movimentação aberta' 520 325
     $f.MaximizeBox = $false
     $campos = @{}
     $y = 20
@@ -3566,19 +3605,101 @@ function Show-ExportarMovimentacaoAberta {
         @{ Nome = 'Senha'; Valor = (Get-SqlSenhaSalva) }
     )) {
         New-ToolLabel $f $entrada.Nome 20 $y 9 -W 85 | Out-Null
-        $campo = New-Object System.Windows.Forms.TextBox
+        if ($entrada.Nome -in @('Banco','Usuário')) {
+            $campo = New-Object System.Windows.Forms.ComboBox
+            $campo.DropDownStyle = 'DropDown'
+            $campo.DropDownWidth = 365
+        }
+        else {
+            $campo = New-Object System.Windows.Forms.TextBox
+            $campo.UseSystemPasswordChar = ($entrada.Nome -eq 'Senha')
+        }
         $campo.SetBounds(110, $y, 365, 24)
-        $campo.UseSystemPasswordChar = ($entrada.Nome -eq 'Senha')
         $campo.Text = $entrada.Valor
         $f.Controls.Add($campo)
         $campos[$entrada.Nome] = $campo
         $y += 32
     }
-    $status = New-ToolLabel $f 'O TXT será salvo na Área de Trabalho.' 20 150 9 -W 455
-    $status.Height = 45
-    $exportar = New-ToolButton $f 'EXPORTAR PARA A ÁREA DE TRABALHO' 20 198 340 34 $Script:UiAzul $null
+    foreach ($usuario in $Script:SqlUsuariosPadrao) { [void]$campos['Usuário'].Items.Add($usuario) }
+    [void]$campos.Banco.Items.Add('netwebpdv')
+    $visivel = New-Object System.Windows.Forms.CheckBox
+    $visivel.Text = 'Mostrar senha'
+    $visivel.SetBounds(110, 153, 145, 27)
+    $visivel.Add_CheckedChanged({ param($s, $e) $campos.Senha.UseSystemPasswordChar = -not $s.Checked })
+    $f.Controls.Add($visivel)
+    $listar = New-ToolButton $f 'LISTAR BANCOS E USUÁRIOS' 266 150 209 30 $Script:UiCinza $null
+    $status = New-ToolLabel $f 'O TXT será salvo na Área de Trabalho.' 20 188 9 -W 455
+    $status.Height = 42
+    $exportar = New-ToolButton $f 'EXPORTAR PARA A ÁREA DE TRABALHO' 20 235 340 34 $Script:UiAzul $null
     $f.AcceptButton = $exportar
     $f.Add_FormClosing({ param($s, $e) if ($s.Tag) { $e.Cancel = $true } })
+    $listar.Add_Click({
+            if ($f.Tag) { return }
+            $f.Tag = $true
+            $controles = @($campos.Values) + @($listar, $exportar)
+            foreach ($controle in $controles) { $controle.Enabled = $false }
+            $status.Text = 'Consultando bancos e usuários no servidor...'
+            $cn = $null
+            try {
+                $usuario = $campos['Usuário'].Text
+                $cs = New-SqlTextoConexao -Servidor $campos.Servidor.Text -Senha $campos.Senha.Text -Banco 'master' -Usuario $usuario
+                $cn = [System.Data.SqlClient.SqlConnection]::new($cs)
+                Wait-SqlTarefa ($cn.OpenAsync())
+                $cmd = $cn.CreateCommand()
+                try {
+                    $cmd.CommandTimeout = 12
+                    $cmd.CommandText = @'
+SELECT name FROM sys.databases
+WHERE database_id > 4 AND state = 0 AND source_database_id IS NULL AND HAS_DBACCESS(name) = 1
+ORDER BY name;
+SELECT name FROM sys.sql_logins WHERE is_disabled = 0 ORDER BY name;
+'@
+                    Log-SqlBancoComando 'Movimentação aberta' $cmd.CommandText
+                    $leitura = $cmd.ExecuteReaderAsync()
+                    Wait-SqlTarefa $leitura
+                    $reader = $leitura.Result
+                    $bancos = [System.Collections.Generic.List[string]]::new()
+                    $usuarios = [System.Collections.Generic.List[string]]::new()
+                    try {
+                        foreach ($destino in @($bancos, $usuarios)) {
+                            do {
+                                $avanco = $reader.ReadAsync()
+                                Wait-SqlTarefa $avanco
+                                if ($avanco.Result) { $destino.Add($reader.GetString(0)) }
+                            } while ($avanco.Result)
+                            $proximo = $reader.NextResultAsync()
+                            Wait-SqlTarefa $proximo
+                        }
+                    }
+                    finally { $reader.Dispose() }
+                }
+                finally { $cmd.Dispose() }
+                $bancoAntes = $campos.Banco.Text
+                $campos.Banco.Items.Clear()
+                foreach ($banco in $bancos) { [void]$campos.Banco.Items.Add($banco) }
+                if ($bancos.Contains($bancoAntes) -or $bancos.Count -eq 0) { $campos.Banco.Text = $bancoAntes }
+                elseif ($bancos.Contains('netwebpdv')) { $campos.Banco.SelectedItem = 'netwebpdv' }
+                elseif ($bancos.Count -eq 1) { $campos.Banco.SelectedIndex = 0 }
+                else { $campos.Banco.Text = '' }
+                $campos['Usuário'].Items.Clear()
+                foreach ($login in @($Script:SqlUsuariosPadrao) + @($usuarios.ToArray()) | Sort-Object -Unique) {
+                    [void]$campos['Usuário'].Items.Add($login)
+                }
+                $campos['Usuário'].Text = $usuario
+                $status.Text = if ($bancos.Count) { 'Selecione o banco e o usuário para exportar.' } else { 'Nenhum banco de usuário acessível foi encontrado.' }
+                Log-Message 'INFO' "Movimentação aberta: $($bancos.Count) banco(s) e $($usuarios.Count) login(s) SQL encontrados."
+            }
+            catch {
+                $status.Text = 'Falha ao listar. Confira servidor, usuário e senha e tente novamente.'
+                Log-Message 'ERRO' "Movimentação aberta: falha ao listar opções SQL. $($_.Exception.GetBaseException().Message)"
+            }
+            finally {
+                if ($cn) { $cn.Dispose() }
+                foreach ($controle in $controles) { $controle.Enabled = $true }
+                $f.Tag = $null
+            }
+        })
+    $f.Add_Shown({ if ($campos.Senha.Text) { $listar.PerformClick() } })
     $exportar.Add_Click({
             $servidor = $campos.Servidor.Text.Trim()
             $banco = $campos.Banco.Text.Trim()
@@ -3586,17 +3707,24 @@ function Show-ExportarMovimentacaoAberta {
             $f.Tag = $true
             $exportar.Enabled = $false
             foreach ($campo in $campos.Values) { $campo.Enabled = $false }
+            $listar.Enabled = $false
+            $execucao = [hashtable]::Synchronized(@{ Consulta = '' })
             $status.Text = 'Consultando o SQL e preparando o relatório...'
             $ps = [PowerShell]::Create()
             try {
                 $cs = New-SqlTextoConexao -Servidor $servidor -Senha $campos.Senha.Text -Banco $banco -Usuario $campos['Usuário'].Text
-                $sufixo = [guid]::NewGuid().ToString('N').Substring(0, 8)
-                $arquivo = Join-Path $Script:DesktopPath "Movimentacao_Aberta_$(Get-Date -Format 'yyyyMMdd_HHmmss')_$sufixo.txt"
+                $nome = "Movimentação aberta - $(Get-Date -Format "dd-MM-yyyy HH'h'mm")"
+                $arquivo = Join-Path $Script:DesktopPath "$nome.txt"
+                $numero = 2
+                while (Test-Path -LiteralPath $arquivo) {
+                    $arquivo = Join-Path $Script:DesktopPath "$nome ($numero).txt"
+                    $numero++
+                }
                 foreach ($nome in 'Get-ConsultaMovimentacaoAberta','Write-MovimentacaoAbertaTxt','Export-MovimentacaoAberta') {
                     $def = (Get-Command $nome -CommandType Function -ErrorAction Stop).Definition
                     [void]$ps.AddScript("function $nome {$def}").AddStatement()
                 }
-                [void]$ps.AddCommand('Export-MovimentacaoAberta').AddArgument($cs).AddArgument($banco).AddArgument($arquivo)
+                [void]$ps.AddCommand('Export-MovimentacaoAberta').AddArgument($cs).AddArgument($banco).AddArgument($arquivo).AddArgument($execucao)
                 Log-Message 'INFO' 'Movimentação aberta: exportação iniciada.'
                 $espera = $ps.BeginInvoke()
                 while (-not $espera.IsCompleted) {
@@ -3604,8 +3732,14 @@ function Show-ExportarMovimentacaoAberta {
                     Start-Sleep -Milliseconds 40
                 }
                 $total = $ps.EndInvoke($espera)[0]
-                $status.Text = "$total item(ns) exportado(s). TXT salvo na Área de Trabalho."
-                Log-Message 'SUCESSO' "Movimentação aberta: $total item(ns) exportado(s) em $arquivo"
+                if ($total -eq 0) {
+                    $status.Text = 'Nenhum item correspondeu ao filtro neste banco. Confira o banco usado pelo PDV.'
+                    Log-Message 'INFO' "Movimentação aberta: zero itens em $servidor / $banco."
+                }
+                else {
+                    $status.Text = "$total item(ns) exportado(s). TXT salvo na Área de Trabalho."
+                    Log-Message 'SUCESSO' "Movimentação aberta: $total item(ns) exportado(s) em $arquivo"
+                }
                 try { Start-Process notepad.exe -ArgumentList ('"{0}"' -f $arquivo) -ErrorAction Stop }
                 catch { Log-Message 'INFO' 'Movimentação aberta: abra o TXT na Área de Trabalho.' }
             }
@@ -3615,6 +3749,8 @@ function Show-ExportarMovimentacaoAberta {
             }
             finally {
                 $ps.Dispose()
+                if ($execucao.Consulta) { Log-SqlBancoComando 'Movimentação aberta' $execucao.Consulta -Completo }
+                $listar.Enabled = $true
                 foreach ($campo in $campos.Values) { $campo.Enabled = $true }
                 $exportar.Enabled = $true
                 $f.Tag = $null
@@ -7040,8 +7176,9 @@ function Format-SqlLogTexto {
 }
 
 function Log-SqlBancoComando {
-    param([string]$Area, [string]$Sql, [string]$Detalhe = "")
-    $msg = "${Area}: SQL -> $(Format-SqlLogTexto $Sql)"
+    param([string]$Area, [string]$Sql, [string]$Detalhe = "", [switch]$Completo)
+    $comando = if ($Completo) { ($Sql -replace "\s+", " ").Trim() } else { Format-SqlLogTexto $Sql }
+    $msg = "${Area}: SQL -> $comando"
     if ("$Detalhe".Trim() -ne "") { $msg += " | $Detalhe" }
     Log-Message "INFO" $msg
 }
@@ -23254,7 +23391,7 @@ $formWidth = if ($screen.Width -lt 1000) { 900 } else { 1000 }
 $formHeight = if ($screen.Height -lt 800) { 700 } else { 800 }
 
 $form = New-Object System.Windows.Forms.Form
-$form.Text = "Preparador XMenu – Suporte Técnico v5.95 - REVENDA"
+$form.Text = "Preparador XMenu – Suporte Técnico v5.96 - REVENDA"
 $form.Size = New-Object System.Drawing.Size($formWidth, $formHeight)
 $form.StartPosition = "CenterScreen"
 $form.BackColor = [System.Drawing.Color]::FromArgb(25, 25, 30); $form.ForeColor = 'White'
@@ -24235,14 +24372,6 @@ Add-SupportSpacer   # fecha a linha do grupo azul
 # Mostarda no mesmo tom fechado do verde e do vermelho, para o texto branco seguir legivel
 $colorSql = [System.Drawing.Color]::FromArgb(125, 95, 15)
 
-$bMovAberta = New-Object System.Windows.Forms.Button; $bMovAberta.Height = 50; $bMovAberta.Dock = 'Top'
-$bMovAberta.Text = "Exportar Movimentação Aberta"
-$bMovAberta.Cursor = 'Hand'
-Format-SupportBtn $bMovAberta $colorSql
-$Script:ToolTip.SetToolTip($bMovAberta, "Salva um TXT na Área de Trabalho com os itens em aberto, mesas, pedidos e dados de entrega disponíveis.")
-$bMovAberta.Add_Click({ Show-ExportarMovimentacaoAberta })
-[void]$tbl.Controls.Add($bMovAberta)
-
 $bXml = New-Object System.Windows.Forms.Button; $bXml.Height = 50; $bXml.Dock = 'Top'
 $bXml.Text = "Baixar XMLs NFC-e"
 $bXml.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
@@ -24287,6 +24416,15 @@ Format-SupportBtn $bIdx $colorSql
 $Script:ToolTip.SetToolTip($bIdx, "Consulta as sugestões de índices do SQL Server, permite copiar o SQL e cria somente os índices marcados após confirmação.")
 $bIdx.Add_Click({ Show-SqlIndexAdvisor })
 [void]$tbl.Controls.Add($bIdx)
+
+$bMovAberta = New-Object System.Windows.Forms.Button; $bMovAberta.Height = 50; $bMovAberta.Dock = 'Top'
+$bMovAberta.Text = "Exportar Movimentação Aberta"
+$bMovAberta.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
+$bMovAberta.Cursor = 'Hand'
+Format-SupportBtn $bMovAberta $colorSql
+$Script:ToolTip.SetToolTip($bMovAberta, "Salva um TXT na Área de Trabalho com os itens em aberto, mesas, pedidos e dados de entrega disponíveis.")
+$bMovAberta.Add_Click({ Show-ExportarMovimentacaoAberta })
+[void]$tbl.Controls.Add($bMovAberta)
 Add-SupportSpacer
 
 # --- DIAGNÓSTICOS (VERDE) ---
@@ -24425,7 +24563,7 @@ $bRam.Add_Click({ Show-LiberarMemoria })
 [void]$tbl.Controls.Add($bRam)
 
 # Mensagem de abertura: explica o programa para quem abre pela primeira vez
-Log-Message "INFO" "Preparador XMenu v5.95 - REVENDA - preparo e suporte de computadores com o sistema XMenu"
+Log-Message "INFO" "Preparador XMenu v5.96 - REVENDA - preparo e suporte de computadores com o sistema XMenu"
 foreach ($msgSenha in $Script:LogSenhaPendente) { Log-Message "INFO" $msgSenha }
 Log-Message "INFO" "Senha de abertura: acesso liberado"
 Log-Message "LOG" "==============================================================="
@@ -24438,7 +24576,8 @@ Log-Message "LOG" "  SUPORTE E DIAGNÓSTICO ...... impressoras, rede, SQL, backu
 Log-Message "LOG" "  BUSCAR ..................... digite parte do nome do botão para achar mais rápido (Ctrl+F)"
 Log-Message "LOG" "  Passe o mouse sobre um botão para ver o que ele faz antes de clicar."
 Log-Message "LOG" "---------------------------------------------------------------"
-Log-Message "LOG" "NOVO NA v5.95"
+Log-Message "LOG" "NOVO NA v5.96"
+Log-Message "SUCESSO" "  Exportar movimentação: seleção de bancos e usuários SQL, exibição opcional da senha e comando no Log"
 Log-Message "SUCESSO" "  SQL: exporta a movimentação aberta em TXT para a Área de Trabalho"
 Log-Message "SUCESSO" "  Ping: botão Pingar IP em Suporte e Diagnóstico salva automaticamente o relatório na Área de Trabalho"
 Log-Message "SUCESSO" "  LPR: botões para ver o histórico de IP e conferir o nome da fila no computador da impressora"
